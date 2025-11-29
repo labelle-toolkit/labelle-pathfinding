@@ -5,6 +5,10 @@
 //! index that provides the required interface.
 
 const std = @import("std");
+const labelle = @import("labelle");
+
+/// Re-export Position from labelle for convenience
+pub const Position = labelle.Position;
 
 pub const MovementNodeControllerError = error{EmptyQuadTree};
 
@@ -15,24 +19,6 @@ pub const EntityPosition = struct {
     y: f32,
 };
 
-/// Generic 2D vector for position calculations
-pub const Vector2 = struct {
-    x: f32 = 0,
-    y: f32 = 0,
-
-    pub fn distance(self: Vector2, other: Vector2) f32 {
-        const dx = self.x - other.x;
-        const dy = self.y - other.y;
-        return @sqrt(dx * dx + dy * dy);
-    }
-
-    pub fn distanceSqr(self: Vector2, other: Vector2) f32 {
-        const dx = self.x - other.x;
-        const dy = self.y - other.y;
-        return dx * dx + dy * dy;
-    }
-};
-
 /// Rectangle for spatial queries
 pub const Rectangle = struct {
     x: f32,
@@ -40,6 +26,20 @@ pub const Rectangle = struct {
     width: f32,
     height: f32,
 };
+
+/// Calculate distance between two positions
+pub fn distance(a: Position, b: Position) f32 {
+    const dx = a.x - b.x;
+    const dy = a.y - b.y;
+    return @sqrt(dx * dx + dy * dy);
+}
+
+/// Calculate squared distance between two positions (faster, no sqrt)
+pub fn distanceSqr(a: Position, b: Position) f32 {
+    const dx = a.x - b.x;
+    const dy = a.y - b.y;
+    return dx * dx + dy * dy;
+}
 
 /// Interface that quad trees must implement for spatial queries
 pub fn QuadTreeInterface(comptime Self: type) type {
@@ -61,11 +61,11 @@ pub fn MovementNodeController(comptime QuadTree: type) type {
         /// Find the closest movement node to a position, using a provided buffer
         pub fn getClosestMovementNodeWithBuffer(
             quad_tree: *QuadTree,
-            position: Vector2,
+            pos: Position,
             buffer: *std.array_list.Managed(EntityPosition),
         ) !EntityPosition {
             try quad_tree.queryOnBuffer(
-                .{ .x = position.x - 40, .y = position.y - 10, .width = 80, .height = 100 },
+                .{ .x = pos.x - 40, .y = pos.y - 10, .width = 80, .height = 100 },
                 buffer,
             );
             if (buffer.items.len == 0) {
@@ -76,8 +76,8 @@ pub fn MovementNodeController(comptime QuadTree: type) type {
             var closest_node: EntityPosition = buffer.items[0];
 
             for (buffer.items) |entity_position| {
-                const entity_vec = Vector2{ .x = entity_position.x, .y = entity_position.y };
-                const new_distance = position.distance(entity_vec);
+                const entity_pos = Position{ .x = entity_position.x, .y = entity_position.y };
+                const new_distance = distance(pos, entity_pos);
                 if (new_distance < current_distance) {
                     closest_node = entity_position;
                     current_distance = new_distance;
@@ -92,13 +92,13 @@ pub fn MovementNodeController(comptime QuadTree: type) type {
         /// Find the closest movement node to a position, allocating a temporary buffer
         pub fn getClosestMovementNode(
             quad_tree: *QuadTree,
-            position: Vector2,
+            pos: Position,
             allocator: std.mem.Allocator,
         ) !EntityPosition {
             var buffer = EntityPositionList.init(allocator);
             defer buffer.deinit();
 
-            return getClosestMovementNodeWithBuffer(quad_tree, position, &buffer);
+            return getClosestMovementNodeWithBuffer(quad_tree, pos, &buffer);
         }
     };
 }
@@ -125,9 +125,9 @@ test "MovementNodeController finds closest node" {
     };
 
     var mock = MockQuadTree{ .items = &items };
-    const position = Vector2{ .x = 0, .y = 0 };
+    const pos = Position{ .x = 0, .y = 0 };
 
-    const result = try Controller.getClosestMovementNode(&mock, position, std.testing.allocator);
+    const result = try Controller.getClosestMovementNode(&mock, pos, std.testing.allocator);
 
     try std.testing.expectEqual(@as(u32, 3), result.entity);
 }
@@ -136,17 +136,17 @@ test "MovementNodeController returns error on empty quad tree" {
     const Controller = MovementNodeController(MockQuadTree);
 
     var mock = MockQuadTree{ .items = &.{} };
-    const position = Vector2{ .x = 0, .y = 0 };
+    const pos = Position{ .x = 0, .y = 0 };
 
-    const result = Controller.getClosestMovementNode(&mock, position, std.testing.allocator);
+    const result = Controller.getClosestMovementNode(&mock, pos, std.testing.allocator);
 
     try std.testing.expectError(error.EmptyQuadTree, result);
 }
 
-test "Vector2 distance calculation" {
-    const a = Vector2{ .x = 0, .y = 0 };
-    const b = Vector2{ .x = 3, .y = 4 };
+test "distance calculation" {
+    const a = Position{ .x = 0, .y = 0 };
+    const b = Position{ .x = 3, .y = 4 };
 
-    try std.testing.expectEqual(@as(f32, 5.0), a.distance(b));
-    try std.testing.expectEqual(@as(f32, 25.0), a.distanceSqr(b));
+    try std.testing.expectEqual(@as(f32, 5.0), distance(a, b));
+    try std.testing.expectEqual(@as(f32, 25.0), distanceSqr(a, b));
 }

@@ -1,6 +1,7 @@
 //! Labelle Pathfinding
 //!
 //! A pathfinding library for Zig game development.
+//! Part of the labelle-toolkit, uses labelle.Position for coordinates.
 //! Provides node-based movement systems and shortest path algorithms.
 //!
 //! ## Features
@@ -8,10 +9,12 @@
 //! - Movement node components for ECS
 //! - Spatial query controller for finding closest nodes
 //! - Entity ID mapping for ECS integration
+//! - Integration with labelle graphics library
 //!
 //! ## Example
 //! ```zig
 //! const pathfinding = @import("pathfinding");
+//! const labelle = @import("labelle");
 //!
 //! // Create a distance graph
 //! var fw = try pathfinding.FloydWarshall.init(allocator);
@@ -30,9 +33,17 @@
 //! // Find path
 //! var path = std.ArrayList(u32).init(allocator);
 //! try fw.setPathWithMapping(&path, entity1, entity3);
+//!
+//! // Use with labelle Position
+//! const pos = labelle.Position{ .x = 100, .y = 200 };
+//! const closest = try Controller.getClosestMovementNode(&quad_tree, pos, allocator);
 //! ```
 
 const std = @import("std");
+pub const labelle = @import("labelle");
+
+// Re-export Position from labelle for convenience
+pub const Position = labelle.Position;
 
 // Algorithms
 pub const FloydWarshall = @import("floyd_warshall.zig").FloydWarshall;
@@ -53,8 +64,9 @@ pub const movement_node_controller = @import("movement_node_controller.zig");
 pub const MovementNodeController = movement_node_controller.MovementNodeController;
 pub const MovementNodeControllerError = movement_node_controller.MovementNodeControllerError;
 pub const EntityPosition = movement_node_controller.EntityPosition;
-pub const Vector2 = movement_node_controller.Vector2;
 pub const Rectangle = movement_node_controller.Rectangle;
+pub const distance = movement_node_controller.distance;
+pub const distanceSqr = movement_node_controller.distanceSqr;
 
 test {
     // Run all tests from submodules

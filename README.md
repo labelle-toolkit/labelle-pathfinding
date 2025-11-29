@@ -1,6 +1,6 @@
 # Labelle Pathfinding
 
-A pathfinding library for Zig game development. Provides node-based movement systems and shortest path algorithms optimized for ECS integration.
+A pathfinding library for Zig game development. Part of the [labelle-toolkit](https://github.com/labelle-toolkit), it provides node-based movement systems and shortest path algorithms optimized for ECS integration.
 
 ## Features
 
@@ -8,6 +8,7 @@ A pathfinding library for Zig game development. Provides node-based movement sys
 - **Movement Node Components** - ECS-ready components for node-based movement
 - **Spatial Query Controller** - Find closest movement nodes using quad tree queries
 - **Entity ID Mapping** - Seamless integration with ECS entity identifiers
+- **Labelle Integration** - Uses `labelle.Position` for coordinates
 
 ## Requirements
 
@@ -43,6 +44,8 @@ const pathfinding = b.dependency("pathfinding", .{
 exe.root_module.addImport("pathfinding", pathfinding.module("pathfinding"));
 ```
 
+Note: This library depends on [labelle](https://github.com/labelle-toolkit/labelle), which is automatically included as a transitive dependency.
+
 ## Usage
 
 ### Floyd-Warshall Shortest Paths
@@ -75,8 +78,8 @@ pub fn main() !void {
     // Check if path exists
     if (fw.hasPathWithMapping(100, 400)) {
         // Get the distance
-        const distance = fw.valueWithMapping(100, 400);
-        std.debug.print("Distance: {}\n", .{distance});
+        const dist = fw.valueWithMapping(100, 400);
+        std.debug.print("Distance: {}\n", .{dist});
 
         // Reconstruct the path
         var path = std.ArrayList(u32).init(allocator);
@@ -129,6 +132,7 @@ const next_node = path.popFront();  // Returns 1
 
 ```zig
 const pathfinding = @import("pathfinding");
+const labelle = @import("labelle");
 const std = @import("std");
 
 // Define your quad tree type that implements queryOnBuffer
@@ -147,16 +151,32 @@ const MyQuadTree = struct {
 // Create a controller for your quad tree type
 const Controller = pathfinding.MovementNodeController(MyQuadTree);
 
-// Find closest movement node to a position
+// Find closest movement node to a position (using labelle.Position)
 var quad_tree: MyQuadTree = .{};
-const position = pathfinding.Vector2{ .x = 50.0, .y = 75.0 };
+const pos = labelle.Position{ .x = 50.0, .y = 75.0 };
 
 const closest = try Controller.getClosestMovementNode(
     &quad_tree,
-    position,
+    pos,
     allocator,
 );
 // closest.entity contains the entity ID of the nearest movement node
+```
+
+### Distance Calculations
+
+```zig
+const pathfinding = @import("pathfinding");
+const labelle = @import("labelle");
+
+const a = labelle.Position{ .x = 0, .y = 0 };
+const b = labelle.Position{ .x = 3, .y = 4 };
+
+// Calculate euclidean distance
+const dist = pathfinding.distance(a, b);  // Returns 5.0
+
+// Calculate squared distance (faster, no sqrt)
+const distSqr = pathfinding.distanceSqr(a, b);  // Returns 25.0
 ```
 
 ## API Reference
@@ -195,19 +215,29 @@ const closest = try Controller.getClosestMovementNode(
 | `getClosestMovementNode(quad_tree, position, allocator)` | Find nearest node |
 | `getClosestMovementNodeWithBuffer(quad_tree, position, buffer)` | Find nearest node using provided buffer |
 
-### Utility Types
+### Utility Functions and Types
 
-| Type | Description |
+| Name | Description |
 |------|-------------|
-| `Vector2` | 2D position with `distance()` and `distanceSqr()` methods |
+| `Position` | Re-exported from `labelle.Position` - 2D coordinates with x, y fields |
+| `distance(a, b)` | Calculate euclidean distance between two positions |
+| `distanceSqr(a, b)` | Calculate squared distance (faster, avoids sqrt) |
 | `Rectangle` | Rectangular region for spatial queries |
 | `EntityPosition` | Position with associated entity ID |
 
 ## Running Tests
 
 ```bash
+# Run built-in unit tests
 zig build test
+
+# Run zspec tests
+zig build spec
 ```
+
+## Related Projects
+
+- [labelle](https://github.com/labelle-toolkit/labelle) - 2D graphics library for Zig games
 
 ## License
 

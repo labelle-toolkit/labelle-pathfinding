@@ -4,11 +4,20 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    // labelle dependency
+    const labelle = b.dependency("labelle", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
     // Main module
     const pathfinding_module = b.addModule("pathfinding", .{
         .root_source_file = b.path("src/pathfinding.zig"),
         .target = target,
         .optimize = optimize,
+        .imports = &.{
+            .{ .name = "labelle", .module = labelle.module("labelle") },
+        },
     });
 
     // zspec dependency
@@ -23,6 +32,9 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/pathfinding.zig"),
             .target = target,
             .optimize = optimize,
+            .imports = &.{
+                .{ .name = "labelle", .module = labelle.module("labelle") },
+            },
         }),
     });
 
@@ -39,6 +51,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "zspec", .module = zspec.module("zspec") },
                 .{ .name = "pathfinding", .module = pathfinding_module },
+                .{ .name = "labelle", .module = labelle.module("labelle") },
             },
         }),
         .test_runner = .{ .path = zspec.path("src/runner.zig"), .mode = .simple },

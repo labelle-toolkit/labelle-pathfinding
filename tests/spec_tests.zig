@@ -1,8 +1,10 @@
 const std = @import("std");
 const zspec = @import("zspec");
 const pathfinding = @import("pathfinding");
+const labelle = @import("labelle");
 
 const expect = zspec.expect;
+const Position = labelle.Position;
 
 test {
     zspec.runAll(@This());
@@ -303,37 +305,37 @@ pub const MovingTowardsSpec = struct {
     }
 };
 
-pub const Vector2Spec = struct {
+pub const PositionSpec = struct {
     pub const @"distance calculation" = struct {
         test "calculates euclidean distance" {
-            const a = pathfinding.Vector2{ .x = 0, .y = 0 };
-            const b = pathfinding.Vector2{ .x = 3, .y = 4 };
-            try expect.equal(a.distance(b), 5.0);
+            const a = Position{ .x = 0, .y = 0 };
+            const b = Position{ .x = 3, .y = 4 };
+            try expect.equal(pathfinding.distance(a, b), 5.0);
         }
 
         test "calculates squared distance" {
-            const a = pathfinding.Vector2{ .x = 0, .y = 0 };
-            const b = pathfinding.Vector2{ .x = 3, .y = 4 };
-            try expect.equal(a.distanceSqr(b), 25.0);
+            const a = Position{ .x = 0, .y = 0 };
+            const b = Position{ .x = 3, .y = 4 };
+            try expect.equal(pathfinding.distanceSqr(a, b), 25.0);
         }
 
         test "distance to self is zero" {
-            const a = pathfinding.Vector2{ .x = 10, .y = 20 };
-            try expect.equal(a.distance(a), 0.0);
+            const a = Position{ .x = 10, .y = 20 };
+            try expect.equal(pathfinding.distance(a, a), 0.0);
         }
 
         test "distance is symmetric" {
-            const a = pathfinding.Vector2{ .x = 1, .y = 2 };
-            const b = pathfinding.Vector2{ .x = 4, .y = 6 };
-            try expect.equal(a.distance(b), b.distance(a));
+            const a = Position{ .x = 1, .y = 2 };
+            const b = Position{ .x = 4, .y = 6 };
+            try expect.equal(pathfinding.distance(a, b), pathfinding.distance(b, a));
         }
     };
 
     pub const @"default values" = struct {
         test "defaults to origin" {
-            const v = pathfinding.Vector2{};
-            try expect.equal(v.x, 0);
-            try expect.equal(v.y, 0);
+            const pos = Position{};
+            try expect.equal(pos.x, 0);
+            try expect.equal(pos.y, 0);
         }
     };
 };
@@ -365,11 +367,11 @@ pub const MovementNodeControllerSpec = struct {
             };
 
             var mock = MockQuadTree{ .items = &items };
-            const position = pathfinding.Vector2{ .x = 0, .y = 0 };
+            const pos = Position{ .x = 0, .y = 0 };
 
             const result = try Controller.getClosestMovementNode(
                 &mock,
-                position,
+                pos,
                 std.testing.allocator,
             );
 
@@ -382,11 +384,11 @@ pub const MovementNodeControllerSpec = struct {
             };
 
             var mock = MockQuadTree{ .items = &items };
-            const position = pathfinding.Vector2{ .x = 0, .y = 0 };
+            const pos = Position{ .x = 0, .y = 0 };
 
             const result = try Controller.getClosestMovementNode(
                 &mock,
-                position,
+                pos,
                 std.testing.allocator,
             );
 
@@ -397,11 +399,11 @@ pub const MovementNodeControllerSpec = struct {
     pub const @"error handling" = struct {
         test "returns error when quad tree is empty" {
             var mock = MockQuadTree{ .items = &.{} };
-            const position = pathfinding.Vector2{ .x = 0, .y = 0 };
+            const pos = Position{ .x = 0, .y = 0 };
 
             const result = Controller.getClosestMovementNode(
                 &mock,
-                position,
+                pos,
                 std.testing.allocator,
             );
 
@@ -420,11 +422,11 @@ pub const MovementNodeControllerSpec = struct {
             var buffer = std.array_list.Managed(pathfinding.EntityPosition).init(std.testing.allocator);
             defer buffer.deinit();
 
-            const position = pathfinding.Vector2{ .x = 0, .y = 0 };
+            const pos = Position{ .x = 0, .y = 0 };
 
             const result = try Controller.getClosestMovementNodeWithBuffer(
                 &mock,
-                position,
+                pos,
                 &buffer,
             );
 
