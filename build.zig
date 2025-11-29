@@ -4,11 +4,9 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    // labelle dependency
-    const labelle = b.dependency("labelle", .{
-        .target = target,
-        .optimize = optimize,
-    });
+    // zig-utils dependency
+    const zig_utils_dep = b.dependency("zig_utils", .{});
+    const zig_utils = zig_utils_dep.module("zig_utils");
 
     // Main module
     const pathfinding_module = b.addModule("pathfinding", .{
@@ -16,7 +14,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .imports = &.{
-            .{ .name = "labelle", .module = labelle.module("labelle") },
+            .{ .name = "zig_utils", .module = zig_utils },
         },
     });
 
@@ -33,7 +31,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "labelle", .module = labelle.module("labelle") },
+                .{ .name = "zig_utils", .module = zig_utils },
             },
         }),
     });
@@ -51,7 +49,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "zspec", .module = zspec.module("zspec") },
                 .{ .name = "pathfinding", .module = pathfinding_module },
-                .{ .name = "labelle", .module = labelle.module("labelle") },
+                .{ .name = "zig_utils", .module = zig_utils },
             },
         }),
         .test_runner = .{ .path = zspec.path("src/runner.zig"), .mode = .simple },
