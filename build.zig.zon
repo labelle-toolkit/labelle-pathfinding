@@ -2,15 +2,15 @@
     .name = .labelle_pathfinding,
     .version = "0.1.0",
     .fingerprint = 0x15f62ccc39d14685,
-    .minimum_zig_version = "0.15.1",
+    .minimum_zig_version = "0.15.2",
     .dependencies = .{
+        .zig_utils = .{
+            .url = "git+https://github.com/labelle-toolkit/zig-utils#0eb76432845d30a8744d0f1e7b2f184bde30ef25",
+            .hash = "zig_utils-0.1.0-dUo89-MYAABNGtQuVNvsszZwByyjALW-LLaqVZYTkI_I",
+        },
         .zspec = .{
             .url = "https://github.com/apotema/zspec/archive/refs/heads/main.tar.gz",
             .hash = "zspec-0.3.0-jaKLbbqZAgAB-MBfy6M3HKB3jSTQ-TsNW9OxpLhLlav5",
-        },
-        .labelle = .{
-            .url = "https://github.com/labelle-toolkit/labelle/archive/refs/heads/main.tar.gz",
-            .hash = "labelle-0.2.0-2bWPIgv0AgB3STbfkSrQSHLyCwShZSattF3-X2Yrkr4F",
         },
     },
     .paths = .{

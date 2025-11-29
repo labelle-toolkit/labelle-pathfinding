@@ -5,10 +5,10 @@
 //! index that provides the required interface.
 
 const std = @import("std");
-const labelle = @import("labelle");
+const zig_utils = @import("zig_utils");
 
-/// Re-export Position from labelle for convenience
-pub const Position = labelle.Position;
+/// Re-export Position (Vector2) from zig-utils for convenience
+pub const Position = zig_utils.Vector2;
 
 pub const MovementNodeControllerError = error{EmptyQuadTree};
 

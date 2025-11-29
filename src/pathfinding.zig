@@ -1,7 +1,7 @@
 //! Labelle Pathfinding
 //!
 //! A pathfinding library for Zig game development.
-//! Part of the labelle-toolkit, uses labelle.Position for coordinates.
+//! Part of the labelle-toolkit, uses zig-utils Vector2 for coordinates.
 //! Provides node-based movement systems and shortest path algorithms.
 //!
 //! ## Features
@@ -9,12 +9,10 @@
 //! - Movement node components for ECS
 //! - Spatial query controller for finding closest nodes
 //! - Entity ID mapping for ECS integration
-//! - Integration with labelle graphics library
 //!
 //! ## Example
 //! ```zig
 //! const pathfinding = @import("pathfinding");
-//! const labelle = @import("labelle");
 //!
 //! // Create a distance graph
 //! var fw = try pathfinding.FloydWarshall.init(allocator);
@@ -34,16 +32,16 @@
 //! var path = std.ArrayList(u32).init(allocator);
 //! try fw.setPathWithMapping(&path, entity1, entity3);
 //!
-//! // Use with labelle Position
-//! const pos = labelle.Position{ .x = 100, .y = 200 };
+//! // Use with Position (Vector2)
+//! const pos = pathfinding.Position{ .x = 100, .y = 200 };
 //! const closest = try Controller.getClosestMovementNode(&quad_tree, pos, allocator);
 //! ```
 
 const std = @import("std");
-pub const labelle = @import("labelle");
+pub const zig_utils = @import("zig_utils");
 
-// Re-export Position from labelle for convenience
-pub const Position = labelle.Position;
+// Re-export Position (Vector2) from zig-utils for convenience
+pub const Position = zig_utils.Vector2;
 
 // Algorithms
 pub const FloydWarshall = @import("floyd_warshall.zig").FloydWarshall;

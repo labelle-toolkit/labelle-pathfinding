@@ -1,10 +1,10 @@
 const std = @import("std");
 const zspec = @import("zspec");
 const pathfinding = @import("pathfinding");
-const labelle = @import("labelle");
+const zig_utils = @import("zig_utils");
 
 const expect = zspec.expect;
-const Position = labelle.Position;
+const Position = zig_utils.Vector2;
 
 test {
     zspec.runAll(@This());
