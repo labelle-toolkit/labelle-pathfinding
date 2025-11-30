@@ -23,7 +23,7 @@ pub const Heuristic = heuristics.Heuristic;
 pub const HeuristicFn = heuristics.HeuristicFn;
 pub const Position = heuristics.Position;
 
-const INF = std.math.maxInt(u32);
+const INF: u64 = std.math.maxInt(u64);
 
 /// A* pathfinding algorithm with configurable heuristics.
 /// Supports both direct vertex indices and entity ID mapping.
@@ -112,12 +112,12 @@ pub const AStar = struct {
         }
         const new_id = self.newKey();
         self.ids.put(entity, new_id) catch |err| {
-            std.log.err("Error inserting entity mapping: {}\n", .{err});
-            return INF;
+            std.log.err("Error inserting entity mapping: {any}\n", .{err});
+            return std.math.maxInt(u32);
         };
         self.reverse_ids.put(new_id, entity) catch |err| {
-            std.log.err("Error inserting reverse mapping: {}\n", .{err});
-            return INF;
+            std.log.err("Error inserting reverse mapping: {any}\n", .{err});
+            return std.math.maxInt(u32);
         };
         return new_id;
     }
@@ -148,9 +148,9 @@ pub const AStar = struct {
 
     /// Add an edge between two vertices with given weight (direct index)
     pub fn addEdge(self: *AStar, u: u32, v: u32, w: u64) void {
-        if (u >= self.adjacency.items.len) return;
+        if (u >= self.adjacency.items.len or v >= self.adjacency.items.len) return;
         self.adjacency.items[u].append(self.allocator, .{ .to = v, .weight = w }) catch |err| {
-            std.log.err("Error adding edge: {}\n", .{err});
+            std.log.err("Error adding edge: {any}\n", .{err});
         };
     }
 
@@ -344,9 +344,9 @@ pub const AStar = struct {
         var path = std.array_list.Managed(u32).init(self.allocator);
         defer path.deinit();
 
-        const result = self.findPathWithMapping(u, v, &path) catch return INF;
+        const result = self.findPathWithMapping(u, v, &path) catch return std.math.maxInt(u32);
         if (result == null or path.items.len < 2) {
-            return INF;
+            return std.math.maxInt(u32);
         }
         return path.items[1]; // Second element is next step
     }
@@ -356,9 +356,9 @@ pub const AStar = struct {
         var path = std.array_list.Managed(u32).init(self.allocator);
         defer path.deinit();
 
-        const result = self.findPath(@intCast(u), @intCast(v), &path) catch return INF;
+        const result = self.findPath(@intCast(u), @intCast(v), &path) catch return std.math.maxInt(u32);
         if (result == null or path.items.len < 2) {
-            return INF;
+            return std.math.maxInt(u32);
         }
         return path.items[1];
     }
