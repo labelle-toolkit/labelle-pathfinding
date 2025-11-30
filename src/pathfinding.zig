@@ -1,14 +1,14 @@
 //! Labelle Pathfinding
 //!
 //! A pathfinding library for Zig game development.
-//! Part of the labelle-toolkit, uses zig-utils Vector2 for coordinates.
+//! Part of the labelle-toolkit, integrates with zig-ecs for ECS support.
 //! Provides node-based movement systems and shortest path algorithms.
 //!
 //! ## Features
 //! - Floyd-Warshall all-pairs shortest path algorithm
 //! - A* single-source shortest path algorithm with multiple heuristics
-//! - Movement node components for ECS
-//! - Spatial query controller for finding closest nodes
+//! - Movement node components for zig-ecs
+//! - Registry-based controller for finding closest nodes
 //! - Entity ID mapping for ECS integration
 //!
 //! ## Algorithm Selection Guide
@@ -16,27 +16,49 @@
 //! - **Floyd-Warshall**: Best when you need all-pairs paths, dense graphs, or
 //!   when paths are queried repeatedly between many node pairs
 //!
+//! ## Example (ECS Integration)
+//! ```zig
+//! const pathfinding = @import("pathfinding");
+//! const ecs = @import("zig_ecs");
+//!
+//! var registry = ecs.Registry.init(allocator);
+//! defer registry.deinit();
+//!
+//! // Create movement nodes
+//! const node1 = registry.create();
+//! registry.add(node1, pathfinding.MovementNode{});
+//! registry.add(node1, pathfinding.Position{ .x = 0, .y = 0 });
+//!
+//! const node2 = registry.create();
+//! registry.add(node2, pathfinding.MovementNode{ .right_entt = node1 });
+//! registry.add(node2, pathfinding.Position{ .x = 10, .y = 0 });
+//!
+//! // Find closest node to a position
+//! const closest = try pathfinding.MovementNodeController.getClosestMovementNode(
+//!     &registry,
+//!     .{ .x = 5, .y = 0 },
+//! );
+//! ```
+//!
 //! ## Example (Floyd-Warshall)
 //! ```zig
 //! const pathfinding = @import("pathfinding");
 //!
-//! // Create a distance graph
-//! var fw = try pathfinding.FloydWarshall.init(allocator);
+//! var fw = pathfinding.FloydWarshall.init(allocator);
 //! defer fw.deinit();
 //!
 //! fw.resize(10);
 //! try fw.clean();
 //!
-//! // Add edges between entities
-//! fw.addEdgeWithMapping(entity1, entity2, 1);
-//! fw.addEdgeWithMapping(entity2, entity3, 1);
+//! // Add edges between entities (using entity IDs as u32)
+//! fw.addEdgeWithMapping(100, 200, 1);
+//! fw.addEdgeWithMapping(200, 300, 1);
 //!
 //! // Generate shortest paths
 //! fw.generate();
 //!
-//! // Find path
-//! var path = std.array_list.Managed(u32).init(allocator);
-//! try fw.setPathWithMapping(&path, entity1, entity3);
+//! // Query distance
+//! const dist = fw.valueWithMapping(100, 300); // Returns 2
 //! ```
 //!
 //! ## Example (A*)
@@ -48,24 +70,23 @@
 //!
 //! astar.resize(10);
 //! try astar.clean();
-//!
-//! // Set heuristic (default is euclidean)
 //! astar.setHeuristic(.manhattan);
 //!
 //! // Set node positions for heuristic calculation
-//! try astar.setNodePositionWithMapping(entity1, .{ .x = 0, .y = 0 });
-//! try astar.setNodePositionWithMapping(entity2, .{ .x = 10, .y = 0 });
+//! try astar.setNodePositionWithMapping(100, .{ .x = 0, .y = 0 });
+//! try astar.setNodePositionWithMapping(200, .{ .x = 10, .y = 0 });
 //!
 //! // Add edges
-//! astar.addEdgeWithMapping(entity1, entity2, 1);
+//! astar.addEdgeWithMapping(100, 200, 1);
 //!
 //! // Find path (computed on-demand)
 //! var path = std.array_list.Managed(u32).init(allocator);
-//! const cost = try astar.findPathWithMapping(entity1, entity2, &path);
+//! const cost = try astar.findPathWithMapping(100, 200, &path);
 //! ```
 
 const std = @import("std");
 pub const zig_utils = @import("zig_utils");
+pub const ecs = @import("zig_ecs");
 
 // Re-export Position (Vector2) from zig-utils for convenience
 pub const Position = zig_utils.Vector2;
@@ -94,10 +115,12 @@ pub const WithPath = components.WithPath;
 pub const movement_node_controller = @import("movement_node_controller.zig");
 pub const MovementNodeController = movement_node_controller.MovementNodeController;
 pub const MovementNodeControllerError = movement_node_controller.MovementNodeControllerError;
-pub const EntityPosition = movement_node_controller.EntityPosition;
-pub const Rectangle = movement_node_controller.Rectangle;
 pub const distance = movement_node_controller.distance;
 pub const distanceSqr = movement_node_controller.distanceSqr;
+
+// ECS types (re-exported from zig-ecs)
+pub const Entity = ecs.Entity;
+pub const Registry = ecs.Registry;
 
 test {
     // Run all tests from submodules

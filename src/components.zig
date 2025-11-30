@@ -1,23 +1,27 @@
 //! Pathfinding Components
 //!
 //! ECS components for node-based pathfinding systems.
-//! These components can be used with any ECS library.
+//! Designed for use with zig-ecs Registry.
 
 const std = @import("std");
+const ecs = @import("zig_ecs");
+
+/// Entity type from zig-ecs
+pub const Entity = ecs.Entity;
 
 /// A node in a movement graph with directional links to neighbors.
 /// Supports 4-directional movement (left, right, up, down).
 pub const MovementNode = struct {
-    left_entt: ?u32 = null,
-    right_entt: ?u32 = null,
-    up_entt: ?u32 = null,
-    down_entt: ?u32 = null,
+    left_entt: ?Entity = null,
+    right_entt: ?Entity = null,
+    up_entt: ?Entity = null,
+    down_entt: ?Entity = null,
 };
 
 /// Tracks the closest movement node to an entity.
 /// Updated by spatial queries (quad tree, grid, etc.)
 pub const ClosestMovementNode = struct {
-    node_entt: u32 = 0,
+    node_entt: ?Entity = null,
     distance: f32 = 0,
 };
 
@@ -25,7 +29,7 @@ pub const ClosestMovementNode = struct {
 pub const MovingTowards = struct {
     target_x: f32 = 0,
     target_y: f32 = 0,
-    closest_node_entt: u32 = 0,
+    closest_node_entt: ?Entity = null,
     speed: f32 = 10,
 };
 
@@ -33,7 +37,7 @@ pub const MovingTowards = struct {
 /// Manages its own memory for the path array.
 pub const WithPath = struct {
     allocator: std.mem.Allocator,
-    path: std.ArrayListUnmanaged(u32) = .empty,
+    path: std.ArrayListUnmanaged(Entity) = .empty,
 
     pub fn init(allocator: std.mem.Allocator) WithPath {
         return .{ .allocator = allocator, .path = .empty };
@@ -43,7 +47,7 @@ pub const WithPath = struct {
         self.path.deinit(self.allocator);
     }
 
-    pub fn append(self: *WithPath, node: u32) !void {
+    pub fn append(self: *WithPath, node: Entity) !void {
         try self.path.append(self.allocator, node);
     }
 
@@ -55,12 +59,12 @@ pub const WithPath = struct {
         return self.path.items.len == 0;
     }
 
-    pub fn popFront(self: *WithPath) ?u32 {
+    pub fn popFront(self: *WithPath) ?Entity {
         if (self.path.items.len == 0) return null;
         return self.path.orderedRemove(0);
     }
 
-    pub fn peekFront(self: *const WithPath) ?u32 {
+    pub fn peekFront(self: *const WithPath) ?Entity {
         if (self.path.items.len == 0) return null;
         return self.path.items[0];
     }

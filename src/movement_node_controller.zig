@@ -1,31 +1,24 @@
 //! Movement Node Controller
 //!
-//! Finds the closest movement node to a given position using spatial queries.
-//! This is a generic implementation that works with any quad tree or spatial
-//! index that provides the required interface.
+//! Finds the closest movement node to a given position using ECS registry queries.
+//! Integrates directly with zig-ecs Registry for efficient component-based queries.
 
 const std = @import("std");
 const zig_utils = @import("zig_utils");
+const ecs = @import("zig_ecs");
+
+const components = @import("components.zig");
 
 /// Re-export Position (Vector2) from zig-utils for convenience
 pub const Position = zig_utils.Vector2;
 
-pub const MovementNodeControllerError = error{EmptyQuadTree};
+/// Re-export Entity type from zig-ecs
+pub const Entity = ecs.Entity;
 
-/// Position with entity reference for spatial queries
-pub const EntityPosition = struct {
-    entity: u32,
-    x: f32,
-    y: f32,
-};
+/// Re-export Registry type from zig-ecs
+pub const Registry = ecs.Registry;
 
-/// Rectangle for spatial queries
-pub const Rectangle = struct {
-    x: f32,
-    y: f32,
-    width: f32,
-    height: f32,
-};
+pub const MovementNodeControllerError = error{NoMovementNodes};
 
 /// Calculate distance between two positions
 pub fn distance(a: Position, b: Position) f32 {
@@ -41,64 +34,87 @@ pub fn distanceSqr(a: Position, b: Position) f32 {
     return dx * dx + dy * dy;
 }
 
-/// Interface that quad trees must implement for spatial queries
-pub fn QuadTreeInterface(comptime Self: type) type {
-    return struct {
-        pub fn queryOnBuffer(self: *Self, rect: Rectangle, buffer: *std.array_list.Managed(EntityPosition)) !void {
-            _ = self;
-            _ = rect;
-            _ = buffer;
-        }
-    };
-}
+/// Controller for finding closest movement nodes using ECS registry queries.
+pub const MovementNodeController = struct {
+    /// Find the closest movement node entity to a given position.
+    /// Queries all entities with MovementNode and Position components.
+    ///
+    /// Returns the entity ID of the closest movement node, or error if none exist.
+    pub fn getClosestMovementNode(
+        registry: *Registry,
+        pos: Position,
+    ) MovementNodeControllerError!Entity {
+        var view = registry.view(.{ components.MovementNode, Position }, .{});
 
-/// Controller for finding closest movement nodes using spatial queries.
-/// Generic over the quad tree implementation.
-pub fn MovementNodeController(comptime QuadTree: type) type {
-    return struct {
-        const Self = @This();
+        var current_distance: f32 = std.math.inf(f32);
+        var closest_entity: ?Entity = null;
 
-        /// Find the closest movement node to a position, using a provided buffer
-        pub fn getClosestMovementNodeWithBuffer(
-            quad_tree: *QuadTree,
-            pos: Position,
-            buffer: *std.array_list.Managed(EntityPosition),
-        ) !EntityPosition {
-            try quad_tree.queryOnBuffer(
-                .{ .x = pos.x - 40, .y = pos.y - 10, .width = 80, .height = 100 },
-                buffer,
-            );
-            if (buffer.items.len == 0) {
-                return error.EmptyQuadTree;
+        var iter = view.entityIterator();
+        while (iter.next()) |entity| {
+            const node_pos = registry.get(Position, entity);
+            const new_distance = distance(pos, node_pos.*);
+            if (new_distance < current_distance) {
+                closest_entity = entity;
+                current_distance = new_distance;
             }
+        }
 
-            var current_distance: f32 = std.math.inf(f32);
-            var closest_node: EntityPosition = buffer.items[0];
+        return closest_entity orelse error.NoMovementNodes;
+    }
 
-            for (buffer.items) |entity_position| {
-                const entity_pos = Position{ .x = entity_position.x, .y = entity_position.y };
-                const new_distance = distance(pos, entity_pos);
-                if (new_distance < current_distance) {
-                    closest_node = entity_position;
-                    current_distance = new_distance;
-                }
+    /// Find the closest movement node and return both entity and distance.
+    /// Useful when you need to store the distance (e.g., in ClosestMovementNode component).
+    pub fn getClosestMovementNodeWithDistance(
+        registry: *Registry,
+        pos: Position,
+    ) MovementNodeControllerError!components.ClosestMovementNode {
+        var view = registry.view(.{ components.MovementNode, Position }, .{});
+
+        var current_distance: f32 = std.math.inf(f32);
+        var closest_entity: ?Entity = null;
+
+        var iter = view.entityIterator();
+        while (iter.next()) |entity| {
+            const node_pos = registry.get(Position, entity);
+            const new_distance = distance(pos, node_pos.*);
+            if (new_distance < current_distance) {
+                closest_entity = entity;
+                current_distance = new_distance;
             }
-
-            return closest_node;
         }
 
-        const EntityPositionList = std.array_list.Managed(EntityPosition);
-
-        /// Find the closest movement node to a position, allocating a temporary buffer
-        pub fn getClosestMovementNode(
-            quad_tree: *QuadTree,
-            pos: Position,
-            allocator: std.mem.Allocator,
-        ) !EntityPosition {
-            var buffer = EntityPositionList.init(allocator);
-            defer buffer.deinit();
-
-            return getClosestMovementNodeWithBuffer(quad_tree, pos, &buffer);
+        if (closest_entity) |entity| {
+            return components.ClosestMovementNode{
+                .node_entt = entity,
+                .distance = current_distance,
+            };
         }
-    };
-}
+
+        return error.NoMovementNodes;
+    }
+
+    /// Update the ClosestMovementNode component for all entities that have
+    /// both Position and ClosestMovementNode components.
+    /// This is useful for batch-updating all entities' nearest node references.
+    pub fn updateAllClosestNodes(registry: *Registry) void {
+        // First, ensure there are movement nodes to query against
+        var node_view = registry.view(.{ components.MovementNode, Position }, .{});
+        var node_iter = node_view.entityIterator();
+        if (node_iter.next() == null) {
+            return; // No movement nodes exist
+        }
+
+        // Update all entities that track their closest node
+        var entity_view = registry.view(.{ Position, components.ClosestMovementNode }, .{});
+        var entity_iter = entity_view.entityIterator();
+
+        while (entity_iter.next()) |entity| {
+            const entity_pos = registry.get(Position, entity);
+            if (getClosestMovementNodeWithDistance(registry, entity_pos.*)) |closest| {
+                registry.replace(entity, closest);
+            } else |_| {
+                // No movement nodes found, leave unchanged
+            }
+        }
+    }
+};

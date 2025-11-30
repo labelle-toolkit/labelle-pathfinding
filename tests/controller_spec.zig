@@ -1,103 +1,191 @@
 const std = @import("std");
 const zspec = @import("zspec");
 const pathfinding = @import("pathfinding");
-const zig_utils = @import("zig_utils");
+const zig_ecs = @import("zig_ecs");
 
 const expect = zspec.expect;
-const Position = zig_utils.Vector2;
+const Position = pathfinding.Position;
+const Entity = pathfinding.Entity;
+const Registry = pathfinding.Registry;
+const MovementNode = pathfinding.MovementNode;
+const ClosestMovementNode = pathfinding.ClosestMovementNode;
+const MovementNodeController = pathfinding.MovementNodeController;
 
 pub const MovementNodeControllerSpec = struct {
-    const MockQuadTree = struct {
-        items: []const pathfinding.EntityPosition,
+    var registry: Registry = undefined;
 
-        pub fn queryOnBuffer(
-            self: *MockQuadTree,
-            rect: pathfinding.Rectangle,
-            buffer: *std.array_list.Managed(pathfinding.EntityPosition),
-        ) !void {
-            _ = rect;
-            for (self.items) |item| {
-                try buffer.append(item);
-            }
-        }
-    };
+    test "tests:before" {
+        registry = Registry.init(std.testing.allocator);
+    }
 
-    const Controller = pathfinding.MovementNodeController(MockQuadTree);
+    test "tests:after" {
+        registry.deinit();
+    }
 
     pub const @"finding closest node" = struct {
-        test "returns the closest node to position" {
-            const items = [_]pathfinding.EntityPosition{
-                .{ .entity = 1, .x = 10, .y = 10 },
-                .{ .entity = 2, .x = 100, .y = 100 },
-                .{ .entity = 3, .x = 5, .y = 5 },
-            };
+        test "tests:before" {
+            // Create movement nodes at different positions
+            const node1 = registry.create();
+            registry.add(node1, MovementNode{});
+            registry.add(node1, Position{ .x = 10, .y = 10 });
 
-            var mock = MockQuadTree{ .items = &items };
-            const pos = Position{ .x = 0, .y = 0 };
+            const node2 = registry.create();
+            registry.add(node2, MovementNode{});
+            registry.add(node2, Position{ .x = 100, .y = 100 });
 
-            const result = try Controller.getClosestMovementNode(
-                &mock,
-                pos,
-                std.testing.allocator,
-            );
-
-            try expect.equal(result.entity, 3);
+            const node3 = registry.create();
+            registry.add(node3, MovementNode{});
+            registry.add(node3, Position{ .x = 5, .y = 5 });
         }
 
-        test "handles single node" {
-            const items = [_]pathfinding.EntityPosition{
-                .{ .entity = 42, .x = 50, .y = 50 },
-            };
-
-            var mock = MockQuadTree{ .items = &items };
+        test "returns the closest node to position" {
             const pos = Position{ .x = 0, .y = 0 };
 
-            const result = try Controller.getClosestMovementNode(
-                &mock,
+            const result = try MovementNodeController.getClosestMovementNode(
+                &registry,
                 pos,
-                std.testing.allocator,
             );
 
-            try expect.equal(result.entity, 42);
+            // Node at (5,5) is closest to origin
+            const result_pos = registry.get(Position, result);
+            try expect.equal(result_pos.x, 5);
+            try expect.equal(result_pos.y, 5);
+        }
+
+        test "returns closest node with distance" {
+            const pos = Position{ .x = 0, .y = 0 };
+
+            const result = try MovementNodeController.getClosestMovementNodeWithDistance(
+                &registry,
+                pos,
+            );
+
+            // Distance from (0,0) to (5,5) is sqrt(50) ≈ 7.07
+            try std.testing.expectApproxEqAbs(@as(f32, 7.07), result.distance, 0.1);
         }
     };
 
     pub const @"error handling" = struct {
-        test "returns error when quad tree is empty" {
-            var mock = MockQuadTree{ .items = &.{} };
+        test "tests:before" {
+            // Clear all entities for this test group
+            var view = registry.view(.{ MovementNode, Position }, .{});
+            var iter = view.entityIterator();
+
+            // Collect entities to destroy
+            var entities_to_destroy: [64]Entity = undefined;
+            var count: usize = 0;
+
+            while (iter.next()) |entity| {
+                if (count < 64) {
+                    entities_to_destroy[count] = entity;
+                    count += 1;
+                }
+            }
+
+            for (entities_to_destroy[0..count]) |entity| {
+                registry.destroy(entity);
+            }
+        }
+
+        test "returns error when no movement nodes exist" {
             const pos = Position{ .x = 0, .y = 0 };
 
-            const result = Controller.getClosestMovementNode(
-                &mock,
+            const result = MovementNodeController.getClosestMovementNode(
+                &registry,
                 pos,
-                std.testing.allocator,
             );
 
-            try std.testing.expectError(error.EmptyQuadTree, result);
+            try std.testing.expectError(error.NoMovementNodes, result);
         }
     };
 
-    pub const @"with buffer" = struct {
-        test "uses provided buffer for query results" {
-            const items = [_]pathfinding.EntityPosition{
-                .{ .entity = 1, .x = 10, .y = 10 },
-                .{ .entity = 2, .x = 5, .y = 5 },
-            };
+    pub const @"single node" = struct {
+        test "tests:before" {
+            // Clear existing movement nodes
+            var view = registry.view(.{ MovementNode, Position }, .{});
+            var iter = view.entityIterator();
 
-            var mock = MockQuadTree{ .items = &items };
-            var buffer = std.array_list.Managed(pathfinding.EntityPosition).init(std.testing.allocator);
-            defer buffer.deinit();
+            var entities_to_destroy: [64]Entity = undefined;
+            var count: usize = 0;
 
+            while (iter.next()) |entity| {
+                if (count < 64) {
+                    entities_to_destroy[count] = entity;
+                    count += 1;
+                }
+            }
+
+            for (entities_to_destroy[0..count]) |entity| {
+                registry.destroy(entity);
+            }
+
+            // Add just one node
+            const node = registry.create();
+            registry.add(node, MovementNode{});
+            registry.add(node, Position{ .x = 50, .y = 50 });
+        }
+
+        test "handles single node" {
             const pos = Position{ .x = 0, .y = 0 };
 
-            const result = try Controller.getClosestMovementNodeWithBuffer(
-                &mock,
+            const result = try MovementNodeController.getClosestMovementNode(
+                &registry,
                 pos,
-                &buffer,
             );
 
-            try expect.equal(result.entity, 2);
-            try expect.equal(buffer.items.len, 2);
+            const result_pos = registry.get(Position, result);
+            try expect.equal(result_pos.x, 50);
+            try expect.equal(result_pos.y, 50);
+        }
+    };
+
+    pub const @"batch update" = struct {
+        test "tests:before" {
+            // Clear existing movement nodes
+            var view = registry.view(.{ MovementNode, Position }, .{});
+            var iter = view.entityIterator();
+
+            var entities_to_destroy: [64]Entity = undefined;
+            var count: usize = 0;
+
+            while (iter.next()) |entity| {
+                if (count < 64) {
+                    entities_to_destroy[count] = entity;
+                    count += 1;
+                }
+            }
+
+            for (entities_to_destroy[0..count]) |entity| {
+                registry.destroy(entity);
+            }
+
+            // Create movement nodes
+            const node1 = registry.create();
+            registry.add(node1, MovementNode{});
+            registry.add(node1, Position{ .x = 0, .y = 0 });
+
+            const node2 = registry.create();
+            registry.add(node2, MovementNode{});
+            registry.add(node2, Position{ .x = 100, .y = 100 });
+
+            // Create an entity that tracks closest node
+            const entity = registry.create();
+            registry.add(entity, Position{ .x = 10, .y = 10 });
+            registry.add(entity, ClosestMovementNode{});
+        }
+
+        test "updateAllClosestNodes updates entities" {
+            MovementNodeController.updateAllClosestNodes(&registry);
+
+            // The entity at (10,10) should have closest node at (0,0)
+            var view = registry.view(.{ Position, ClosestMovementNode }, .{});
+            var iter = view.entityIterator();
+
+            while (iter.next()) |entity| {
+                const closest = registry.get(ClosestMovementNode, entity);
+                // Distance from (10,10) to (0,0) is sqrt(200) ≈ 14.14
+                try std.testing.expectApproxEqAbs(@as(f32, 14.14), closest.distance, 0.1);
+            }
         }
     };
 };
