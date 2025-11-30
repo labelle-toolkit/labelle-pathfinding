@@ -58,4 +58,66 @@ pub fn build(b: *std.Build) void {
     const run_zspec_tests = b.addRunArtifact(zspec_tests);
     const zspec_step = b.step("spec", "Run zspec tests");
     zspec_step.dependOn(&run_zspec_tests.step);
+
+    // ===== Usage Examples =====
+
+    // Floyd-Warshall example
+    const floyd_example = b.addExecutable(.{
+        .name = "floyd_warshall_example",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("usage/floyd_warshall_example.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "pathfinding", .module = pathfinding_module },
+            },
+        }),
+    });
+    b.installArtifact(floyd_example);
+
+    const run_floyd = b.addRunArtifact(floyd_example);
+    const floyd_step = b.step("run-floyd", "Run Floyd-Warshall example");
+    floyd_step.dependOn(&run_floyd.step);
+
+    // A* example
+    const astar_example = b.addExecutable(.{
+        .name = "a_star_example",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("usage/a_star_example.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "pathfinding", .module = pathfinding_module },
+            },
+        }),
+    });
+    b.installArtifact(astar_example);
+
+    const run_astar = b.addRunArtifact(astar_example);
+    const astar_step = b.step("run-astar", "Run A* algorithm example");
+    astar_step.dependOn(&run_astar.step);
+
+    // Comparison example
+    const compare_example = b.addExecutable(.{
+        .name = "comparison_example",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("usage/comparison_example.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "pathfinding", .module = pathfinding_module },
+            },
+        }),
+    });
+    b.installArtifact(compare_example);
+
+    const run_compare = b.addRunArtifact(compare_example);
+    const compare_step = b.step("run-compare", "Run algorithm comparison example");
+    compare_step.dependOn(&run_compare.step);
+
+    // Run all examples
+    const examples_step = b.step("run-examples", "Run all usage examples");
+    examples_step.dependOn(&run_floyd.step);
+    examples_step.dependOn(&run_astar.step);
+    examples_step.dependOn(&run_compare.step);
 }
