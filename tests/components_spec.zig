@@ -1,7 +1,7 @@
 const std = @import("std");
 const zspec = @import("zspec");
 const pathfinding = @import("pathfinding");
-const zig_ecs = @import("zig_ecs");
+const ecs = @import("ecs");
 
 const expect = zspec.expect;
 const Entity = pathfinding.Entity;

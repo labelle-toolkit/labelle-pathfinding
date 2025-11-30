@@ -4,7 +4,7 @@
 //! Designed for use with zig-ecs Registry.
 
 const std = @import("std");
-const ecs = @import("zig_ecs");
+const ecs = @import("ecs");
 
 /// Entity type from zig-ecs
 pub const Entity = ecs.Entity;
