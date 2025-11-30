@@ -24,3 +24,6 @@ jobs:
 
       - name: Run zspec tests
         run: zig build spec
+
+      - name: Run examples
+        run: zig build run-examples
