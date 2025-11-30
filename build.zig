@@ -23,6 +23,14 @@ pub fn build(b: *std.Build) void {
         },
     });
 
+    // Export ecs module for consumers who need direct ECS access
+    // This prevents module collisions when projects need both pathfinding and ecs
+    _ = b.addModule("ecs", .{
+        .root_source_file = zig_ecs.root_source_file,
+        .target = target,
+        .optimize = optimize,
+    });
+
     // zspec dependency
     const zspec = b.dependency("zspec", .{
         .target = target,
@@ -122,9 +130,29 @@ pub fn build(b: *std.Build) void {
     const compare_step = b.step("run-compare", "Run algorithm comparison example");
     compare_step.dependOn(&run_compare.step);
 
+    // ECS integration example (demonstrates using both pathfinding and ecs modules)
+    const ecs_example = b.addExecutable(.{
+        .name = "ecs_integration_example",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("usage/ecs_integration_example.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "pathfinding", .module = pathfinding_module },
+                .{ .name = "ecs", .module = zig_ecs },
+            },
+        }),
+    });
+    b.installArtifact(ecs_example);
+
+    const run_ecs = b.addRunArtifact(ecs_example);
+    const ecs_step = b.step("run-ecs", "Run ECS integration example");
+    ecs_step.dependOn(&run_ecs.step);
+
     // Run all examples
     const examples_step = b.step("run-examples", "Run all usage examples");
     examples_step.dependOn(&run_floyd.step);
     examples_step.dependOn(&run_astar.step);
     examples_step.dependOn(&run_compare.step);
+    examples_step.dependOn(&run_ecs.step);
 }
