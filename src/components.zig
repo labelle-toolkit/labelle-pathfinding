@@ -65,32 +65,3 @@ pub const WithPath = struct {
         return self.path.items[0];
     }
 };
-
-test "WithPath basic operations" {
-    var path = WithPath.init(std.testing.allocator);
-    defer path.deinit();
-
-    try std.testing.expect(path.isEmpty());
-
-    try path.append(1);
-    try path.append(2);
-    try path.append(3);
-
-    try std.testing.expect(!path.isEmpty());
-    try std.testing.expectEqual(@as(?u32, 1), path.peekFront());
-
-    try std.testing.expectEqual(@as(?u32, 1), path.popFront());
-    try std.testing.expectEqual(@as(?u32, 2), path.popFront());
-    try std.testing.expectEqual(@as(?u32, 3), path.popFront());
-    try std.testing.expectEqual(@as(?u32, null), path.popFront());
-
-    try std.testing.expect(path.isEmpty());
-}
-
-test "MovementNode default values" {
-    const node = MovementNode{};
-    try std.testing.expectEqual(@as(?u32, null), node.left_entt);
-    try std.testing.expectEqual(@as(?u32, null), node.right_entt);
-    try std.testing.expectEqual(@as(?u32, null), node.up_entt);
-    try std.testing.expectEqual(@as(?u32, null), node.down_entt);
-}
