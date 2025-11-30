@@ -23,6 +23,14 @@ pub fn build(b: *std.Build) void {
         },
     });
 
+    // Export ecs module for consumers who need direct ECS access
+    // This prevents module collisions when projects need both pathfinding and ecs
+    _ = b.addModule("ecs", .{
+        .root_source_file = zig_ecs.root_source_file,
+        .target = target,
+        .optimize = optimize,
+    });
+
     // zspec dependency
     const zspec = b.dependency("zspec", .{
         .target = target,
