@@ -5,7 +5,7 @@
 
 const std = @import("std");
 const zig_utils = @import("zig_utils");
-const ecs = @import("zig_ecs");
+const ecs = @import("ecs");
 
 const components = @import("components.zig");
 

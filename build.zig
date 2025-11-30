@@ -19,7 +19,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{
             .{ .name = "zig_utils", .module = zig_utils },
-            .{ .name = "zig_ecs", .module = zig_ecs },
+            .{ .name = "ecs", .module = zig_ecs },
         },
     });
 
@@ -37,7 +37,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "zig_utils", .module = zig_utils },
-                .{ .name = "zig_ecs", .module = zig_ecs },
+                .{ .name = "ecs", .module = zig_ecs },
             },
         }),
     });
@@ -56,7 +56,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "zspec", .module = zspec.module("zspec") },
                 .{ .name = "pathfinding", .module = pathfinding_module },
                 .{ .name = "zig_utils", .module = zig_utils },
-                .{ .name = "zig_ecs", .module = zig_ecs },
+                .{ .name = "ecs", .module = zig_ecs },
             },
         }),
         .test_runner = .{ .path = zspec.path("src/runner.zig"), .mode = .simple },

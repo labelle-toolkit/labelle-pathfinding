@@ -19,7 +19,7 @@
 //! ## Example (ECS Integration)
 //! ```zig
 //! const pathfinding = @import("pathfinding");
-//! const ecs = @import("zig_ecs");
+//! const ecs = @import("ecs");
 //!
 //! var registry = ecs.Registry.init(allocator);
 //! defer registry.deinit();
@@ -86,7 +86,7 @@
 
 const std = @import("std");
 pub const zig_utils = @import("zig_utils");
-pub const ecs = @import("zig_ecs");
+pub const ecs = @import("ecs");
 
 // Re-export Position (Vector2) from zig-utils for convenience
 pub const Position = zig_utils.Vector2;
