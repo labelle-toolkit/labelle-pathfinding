@@ -1,14 +1,15 @@
 # Labelle Pathfinding
 
-A pathfinding library for Zig game development. Part of the [labelle-toolkit](https://github.com/labelle-toolkit), it provides node-based movement systems and shortest path algorithms optimized for ECS integration.
+A pathfinding library for Zig game development. Part of the [labelle-toolkit](https://github.com/labelle-toolkit), it provides node-based movement systems and shortest path algorithms with direct zig-ecs integration.
 
 ## Features
 
 - **Floyd-Warshall Algorithm** - All-pairs shortest path computation with entity ID mapping
+- **A\* Algorithm** - Single-source shortest path with multiple heuristics (Euclidean, Manhattan, Chebyshev, Octile)
+- **zig-ecs Integration** - Direct integration with [zig-ecs](https://github.com/prime31/zig-ecs) Registry
 - **Movement Node Components** - ECS-ready components for node-based movement
-- **Spatial Query Controller** - Find closest movement nodes using quad tree queries
+- **Registry-based Controller** - Find closest movement nodes using ECS queries
 - **Entity ID Mapping** - Seamless integration with ECS entity identifiers
-- **Labelle Integration** - Uses `labelle.Position` for coordinates
 
 ## Requirements
 
@@ -21,7 +22,7 @@ Add to your `build.zig.zon`:
 ```zig
 .dependencies = .{
     .pathfinding = .{
-        .url = "https://github.com/labelle-toolkit/labelle-pathfinding/archive/refs/heads/main.tar.gz",
+        .url = "https://github.com/labelle-toolkit/labelle-pathfinding/archive/refs/tags/v1.0.0.tar.gz",
         .hash = "...",
     },
 },
@@ -30,7 +31,7 @@ Add to your `build.zig.zon`:
 Or use `zig fetch`:
 
 ```bash
-zig fetch --save https://github.com/labelle-toolkit/labelle-pathfinding/archive/refs/heads/main.tar.gz
+zig fetch --save https://github.com/labelle-toolkit/labelle-pathfinding/archive/refs/tags/v1.0.0.tar.gz
 ```
 
 Then in your `build.zig`:
@@ -44,11 +45,11 @@ const pathfinding = b.dependency("pathfinding", .{
 exe.root_module.addImport("pathfinding", pathfinding.module("pathfinding"));
 ```
 
-Note: This library depends on [labelle](https://github.com/labelle-toolkit/labelle), which is automatically included as a transitive dependency.
-
 ## Usage
 
 ### Floyd-Warshall Shortest Paths
+
+Best for dense graphs or when you need paths between many node pairs.
 
 ```zig
 const pathfinding = @import("pathfinding");
@@ -59,11 +60,9 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    // Create a distance graph
     var fw = pathfinding.FloydWarshall.init(allocator);
     defer fw.deinit();
 
-    // Set graph size and initialize
     fw.resize(10);
     try fw.clean();
 
@@ -75,18 +74,89 @@ pub fn main() !void {
     // Compute all shortest paths
     fw.generate();
 
-    // Check if path exists
+    // Query paths
     if (fw.hasPathWithMapping(100, 400)) {
-        // Get the distance
-        const dist = fw.valueWithMapping(100, 400);
-        std.debug.print("Distance: {}\n", .{dist});
-
-        // Reconstruct the path
-        var path = std.ArrayList(u32).init(allocator);
-        defer path.deinit();
-        try fw.setPathWithMapping(&path, 100, 400);
-        // path.items contains: [100, 200, 300, 400]
+        const dist = fw.valueWithMapping(100, 400);  // Returns 3
+        const next = fw.nextWithMapping(100, 400);   // Returns 200
     }
+}
+```
+
+### A* Algorithm
+
+Best for single-source queries in large sparse graphs.
+
+```zig
+const pathfinding = @import("pathfinding");
+const std = @import("std");
+
+pub fn main() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var astar = pathfinding.AStar.init(allocator);
+    defer astar.deinit();
+
+    astar.resize(10);
+    try astar.clean();
+
+    // Set heuristic (euclidean, manhattan, chebyshev, octile, zero)
+    astar.setHeuristic(.manhattan);
+
+    // Set node positions for heuristic calculation
+    try astar.setNodePositionWithMapping(100, .{ .x = 0, .y = 0 });
+    try astar.setNodePositionWithMapping(200, .{ .x = 10, .y = 0 });
+    try astar.setNodePositionWithMapping(300, .{ .x = 10, .y = 10 });
+
+    // Add edges
+    astar.addEdgeWithMapping(100, 200, 1);
+    astar.addEdgeWithMapping(200, 300, 1);
+
+    // Find path (computed on-demand)
+    var path = std.ArrayList(u32).init(allocator);
+    defer path.deinit();
+
+    if (try astar.findPathWithMapping(100, 300, &path)) |cost| {
+        // cost = 2, path.items = [100, 200, 300]
+    }
+}
+```
+
+### ECS Integration with zig-ecs
+
+```zig
+const pathfinding = @import("pathfinding");
+const std = @import("std");
+
+pub fn main() !void {
+    var registry = pathfinding.Registry.init(std.heap.page_allocator);
+    defer registry.deinit();
+
+    // Create movement nodes
+    const node1 = registry.create();
+    registry.add(node1, pathfinding.MovementNode{});
+    registry.add(node1, pathfinding.Position{ .x = 0, .y = 0 });
+
+    const node2 = registry.create();
+    registry.add(node2, pathfinding.MovementNode{ .right_entt = node1 });
+    registry.add(node2, pathfinding.Position{ .x = 10, .y = 0 });
+
+    // Find closest node to a position
+    const closest = try pathfinding.MovementNodeController.getClosestMovementNode(
+        &registry,
+        .{ .x = 5, .y = 0 },
+    );
+
+    // Get closest node with distance
+    const result = try pathfinding.MovementNodeController.getClosestMovementNodeWithDistance(
+        &registry,
+        .{ .x = 5, .y = 0 },
+    );
+    // result.node_entt = closest entity, result.distance = distance to it
+
+    // Batch update all entities tracking their closest node
+    pathfinding.MovementNodeController.updateAllClosestNodes(&registry);
 }
 ```
 
@@ -95,17 +165,17 @@ pub fn main() !void {
 ```zig
 const pathfinding = @import("pathfinding");
 
-// Create a movement node with directional links
+// Movement node with directional links
 const node = pathfinding.MovementNode{
-    .left_entt = 1,
-    .right_entt = 2,
-    .up_entt = 3,
-    .down_entt = 4,
+    .left_entt = entity1,
+    .right_entt = entity2,
+    .up_entt = entity3,
+    .down_entt = entity4,
 };
 
 // Track closest node to an entity
 const closest = pathfinding.ClosestMovementNode{
-    .node_entt = 5,
+    .node_entt = some_entity,
     .distance = 10.5,
 };
 
@@ -113,7 +183,7 @@ const closest = pathfinding.ClosestMovementNode{
 const moving = pathfinding.MovingTowards{
     .target_x = 100.0,
     .target_y = 200.0,
-    .closest_node_entt = 5,
+    .closest_node_entt = some_entity,
     .speed = 15.0,
 };
 
@@ -121,63 +191,34 @@ const moving = pathfinding.MovingTowards{
 var path = pathfinding.WithPath.init(allocator);
 defer path.deinit();
 
-try path.append(1);
-try path.append(2);
-try path.append(3);
-
-const next_node = path.popFront();  // Returns 1
-```
-
-### Movement Node Controller
-
-```zig
-const pathfinding = @import("pathfinding");
-const labelle = @import("labelle");
-const std = @import("std");
-
-// Define your quad tree type that implements queryOnBuffer
-const MyQuadTree = struct {
-    // ... your implementation
-
-    pub fn queryOnBuffer(
-        self: *MyQuadTree,
-        rect: pathfinding.Rectangle,
-        buffer: *std.ArrayList(pathfinding.EntityPosition),
-    ) !void {
-        // Query spatial index and populate buffer
-    }
-};
-
-// Create a controller for your quad tree type
-const Controller = pathfinding.MovementNodeController(MyQuadTree);
-
-// Find closest movement node to a position (using labelle.Position)
-var quad_tree: MyQuadTree = .{};
-const pos = labelle.Position{ .x = 50.0, .y = 75.0 };
-
-const closest = try Controller.getClosestMovementNode(
-    &quad_tree,
-    pos,
-    allocator,
-);
-// closest.entity contains the entity ID of the nearest movement node
+try path.append(entity1);
+try path.append(entity2);
+const next = path.popFront();  // Returns entity1
 ```
 
 ### Distance Calculations
 
 ```zig
 const pathfinding = @import("pathfinding");
-const labelle = @import("labelle");
 
-const a = labelle.Position{ .x = 0, .y = 0 };
-const b = labelle.Position{ .x = 3, .y = 4 };
+const a = pathfinding.Position{ .x = 0, .y = 0 };
+const b = pathfinding.Position{ .x = 3, .y = 4 };
 
-// Calculate euclidean distance
-const dist = pathfinding.distance(a, b);  // Returns 5.0
-
-// Calculate squared distance (faster, no sqrt)
-const distSqr = pathfinding.distanceSqr(a, b);  // Returns 25.0
+const dist = pathfinding.distance(a, b);      // Returns 5.0
+const distSqr = pathfinding.distanceSqr(a, b); // Returns 25.0 (faster)
 ```
+
+## Algorithm Selection Guide
+
+| Use Case | Recommended Algorithm |
+|----------|----------------------|
+| Many queries between different node pairs | Floyd-Warshall |
+| Dense graphs (many edges) | Floyd-Warshall |
+| Static graphs that don't change | Floyd-Warshall |
+| Single source-destination queries | A* |
+| Large sparse graphs | A* |
+| Dynamic graphs that change frequently | A* |
+| Real-time pathfinding | A* |
 
 ## API Reference
 
@@ -192,38 +233,60 @@ const distSqr = pathfinding.distanceSqr(a, b);  // Returns 25.0
 | `addEdge(u, v, weight)` | Add edge using direct indices |
 | `addEdgeWithMapping(u, v, weight)` | Add edge using entity IDs |
 | `generate()` | Compute all shortest paths |
-| `hasPath(u, v)` | Check if path exists (direct indices) |
-| `hasPathWithMapping(u, v)` | Check if path exists (entity IDs) |
-| `value(u, v)` | Get distance (direct indices) |
-| `valueWithMapping(u, v)` | Get distance (entity IDs) |
+| `hasPath(u, v)` / `hasPathWithMapping(u, v)` | Check if path exists |
+| `value(u, v)` / `valueWithMapping(u, v)` | Get distance |
 | `setPathWithMapping(path, u, v)` | Reconstruct path into ArrayList |
 | `nextWithMapping(u, v)` | Get next hop in path |
+
+### AStar
+
+| Method | Description |
+|--------|-------------|
+| `init(allocator)` | Create a new instance |
+| `deinit()` | Free resources |
+| `resize(size)` | Set the maximum number of vertices |
+| `clean()` | Reset and initialize the graph |
+| `setHeuristic(heuristic)` | Set heuristic function |
+| `setNodePosition(idx, pos)` | Set node position for heuristic |
+| `addEdge(u, v, weight)` | Add edge using direct indices |
+| `addEdgeWithMapping(u, v, weight)` | Add edge using entity IDs |
+| `findPath(start, goal, path)` | Find shortest path |
+| `findPathWithMapping(start, goal, path)` | Find path using entity IDs |
+
+### MovementNodeController
+
+| Method | Description |
+|--------|-------------|
+| `getClosestMovementNode(registry, pos)` | Find nearest movement node entity |
+| `getClosestMovementNodeWithDistance(registry, pos)` | Find nearest node with distance |
+| `updateAllClosestNodes(registry)` | Batch update all ClosestMovementNode components |
 
 ### Components
 
 | Component | Description |
 |-----------|-------------|
 | `MovementNode` | Node with 4-directional links (left, right, up, down) |
-| `ClosestMovementNode` | Tracks closest node to an entity |
+| `ClosestMovementNode` | Tracks closest node entity and distance |
 | `MovingTowards` | Entity movement target and speed |
 | `WithPath` | Managed path through movement nodes |
 
-### MovementNodeController
+### Heuristics
 
-| Method | Description |
-|--------|-------------|
-| `getClosestMovementNode(quad_tree, position, allocator)` | Find nearest node |
-| `getClosestMovementNodeWithBuffer(quad_tree, position, buffer)` | Find nearest node using provided buffer |
+| Heuristic | Best For |
+|-----------|----------|
+| `euclidean` | Any-angle movement (default) |
+| `manhattan` | 4-directional grid movement |
+| `chebyshev` | 8-directional with equal diagonal cost |
+| `octile` | 8-directional with sqrt(2) diagonal cost |
+| `zero` | Dijkstra's algorithm (no heuristic) |
 
-### Utility Functions and Types
+### Types
 
-| Name | Description |
+| Type | Description |
 |------|-------------|
-| `Position` | Re-exported from `labelle.Position` - 2D coordinates with x, y fields |
-| `distance(a, b)` | Calculate euclidean distance between two positions |
-| `distanceSqr(a, b)` | Calculate squared distance (faster, avoids sqrt) |
-| `Rectangle` | Rectangular region for spatial queries |
-| `EntityPosition` | Position with associated entity ID |
+| `Position` | 2D coordinates (re-exported from zig-utils Vector2) |
+| `Entity` | ECS entity type (re-exported from zig-ecs) |
+| `Registry` | ECS registry (re-exported from zig-ecs) |
 
 ## Running Tests
 
@@ -233,11 +296,10 @@ zig build test
 
 # Run zspec tests
 zig build spec
+
+# Run usage examples
+zig build run-examples
 ```
-
-## Related Projects
-
-- [labelle](https://github.com/labelle-toolkit/labelle) - 2D graphics library for Zig games
 
 ## License
 
