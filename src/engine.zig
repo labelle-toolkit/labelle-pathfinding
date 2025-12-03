@@ -150,9 +150,36 @@ pub fn PathfindingEngine(comptime Config: type) type {
         pub const WaitingArea = struct {
             stair_node: NodeId,
             waiting_spots: std.ArrayListUnmanaged(NodeId) = .{},
+            /// Tracks which spots are occupied (spot NodeId -> occupying Entity)
+            occupied_spots: std.AutoHashMap(NodeId, Entity) = undefined,
+
+            pub fn init(allocator: std.mem.Allocator, stair_node: NodeId) WaitingArea {
+                return .{
+                    .stair_node = stair_node,
+                    .occupied_spots = std.AutoHashMap(NodeId, Entity).init(allocator),
+                };
+            }
 
             pub fn deinit(self: *WaitingArea, allocator: std.mem.Allocator) void {
                 self.waiting_spots.deinit(allocator);
+                self.occupied_spots.deinit();
+            }
+
+            pub fn occupySpot(self: *WaitingArea, spot: NodeId, entity: Entity) void {
+                self.occupied_spots.put(spot, entity) catch {};
+            }
+
+            pub fn releaseSpot(self: *WaitingArea, spot: NodeId) void {
+                _ = self.occupied_spots.remove(spot);
+            }
+
+            pub fn findAvailableSpot(self: *WaitingArea) ?NodeId {
+                for (self.waiting_spots.items) |spot| {
+                    if (!self.occupied_spots.contains(spot)) {
+                        return spot;
+                    }
+                }
+                return null;
             }
         };
 
@@ -285,21 +312,21 @@ pub fn PathfindingEngine(comptime Config: type) type {
         /// Remove a node from the graph
         pub fn removeNode(self: *Self, id: NodeId) void {
             _ = self.nodes.remove(id);
-            if (self.edges.getPtr(id)) |edge_list| {
+            if (self.edges.fetchRemove(id)) |removed| {
+                var edge_list = removed.value;
                 edge_list.deinit(self.allocator);
             }
-            _ = self.edges.remove(id);
             _ = self.directional_edges.remove(id);
             _ = self.node_spatial.remove(id);
             // Clean up stair state if present
-            if (self.stair_states.getPtr(id)) |state| {
+            if (self.stair_states.fetchRemove(id)) |removed| {
+                var state = removed.value;
                 state.deinit(self.allocator);
             }
-            _ = self.stair_states.remove(id);
-            if (self.waiting_areas.getPtr(id)) |area| {
+            if (self.waiting_areas.fetchRemove(id)) |removed| {
+                var area = removed.value;
                 area.deinit(self.allocator);
             }
-            _ = self.waiting_areas.remove(id);
         }
 
         /// Add multiple nodes from an array of points
@@ -513,17 +540,17 @@ pub fn PathfindingEngine(comptime Config: type) type {
                     dir_edges.down = self.findClosestStair(id, node, buffer.items);
                 }
 
-                // Up - connect if there's a stair below us
-                // We check all nodes above and see if any is a stair that could connect down to us
-                buffer.clearRetainingCapacity();
-                try self.node_spatial.queryRect(.{
-                    .x = node.x - 5,
-                    .y = node.y - floor_height - 1,
-                    .width = 10,
-                    .height = floor_height,
-                }, &buffer);
-                // Find closest stair node above (if we are also a stair)
+                // Up - only connect if current node is a stair
+                // Both nodes must be stairs for bidirectional vertical connection
                 if (node.stair_mode != .none) {
+                    buffer.clearRetainingCapacity();
+                    try self.node_spatial.queryRect(.{
+                        .x = node.x - 5,
+                        .y = node.y - floor_height - 1,
+                        .width = 10,
+                        .height = floor_height,
+                    }, &buffer);
+                    // Find closest stair node above
                     dir_edges.up = self.findClosestStair(id, node, buffer.items);
                 }
 
@@ -858,13 +885,28 @@ pub fn PathfindingEngine(comptime Config: type) type {
                                     pos.waiting_for_stair = sn;
                                     pos.waiting_at_node = wait_spot;
                                     pos.waiting_direction = dir;
+                                    // Mark spot as occupied
+                                    if (self.waiting_areas.getPtr(sn)) |area| {
+                                        area.occupySpot(wait_spot, entity);
+                                    }
                                     // Move to waiting spot
                                     pos.x = wait_node.x;
                                     pos.y = wait_node.y;
                                     _ = self.entity_spatial.update(entity, pos.x, pos.y);
                                 }
                                 // Add to waiting queue
-                                state.waiting_queue.append(self.allocator, entity) catch {};
+                                state.waiting_queue.append(self.allocator, entity) catch |err| {
+                                    std.log.err("Failed to add entity to stair waiting queue: {}", .{err});
+                                    // Clear waiting state since we couldn't add to queue
+                                    if (pos.waiting_at_node) |spot| {
+                                        if (self.waiting_areas.getPtr(sn)) |area| {
+                                            area.releaseSpot(spot);
+                                        }
+                                    }
+                                    pos.waiting_for_stair = null;
+                                    pos.waiting_at_node = null;
+                                    pos.waiting_direction = null;
+                                };
                                 continue;
                             } else {
                                 // Can enter - register as user
@@ -964,18 +1006,21 @@ pub fn PathfindingEngine(comptime Config: type) type {
                         // Can now enter - remove from waiting
                         state.enter(dir);
                         pos.using_stair = stair_node;
+
+                        // Release the waiting spot
+                        if (pos.waiting_at_node) |wait_spot| {
+                            if (self.waiting_areas.getPtr(stair_node)) |area| {
+                                area.releaseSpot(wait_spot);
+                            }
+                        }
+
                         pos.waiting_for_stair = null;
                         pos.waiting_at_node = null;
                         pos.waiting_direction = null;
 
                         // Remove from waiting queue
-                        var i: usize = 0;
-                        while (i < state.waiting_queue.items.len) {
-                            if (state.waiting_queue.items[i] == entity) {
-                                _ = state.waiting_queue.swapRemove(i);
-                            } else {
-                                i += 1;
-                            }
+                        if (std.mem.indexOfScalar(Entity, state.waiting_queue.items, entity)) |idx| {
+                            _ = state.waiting_queue.swapRemove(idx);
                         }
 
                         // Move back to the node before the stair
@@ -1076,13 +1121,14 @@ pub fn PathfindingEngine(comptime Config: type) type {
 
         /// Set waiting area spots for a stair node
         pub fn setWaitingArea(self: *Self, stair_node: NodeId, spots: []const NodeId) !void {
-            var area = WaitingArea{ .stair_node = stair_node };
+            // Clean up existing if present
+            if (self.waiting_areas.fetchRemove(stair_node)) |removed| {
+                var existing = removed.value;
+                existing.deinit(self.allocator);
+            }
+            var area = WaitingArea.init(self.allocator, stair_node);
             for (spots) |spot| {
                 try area.waiting_spots.append(self.allocator, spot);
-            }
-            // Clean up existing if present
-            if (self.waiting_areas.getPtr(stair_node)) |existing| {
-                existing.deinit(self.allocator);
             }
             try self.waiting_areas.put(stair_node, area);
         }
@@ -1101,29 +1147,10 @@ pub fn PathfindingEngine(comptime Config: type) type {
             return false;
         }
 
-        /// Find an available waiting spot around a stair
+        /// Find an available waiting spot around a stair (O(spots) instead of O(entities))
         fn findAvailableWaitingSpot(self: *Self, stair_node: NodeId) ?NodeId {
             const area = self.waiting_areas.getPtr(stair_node) orelse return null;
-
-            // Collect entities currently waiting at spots
-            var occupied = std.AutoHashMap(NodeId, void).init(self.allocator);
-            defer occupied.deinit();
-
-            var entity_iter = self.entities.iterator();
-            while (entity_iter.next()) |entry| {
-                if (entry.value_ptr.waiting_at_node) |wait_node| {
-                    occupied.put(wait_node, {}) catch continue;
-                }
-            }
-
-            // Find first unoccupied spot
-            for (area.waiting_spots.items) |spot| {
-                if (!occupied.contains(spot)) {
-                    return spot;
-                }
-            }
-
-            return null;
+            return area.findAvailableSpot();
         }
 
         /// Determine vertical direction between two nodes
