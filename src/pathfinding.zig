@@ -113,6 +113,7 @@ pub const NodeData = engine.NodeData;
 pub const NodePoint = engine.NodePoint;
 pub const StairMode = engine.StairMode;
 pub const VerticalDirection = engine.VerticalDirection;
+pub const LogLevel = engine.LogLevel;
 
 // Spatial indexing
 pub const quad_tree = @import("quad_tree.zig");
