@@ -978,10 +978,12 @@ pub fn PathfindingEngine(comptime Config: type) type {
                                 };
                                 continue;
                             } else {
-                                // Can enter - register as user
-                                logDebug("Entity entering stair {} (direction: {})", .{ sn, @intFromEnum(dir) });
-                                state.enter(dir);
-                                pos.using_stair = sn;
+                                // Can enter - register as user (only if not already using this stair)
+                                if (pos.using_stair != sn) {
+                                    logDebug("Entity entering stair {} (direction: {})", .{ sn, @intFromEnum(dir) });
+                                    state.enter(dir);
+                                    pos.using_stair = sn;
+                                }
                             }
                         }
                     }
