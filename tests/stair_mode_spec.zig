@@ -447,3 +447,96 @@ test "stair_mode: single stair does not teleport entity on subsequent frames" {
 
     _ = x_before;
 }
+
+test "stair_mode: cancelPath releases stair correctly" {
+    var engine = try Engine.init(std.testing.allocator);
+    defer engine.deinit();
+
+    // Two-floor setup with single-file stair
+    try engine.addNode(0, 0, 0);
+    try engine.addNodeWithStairMode(1, 100, 0, .single);
+    try engine.addNodeWithStairMode(2, 100, 100, .single);
+    try engine.addNode(3, 200, 100);
+
+    try engine.connectNodes(.{ .building = .{ .horizontal_range = 120, .floor_height = 150 } });
+    try engine.rebuildPaths();
+
+    // Entity starts path through stair
+    try engine.registerEntity(1, 0, 0, 100.0);
+    try engine.requestPath(1, 3);
+
+    var dummy: u32 = 0;
+
+    // Tick until entity is using the stair
+    for (0..20) |_| {
+        engine.tick(&dummy, 0.1);
+        const pos = engine.getPositionFull(1).?;
+        if (pos.using_stair != null) break;
+    }
+
+    // Verify entity is using stair
+    const pos_before = engine.getPositionFull(1).?;
+    try std.testing.expect(pos_before.using_stair != null);
+
+    // Check stair has user
+    const stair_node = pos_before.using_stair.?;
+    const state_before = engine.getStairState(stair_node).?;
+    try std.testing.expect(state_before.users_count >= 1);
+
+    // Cancel the path
+    engine.cancelPath(1);
+
+    // Verify stair was released
+    const state_after = engine.getStairState(stair_node).?;
+    try std.testing.expectEqual(@as(u32, 0), state_after.users_count);
+
+    // Verify entity state is cleared
+    const pos_after = engine.getPositionFull(1).?;
+    try std.testing.expectEqual(@as(?u32, null), pos_after.using_stair);
+    try std.testing.expectEqual(@as(?u32, null), pos_after.target_node);
+}
+
+test "stair_mode: unregisterEntity releases stair correctly" {
+    var engine = try Engine.init(std.testing.allocator);
+    defer engine.deinit();
+
+    // Two-floor setup with single-file stair
+    try engine.addNode(0, 0, 0);
+    try engine.addNodeWithStairMode(1, 100, 0, .single);
+    try engine.addNodeWithStairMode(2, 100, 100, .single);
+    try engine.addNode(3, 200, 100);
+
+    try engine.connectNodes(.{ .building = .{ .horizontal_range = 120, .floor_height = 150 } });
+    try engine.rebuildPaths();
+
+    // Entity starts path through stair
+    try engine.registerEntity(1, 0, 0, 100.0);
+    try engine.requestPath(1, 3);
+
+    var dummy: u32 = 0;
+
+    // Tick until entity is using the stair
+    var stair_node: u32 = 0;
+    for (0..20) |_| {
+        engine.tick(&dummy, 0.1);
+        const pos = engine.getPositionFull(1).?;
+        if (pos.using_stair) |sn| {
+            stair_node = sn;
+            break;
+        }
+    }
+
+    // Check stair has user
+    const state_before = engine.getStairState(stair_node).?;
+    try std.testing.expect(state_before.users_count >= 1);
+
+    // Unregister the entity
+    engine.unregisterEntity(1);
+
+    // Verify stair was released
+    const state_after = engine.getStairState(stair_node).?;
+    try std.testing.expectEqual(@as(u32, 0), state_after.users_count);
+
+    // Verify entity is gone
+    try std.testing.expect(engine.getPositionFull(1) == null);
+}
