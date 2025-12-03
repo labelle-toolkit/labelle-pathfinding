@@ -3,6 +3,7 @@
 const std = @import("std");
 const pathfinding = @import("pathfinding");
 const PathfindingEngine = pathfinding.PathfindingEngine;
+const LogLevel = pathfinding.LogLevel;
 
 const TestConfig = struct {
     pub const Entity = u32;
@@ -10,6 +11,22 @@ const TestConfig = struct {
 };
 
 const Engine = PathfindingEngine(TestConfig);
+
+// Config with explicit log level for testing
+const DebugConfig = struct {
+    pub const Entity = u32;
+    pub const Context = *u32;
+    pub const log_level: LogLevel = .debug;
+};
+
+const SilentConfig = struct {
+    pub const Entity = u32;
+    pub const Context = *u32;
+    pub const log_level: LogLevel = .none;
+};
+
+const DebugEngine = PathfindingEngine(DebugConfig);
+const SilentEngine = PathfindingEngine(SilentConfig);
 
 test "engine: add and remove nodes" {
     var engine = try Engine.init(std.testing.allocator);
@@ -221,4 +238,46 @@ test "engine: callbacks" {
     // Should have reached nodes and completed
     try std.testing.expect(CallbackState.node_reached_count >= 1);
     try std.testing.expectEqual(@as(u32, 1), CallbackState.completed_count);
+}
+
+test "engine: log level configuration" {
+    // Test that engines with different log levels can be instantiated
+    var debug_engine = try DebugEngine.init(std.testing.allocator);
+    defer debug_engine.deinit();
+
+    var silent_engine = try SilentEngine.init(std.testing.allocator);
+    defer silent_engine.deinit();
+
+    // Both should work identically for basic operations
+    try debug_engine.addNode(0, 0, 0);
+    try debug_engine.addNode(1, 100, 0);
+
+    try silent_engine.addNode(0, 0, 0);
+    try silent_engine.addNode(1, 100, 0);
+
+    try std.testing.expectEqual(@as(usize, 2), debug_engine.getNodeCount());
+    try std.testing.expectEqual(@as(usize, 2), silent_engine.getNodeCount());
+}
+
+test "log level: allows function" {
+    // Test the allows() function for log level filtering
+    try std.testing.expect(LogLevel.debug.allows(.debug));
+    try std.testing.expect(LogLevel.debug.allows(.info));
+    try std.testing.expect(LogLevel.debug.allows(.warning));
+    try std.testing.expect(LogLevel.debug.allows(.err));
+
+    try std.testing.expect(LogLevel.info.allows(.info));
+    try std.testing.expect(LogLevel.info.allows(.warning));
+    try std.testing.expect(LogLevel.info.allows(.err));
+    try std.testing.expect(!LogLevel.info.allows(.debug));
+
+    try std.testing.expect(LogLevel.err.allows(.err));
+    try std.testing.expect(!LogLevel.err.allows(.warning));
+    try std.testing.expect(!LogLevel.err.allows(.info));
+    try std.testing.expect(!LogLevel.err.allows(.debug));
+
+    try std.testing.expect(!LogLevel.none.allows(.err));
+    try std.testing.expect(!LogLevel.none.allows(.warning));
+    try std.testing.expect(!LogLevel.none.allows(.info));
+    try std.testing.expect(!LogLevel.none.allows(.debug));
 }

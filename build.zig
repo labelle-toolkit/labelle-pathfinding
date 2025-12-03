@@ -140,10 +140,29 @@ pub fn build(b: *std.Build) void {
     const engine_step = b.step("run-engine", "Run full engine example");
     engine_step.dependOn(&run_engine.step);
 
+    // Building example (multi-floor with stairs)
+    const building_example = b.addExecutable(.{
+        .name = "building_example",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("usage/building_example.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "pathfinding", .module = pathfinding_module },
+            },
+        }),
+    });
+    b.installArtifact(building_example);
+
+    const run_building = b.addRunArtifact(building_example);
+    const building_step = b.step("run-building", "Run building example (multi-floor with stairs)");
+    building_step.dependOn(&run_building.step);
+
     // Run all examples
     const examples_step = b.step("run-examples", "Run all usage examples");
     examples_step.dependOn(&run_basic.step);
     examples_step.dependOn(&run_game.step);
     examples_step.dependOn(&run_platformer.step);
     examples_step.dependOn(&run_engine.step);
+    examples_step.dependOn(&run_building.step);
 }

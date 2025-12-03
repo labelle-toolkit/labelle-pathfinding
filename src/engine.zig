@@ -19,6 +19,25 @@ const EntityPoint = quad_tree.EntityPoint;
 const Point2D = quad_tree.Point2D;
 const FloydWarshall = @import("floyd_warshall.zig").FloydWarshall;
 
+/// Log level for controlling pathfinding engine verbosity
+pub const LogLevel = enum {
+    /// Disable all logging
+    none,
+    /// Critical failures only
+    err,
+    /// Recoverable errors and warnings
+    warning,
+    /// Path requests, entity registration, graph rebuilds
+    info,
+    /// Detailed operational logs: path steps, stair queues, spatial updates
+    debug,
+
+    /// Check if this log level allows messages at the given level
+    pub fn allows(self: LogLevel, level: LogLevel) bool {
+        return @intFromEnum(self) >= @intFromEnum(level);
+    }
+};
+
 /// Node identifier type
 pub const NodeId = u32;
 
@@ -77,9 +96,44 @@ pub const NodePoint = struct {
 pub fn PathfindingEngine(comptime Config: type) type {
     const Entity = Config.Entity;
     const Context = Config.Context;
+    // Extract log_level from Config, defaulting to .none (silent)
+    const log_level: LogLevel = if (@hasDecl(Config, "log_level")) Config.log_level else .none;
 
     return struct {
         const Self = @This();
+
+        // =======================================================
+        // Logging
+        // =======================================================
+
+        fn log(comptime level: LogLevel, comptime fmt: []const u8, args: anytype) void {
+            if (comptime !log_level.allows(level)) return;
+
+            const scoped = std.log.scoped(.pathfinding);
+            switch (level) {
+                .err => scoped.err(fmt, args),
+                .warning => scoped.warn(fmt, args),
+                .info => scoped.info(fmt, args),
+                .debug => scoped.debug(fmt, args),
+                .none => {},
+            }
+        }
+
+        fn logErr(comptime fmt: []const u8, args: anytype) void {
+            log(.err, fmt, args);
+        }
+
+        fn logWarn(comptime fmt: []const u8, args: anytype) void {
+            log(.warning, fmt, args);
+        }
+
+        fn logInfo(comptime fmt: []const u8, args: anytype) void {
+            log(.info, fmt, args);
+        }
+
+        fn logDebug(comptime fmt: []const u8, args: anytype) void {
+            log(.debug, fmt, args);
+        }
 
         /// Position data owned by pathfinding
         pub const PositionPF = struct {
@@ -645,6 +699,8 @@ pub fn PathfindingEngine(comptime Config: type) type {
             const node_count = self.nodes.count();
             if (node_count == 0) return;
 
+            logInfo("Rebuilding paths for {} nodes", .{node_count});
+
             self.floyd_warshall.resize(@intCast(node_count));
             try self.floyd_warshall.clean();
 
@@ -674,6 +730,8 @@ pub fn PathfindingEngine(comptime Config: type) type {
         pub fn registerEntity(self: *Self, entity: Entity, x: f32, y: f32, speed: f32) !void {
             const nearest = try self.findNearestNode(x, y);
 
+            logInfo("Registering entity at ({d:.1}, {d:.1}), nearest node: {}", .{ x, y, nearest });
+
             const pos = PositionPF{
                 .x = x,
                 .y = y,
@@ -691,6 +749,7 @@ pub fn PathfindingEngine(comptime Config: type) type {
 
         /// Unregister an entity
         pub fn unregisterEntity(self: *Self, entity: Entity) void {
+            logInfo("Unregistering entity {}", .{entity});
             if (self.entities.getPtr(entity)) |pos| {
                 pos.path.deinit(self.allocator);
             }
@@ -719,19 +778,26 @@ pub fn PathfindingEngine(comptime Config: type) type {
 
         /// Request a path to a specific node
         pub fn requestPath(self: *Self, entity: Entity, target: NodeId) !void {
-            const pos = self.entities.getPtr(entity) orelse return error.EntityNotFound;
+            const pos = self.entities.getPtr(entity) orelse {
+                logWarn("Path request for unknown entity {}", .{entity});
+                return error.EntityNotFound;
+            };
+
+            logInfo("Entity {} path requested from node {} to node {}", .{ entity, pos.current_node, target });
 
             pos.path.clearRetainingCapacity();
             pos.path_index = 0;
             pos.target_node = target;
 
             if (pos.current_node == target) {
+                logDebug("Entity already at target node {}", .{target});
                 pos.target_node = null;
                 return;
             }
 
             // Build path using Floyd-Warshall
             if (!self.floyd_warshall.hasPathWithMapping(pos.current_node, target)) {
+                logWarn("No path exists from node {} to node {}", .{ pos.current_node, target });
                 return error.NoPathExists;
             }
 
@@ -743,6 +809,8 @@ pub fn PathfindingEngine(comptime Config: type) type {
             for (path_list.items[1..]) |node_id| {
                 try pos.path.append(self.allocator, node_id);
             }
+
+            logDebug("Path computed with {} nodes", .{pos.path.items.len});
         }
 
         /// Request a path to a position (snaps to nearest node)
@@ -879,6 +947,7 @@ pub fn PathfindingEngine(comptime Config: type) type {
                     if (stair_node) |sn| {
                         if (self.stair_states.getPtr(sn)) |state| {
                             if (!state.canEnter(dir)) {
+                                logDebug("Entity waiting for stair {} (direction: {})", .{ sn, @intFromEnum(dir) });
                                 // Cannot enter stair - find waiting spot
                                 if (self.findAvailableWaitingSpot(sn)) |wait_spot| {
                                     const wait_node = self.nodes.get(wait_spot) orelse continue;
@@ -896,7 +965,7 @@ pub fn PathfindingEngine(comptime Config: type) type {
                                 }
                                 // Add to waiting queue
                                 state.waiting_queue.append(self.allocator, entity) catch |err| {
-                                    std.log.err("Failed to add entity to stair waiting queue: {}", .{err});
+                                    logErr("Failed to add entity to stair waiting queue: {}", .{err});
                                     // Clear waiting state since we couldn't add to queue
                                     if (pos.waiting_at_node) |spot| {
                                         if (self.waiting_areas.getPtr(sn)) |area| {
@@ -910,6 +979,7 @@ pub fn PathfindingEngine(comptime Config: type) type {
                                 continue;
                             } else {
                                 // Can enter - register as user
+                                logDebug("Entity entering stair {} (direction: {})", .{ sn, @intFromEnum(dir) });
                                 state.enter(dir);
                                 pos.using_stair = sn;
                             }
@@ -927,12 +997,15 @@ pub fn PathfindingEngine(comptime Config: type) type {
                     if (pos.using_stair) |stair_node| {
                         // Check if we're leaving the stair (current node is different from stair node)
                         if (next_node_id != stair_node) {
+                            logDebug("Entity exiting stair {}", .{stair_node});
                             if (self.stair_states.getPtr(stair_node)) |state| {
                                 state.exit();
                             }
                             pos.using_stair = null;
                         }
                     }
+
+                    logDebug("Entity reached node {} (path step {}/{})", .{ next_node_id, pos.path_index + 1, pos.path.items.len });
 
                     pos.x = next_node.x;
                     pos.y = next_node.y;
@@ -942,11 +1015,12 @@ pub fn PathfindingEngine(comptime Config: type) type {
 
                     // Queue node reached event
                     self.node_reached_events.append(self.allocator, .{ .entity = entity, .node = next_node_id }) catch |err| {
-                        std.log.err("Failed to queue node_reached event: {}", .{err});
+                        logErr("Failed to queue node_reached event: {}", .{err});
                     };
 
                     // Check if path complete
                     if (pos.path_index >= pos.path.items.len) {
+                        logDebug("Entity completed path at node {}", .{next_node_id});
                         pos.target_node = null;
                         // Make sure to exit stair if we finished on one
                         if (pos.using_stair) |stair_node| {
@@ -956,7 +1030,7 @@ pub fn PathfindingEngine(comptime Config: type) type {
                             pos.using_stair = null;
                         }
                         self.path_completed_events.append(self.allocator, .{ .entity = entity, .node = next_node_id }) catch |err| {
-                            std.log.err("Failed to queue path_completed event: {}", .{err});
+                            logErr("Failed to queue path_completed event: {}", .{err});
                         };
                     }
                 } else {
@@ -1004,6 +1078,7 @@ pub fn PathfindingEngine(comptime Config: type) type {
                 if (self.stair_states.getPtr(stair_node)) |state| {
                     if (state.canEnter(dir)) {
                         // Can now enter - remove from waiting
+                        logDebug("Entity {} proceeding from stair {} queue (direction: {})", .{ entity, stair_node, @intFromEnum(dir) });
                         state.enter(dir);
                         pos.using_stair = stair_node;
 

@@ -60,6 +60,8 @@ const pathfinding = @import("pathfinding");
 const Config = struct {
     pub const Entity = u64;
     pub const Context = *Game;
+    // Optional: configure log verbosity (defaults to .none)
+    pub const log_level: pathfinding.LogLevel = .info;
 };
 
 const Engine = pathfinding.PathfindingEngine(Config);
@@ -106,6 +108,28 @@ pub fn main() !void {
 }
 ```
 
+### Log Levels
+
+Control logging verbosity via the Config struct:
+
+```zig
+const Config = struct {
+    pub const Entity = u64;
+    pub const Context = *Game;
+    pub const log_level: pathfinding.LogLevel = .debug;  // verbose logging
+};
+```
+
+| Level | Description |
+|-------|-------------|
+| `.none` | Disable all logging (default) |
+| `.err` | Critical failures only |
+| `.warning` | Recoverable errors (e.g., entity not found, no path exists) |
+| `.info` | Path requests, entity registration/unregistration, graph rebuilds |
+| `.debug` | Detailed: path steps, stair queue operations, spatial updates |
+
+Logs use Zig's `std.log` scoped to `.pathfinding`, so they integrate with your application's log configuration.
+
 ### Callbacks
 
 ```zig
@@ -118,7 +142,7 @@ fn onPathCompleted(game: *Game, entity: u64, node: u32) void {
 }
 
 fn onPathBlocked(game: *Game, entity: u64, node: u32) void {
-    // No path available
+    // No path available to target node
 }
 
 // Set callbacks
