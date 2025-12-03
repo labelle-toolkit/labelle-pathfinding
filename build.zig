@@ -8,7 +8,7 @@ pub fn build(b: *std.Build) void {
     const zig_utils_dep = b.dependency("zig_utils", .{});
     const zig_utils = zig_utils_dep.module("zig_utils");
 
-    // zig-ecs dependency
+    // zig-ecs dependency (kept for legacy components)
     const zig_ecs_dep = b.dependency("zig_ecs", .{});
     const zig_ecs = zig_ecs_dep.module("zig-ecs");
 
@@ -21,14 +21,6 @@ pub fn build(b: *std.Build) void {
             .{ .name = "zig_utils", .module = zig_utils },
             .{ .name = "ecs", .module = zig_ecs },
         },
-    });
-
-    // Export ecs module for consumers who need direct ECS access
-    // This prevents module collisions when projects need both pathfinding and ecs
-    _ = b.addModule("ecs", .{
-        .root_source_file = zig_ecs.root_source_file,
-        .target = target,
-        .optimize = optimize,
     });
 
     // zspec dependency
@@ -76,11 +68,11 @@ pub fn build(b: *std.Build) void {
 
     // ===== Usage Examples =====
 
-    // Floyd-Warshall example
-    const floyd_example = b.addExecutable(.{
-        .name = "floyd_warshall_example",
+    // Basic example (recommended starting point)
+    const basic_example = b.addExecutable(.{
+        .name = "basic_example",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("usage/floyd_warshall_example.zig"),
+            .root_source_file = b.path("usage/basic_example.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
@@ -88,17 +80,17 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    b.installArtifact(floyd_example);
+    b.installArtifact(basic_example);
 
-    const run_floyd = b.addRunArtifact(floyd_example);
-    const floyd_step = b.step("run-floyd", "Run Floyd-Warshall example");
-    floyd_step.dependOn(&run_floyd.step);
+    const run_basic = b.addRunArtifact(basic_example);
+    const basic_step = b.step("run-basic", "Run basic example (start here!)");
+    basic_step.dependOn(&run_basic.step);
 
-    // A* example
-    const astar_example = b.addExecutable(.{
-        .name = "a_star_example",
+    // Game integration example
+    const game_example = b.addExecutable(.{
+        .name = "game_example",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("usage/a_star_example.zig"),
+            .root_source_file = b.path("usage/game_example.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
@@ -106,17 +98,17 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    b.installArtifact(astar_example);
+    b.installArtifact(game_example);
 
-    const run_astar = b.addRunArtifact(astar_example);
-    const astar_step = b.step("run-astar", "Run A* algorithm example");
-    astar_step.dependOn(&run_astar.step);
+    const run_game = b.addRunArtifact(game_example);
+    const game_step = b.step("run-game", "Run game integration example");
+    game_step.dependOn(&run_game.step);
 
-    // Comparison example
-    const compare_example = b.addExecutable(.{
-        .name = "comparison_example",
+    // Platformer example (directional connections)
+    const platformer_example = b.addExecutable(.{
+        .name = "platformer_example",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("usage/comparison_example.zig"),
+            .root_source_file = b.path("usage/platformer_example.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
@@ -124,32 +116,13 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    b.installArtifact(compare_example);
+    b.installArtifact(platformer_example);
 
-    const run_compare = b.addRunArtifact(compare_example);
-    const compare_step = b.step("run-compare", "Run algorithm comparison example");
-    compare_step.dependOn(&run_compare.step);
+    const run_platformer = b.addRunArtifact(platformer_example);
+    const platformer_step = b.step("run-platformer", "Run platformer example");
+    platformer_step.dependOn(&run_platformer.step);
 
-    // ECS integration example (demonstrates using both pathfinding and ecs modules)
-    const ecs_example = b.addExecutable(.{
-        .name = "ecs_integration_example",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("usage/ecs_integration_example.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{
-                .{ .name = "pathfinding", .module = pathfinding_module },
-                .{ .name = "ecs", .module = zig_ecs },
-            },
-        }),
-    });
-    b.installArtifact(ecs_example);
-
-    const run_ecs = b.addRunArtifact(ecs_example);
-    const ecs_step = b.step("run-ecs", "Run ECS integration example");
-    ecs_step.dependOn(&run_ecs.step);
-
-    // PathfindingEngine example (self-contained pathfinding)
+    // Full engine example (all features)
     const engine_example = b.addExecutable(.{
         .name = "engine_example",
         .root_module = b.createModule(.{
@@ -164,14 +137,13 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(engine_example);
 
     const run_engine = b.addRunArtifact(engine_example);
-    const engine_step = b.step("run-engine", "Run PathfindingEngine example");
+    const engine_step = b.step("run-engine", "Run full engine example");
     engine_step.dependOn(&run_engine.step);
 
     // Run all examples
     const examples_step = b.step("run-examples", "Run all usage examples");
-    examples_step.dependOn(&run_floyd.step);
-    examples_step.dependOn(&run_astar.step);
-    examples_step.dependOn(&run_compare.step);
-    examples_step.dependOn(&run_ecs.step);
+    examples_step.dependOn(&run_basic.step);
+    examples_step.dependOn(&run_game.step);
+    examples_step.dependOn(&run_platformer.step);
     examples_step.dependOn(&run_engine.step);
 }

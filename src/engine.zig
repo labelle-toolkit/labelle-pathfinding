@@ -42,6 +42,13 @@ pub const NodeData = struct {
     y: f32,
 };
 
+/// Point with ID for bulk node creation
+pub const NodePoint = struct {
+    id: NodeId,
+    x: f32,
+    y: f32,
+};
+
 /// Pathfinding engine with comptime configuration
 pub fn PathfindingEngine(comptime Config: type) type {
     const Entity = Config.Entity;
@@ -174,7 +181,7 @@ pub fn PathfindingEngine(comptime Config: type) type {
         }
 
         /// Add multiple nodes from an array of points
-        pub fn addNodesFromPoints(self: *Self, points: []const struct { id: NodeId, x: f32, y: f32 }) !void {
+        pub fn addNodesFromPoints(self: *Self, points: []const NodePoint) !void {
             for (points) |p| {
                 try self.addNode(p.id, p.x, p.y);
             }

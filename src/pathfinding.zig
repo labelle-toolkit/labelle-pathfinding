@@ -110,6 +110,7 @@ pub const PathfindingEngine = engine.PathfindingEngine;
 pub const ConnectionMode = engine.ConnectionMode;
 pub const NodeId = engine.NodeId;
 pub const NodeData = engine.NodeData;
+pub const NodePoint = engine.NodePoint;
 
 // Spatial indexing
 pub const quad_tree = @import("quad_tree.zig");
