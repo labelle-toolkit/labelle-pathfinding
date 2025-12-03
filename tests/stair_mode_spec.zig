@@ -380,3 +380,70 @@ test "stair_mode: backward compatibility with existing directional mode" {
     try std.testing.expectEqual(@as(?u32, 1), e0.down);
     try std.testing.expectEqual(@as(?u32, 0), e1.up);
 }
+
+test "stair_mode: single stair does not teleport entity on subsequent frames" {
+    // Regression test for issue #19:
+    // state.enter() was called every frame, causing users_count to increment
+    // repeatedly. On frame 2, canEnter(.single) returned false and teleported
+    // the entity to a waiting spot.
+
+    var engine = try Engine.init(std.testing.allocator);
+    defer engine.deinit();
+
+    // Simple two-floor setup with single-file stair
+    try engine.addNode(0, 0, 0); // floor 1 entry
+    try engine.addNodeWithStairMode(1, 100, 0, .single); // stair top
+    try engine.addNodeWithStairMode(2, 100, 100, .single); // stair bottom
+    try engine.addNode(3, 200, 100); // floor 2 exit
+
+    // Add waiting spot (required for .single mode when stair is busy)
+    try engine.addNode(4, 50, 0);
+    try engine.setWaitingArea(1, &[_]u32{4});
+
+    try engine.connectNodes(.{ .building = .{ .horizontal_range = 120, .floor_height = 150 } });
+    try engine.rebuildPaths();
+
+    // Register entity and request path through the stair
+    try engine.registerEntity(1, 0, 0, 50.0); // slow speed to ensure multiple frames on stair
+    try engine.requestPath(1, 3);
+
+    var dummy: u32 = 0;
+
+    // Tick until entity reaches the stair node
+    for (0..30) |_| {
+        engine.tick(&dummy, 0.1);
+        const pos = engine.getPositionFull(1).?;
+        if (pos.current_node == 1) break;
+    }
+
+    // Entity should be at or moving through stair node 1
+    const pos_at_stair = engine.getPositionFull(1).?;
+    try std.testing.expectEqual(@as(u32, 1), pos_at_stair.current_node);
+
+    // Record position before more ticks
+    const x_before = pos_at_stair.x;
+    const y_before = pos_at_stair.y;
+
+    // Tick a few more times - entity should continue moving smoothly, NOT teleport
+    for (0..5) |_| {
+        engine.tick(&dummy, 0.1);
+    }
+
+    const pos_after = engine.getPositionFull(1).?;
+
+    // Entity should NOT be teleported to waiting spot (node 4 at x=50)
+    // It should either still be on the stair (moving toward node 2) or have passed through
+    const was_teleported_to_waiting = pos_after.x < 60 and pos_after.waiting_for_stair != null;
+    try std.testing.expect(!was_teleported_to_waiting);
+
+    // Entity should have made progress (y should have increased toward 100, or already past)
+    const made_progress = pos_after.y > y_before or pos_after.current_node >= 2;
+    try std.testing.expect(made_progress);
+
+    // Verify users_count didn't inflate (should be 0 or 1, not 5+)
+    if (engine.getStairState(1)) |state| {
+        try std.testing.expect(state.users_count <= 1);
+    }
+
+    _ = x_before;
+}
