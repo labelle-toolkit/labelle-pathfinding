@@ -8,6 +8,7 @@ pub const position_spec = @import("position_spec.zig");
 pub const heuristics_spec = @import("heuristics_spec.zig");
 pub const controller_spec = @import("controller_spec.zig");
 pub const engine_spec = @import("engine_spec.zig");
+pub const stair_mode_spec = @import("stair_mode_spec.zig");
 
 // Re-export specs for zspec to discover
 pub const FloydWarshallSpec = floyd_warshall_spec.FloydWarshallSpec;
