@@ -149,10 +149,29 @@ pub fn build(b: *std.Build) void {
     const ecs_step = b.step("run-ecs", "Run ECS integration example");
     ecs_step.dependOn(&run_ecs.step);
 
+    // PathfindingEngine example (self-contained pathfinding)
+    const engine_example = b.addExecutable(.{
+        .name = "engine_example",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("usage/engine_example.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "pathfinding", .module = pathfinding_module },
+            },
+        }),
+    });
+    b.installArtifact(engine_example);
+
+    const run_engine = b.addRunArtifact(engine_example);
+    const engine_step = b.step("run-engine", "Run PathfindingEngine example");
+    engine_step.dependOn(&run_engine.step);
+
     // Run all examples
     const examples_step = b.step("run-examples", "Run all usage examples");
     examples_step.dependOn(&run_floyd.step);
     examples_step.dependOn(&run_astar.step);
     examples_step.dependOn(&run_compare.step);
     examples_step.dependOn(&run_ecs.step);
+    examples_step.dependOn(&run_engine.step);
 }
