@@ -421,7 +421,6 @@ test "stair_mode: single stair does not teleport entity on subsequent frames" {
     try std.testing.expectEqual(@as(u32, 1), pos_at_stair.current_node);
 
     // Record position before more ticks
-    const x_before = pos_at_stair.x;
     const y_before = pos_at_stair.y;
 
     // Tick a few more times - entity should continue moving smoothly, NOT teleport
@@ -444,8 +443,6 @@ test "stair_mode: single stair does not teleport entity on subsequent frames" {
     if (engine.getStairState(1)) |state| {
         try std.testing.expect(state.users_count <= 1);
     }
-
-    _ = x_before;
 }
 
 test "stair_mode: cancelPath releases stair correctly" {
@@ -478,10 +475,10 @@ test "stair_mode: cancelPath releases stair correctly" {
     const pos_before = engine.getPositionFull(1).?;
     try std.testing.expect(pos_before.using_stair != null);
 
-    // Check stair has user
+    // Check stair has exactly one user
     const stair_node = pos_before.using_stair.?;
     const state_before = engine.getStairState(stair_node).?;
-    try std.testing.expect(state_before.users_count >= 1);
+    try std.testing.expectEqual(@as(u32, 1), state_before.users_count);
 
     // Cancel the path
     engine.cancelPath(1);
@@ -526,9 +523,9 @@ test "stair_mode: unregisterEntity releases stair correctly" {
         }
     }
 
-    // Check stair has user
+    // Check stair has exactly one user
     const state_before = engine.getStairState(stair_node).?;
-    try std.testing.expect(state_before.users_count >= 1);
+    try std.testing.expectEqual(@as(u32, 1), state_before.users_count);
 
     // Unregister the entity
     engine.unregisterEntity(1);

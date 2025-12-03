@@ -751,31 +751,39 @@ pub fn PathfindingEngine(comptime Config: type) type {
         pub fn unregisterEntity(self: *Self, entity: Entity) void {
             logInfo("Unregistering entity {}", .{entity});
             if (self.entities.getPtr(entity)) |pos| {
-                // Exit stair if currently using one
-                if (pos.using_stair) |stair_node| {
-                    if (self.stair_states.getPtr(stair_node)) |state| {
-                        state.exit();
-                    }
-                }
-
-                // Clear waiting state if waiting for a stair
-                if (pos.waiting_for_stair) |stair_node| {
-                    if (pos.waiting_at_node) |wait_spot| {
-                        if (self.waiting_areas.getPtr(stair_node)) |area| {
-                            area.releaseSpot(wait_spot);
-                        }
-                    }
-                    if (self.stair_states.getPtr(stair_node)) |state| {
-                        if (std.mem.indexOfScalar(Entity, state.waiting_queue.items, entity)) |idx| {
-                            _ = state.waiting_queue.swapRemove(idx);
-                        }
-                    }
-                }
-
+                self.releaseStairState(entity, pos);
                 pos.path.deinit(self.allocator);
             }
             _ = self.entities.remove(entity);
             _ = self.entity_spatial.remove(entity);
+        }
+
+        /// Release stair and waiting state for an entity
+        fn releaseStairState(self: *Self, entity: Entity, pos: *PositionPF) void {
+            // Exit stair if currently using one
+            if (pos.using_stair) |stair_node| {
+                if (self.stair_states.getPtr(stair_node)) |state| {
+                    state.exit();
+                }
+                pos.using_stair = null;
+            }
+
+            // Clear waiting state if waiting for a stair
+            if (pos.waiting_for_stair) |stair_node| {
+                if (pos.waiting_at_node) |wait_spot| {
+                    if (self.waiting_areas.getPtr(stair_node)) |area| {
+                        area.releaseSpot(wait_spot);
+                    }
+                }
+                if (self.stair_states.getPtr(stair_node)) |state| {
+                    if (std.mem.indexOfScalar(Entity, state.waiting_queue.items, entity)) |idx| {
+                        _ = state.waiting_queue.swapRemove(idx);
+                    }
+                }
+                pos.waiting_for_stair = null;
+                pos.waiting_at_node = null;
+                pos.waiting_direction = null;
+            }
         }
 
         /// Set entity movement speed
@@ -843,32 +851,8 @@ pub fn PathfindingEngine(comptime Config: type) type {
         /// Cancel the current path
         pub fn cancelPath(self: *Self, entity: Entity) void {
             if (self.entities.getPtr(entity)) |pos| {
-                // Exit stair if currently using one
-                if (pos.using_stair) |stair_node| {
-                    if (self.stair_states.getPtr(stair_node)) |state| {
-                        logDebug("Entity {} cancelling path, exiting stair {}", .{ entity, stair_node });
-                        state.exit();
-                    }
-                    pos.using_stair = null;
-                }
-
-                // Clear waiting state if waiting for a stair
-                if (pos.waiting_for_stair) |stair_node| {
-                    if (pos.waiting_at_node) |wait_spot| {
-                        if (self.waiting_areas.getPtr(stair_node)) |area| {
-                            area.releaseSpot(wait_spot);
-                        }
-                    }
-                    if (self.stair_states.getPtr(stair_node)) |state| {
-                        if (std.mem.indexOfScalar(Entity, state.waiting_queue.items, entity)) |idx| {
-                            _ = state.waiting_queue.swapRemove(idx);
-                        }
-                    }
-                    pos.waiting_for_stair = null;
-                    pos.waiting_at_node = null;
-                    pos.waiting_direction = null;
-                }
-
+                logDebug("Entity {} cancelling path", .{entity});
+                self.releaseStairState(entity, pos);
                 pos.path.clearRetainingCapacity();
                 pos.path_index = 0;
                 pos.target_node = null;
