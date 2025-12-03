@@ -1,6 +1,6 @@
 .{
     .name = .labelle_pathfinding,
-    .version = "1.0.3",
+    .version = "2.0.0",
     .fingerprint = 0x15f62ccc39d14685,
     .minimum_zig_version = "0.15.2",
     .dependencies = .{
