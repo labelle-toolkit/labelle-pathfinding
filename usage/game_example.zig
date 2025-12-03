@@ -64,9 +64,8 @@ fn onNodeReached(game: *GameState, entity: EntityId, node: pathfinding.NodeId) v
         .enemy => "Enemy",
         .npc => "NPC",
     };
-    _ = node;
-    _ = type_name;
     // In a real game, you might trigger events here
+    _ = .{ node, type_name };
 }
 
 fn onPathCompleted(game: *GameState, entity: EntityId, node: pathfinding.NodeId) void {
@@ -104,7 +103,7 @@ pub fn main() !void {
     var game = GameState.init(allocator);
     defer game.deinit();
 
-    var pf = Pathfinding.init(allocator);
+    var pf = try Pathfinding.init(allocator);
     defer pf.deinit();
 
     // Set up callbacks

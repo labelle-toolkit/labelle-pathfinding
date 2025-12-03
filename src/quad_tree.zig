@@ -75,14 +75,12 @@ pub fn QuadTree(comptime T: type) type {
 
         allocator: std.mem.Allocator,
 
-        pub fn init(allocator: std.mem.Allocator, boundary: Rectangle) Self {
+        pub fn init(allocator: std.mem.Allocator, boundary: Rectangle) !Self {
             var qt = Self{
                 .nodes = .{},
                 .allocator = allocator,
             };
-            qt.nodes.append(allocator, .{ .boundary = boundary }) catch |err| {
-                std.log.err("Error appending node: {}\n", .{err});
-            };
+            try qt.nodes.append(allocator, .{ .boundary = boundary });
             return qt;
         }
 
@@ -91,7 +89,7 @@ pub fn QuadTree(comptime T: type) type {
         }
 
         /// Clear the tree and reset with new boundary computed from points
-        pub fn resetWithBoundaries(self: *Self, points: []const Point2D) void {
+        pub fn resetWithBoundaries(self: *Self, points: []const Point2D) !void {
             self.nodes.clearRetainingCapacity();
             self.lowest_x = std.math.inf(f32);
             self.lowest_y = std.math.inf(f32);
@@ -105,31 +103,28 @@ pub fn QuadTree(comptime T: type) type {
                 if (point.y > self.highest_y) self.highest_y = point.y;
             }
 
-            self.nodes.append(self.allocator, .{ .boundary = .{
+            try self.nodes.append(self.allocator, .{ .boundary = .{
                 .x = self.lowest_x - self.gutter,
                 .y = self.lowest_y - self.gutter,
                 .width = (self.highest_x - self.lowest_x) + self.gutter * 2,
                 .height = (self.highest_y - self.lowest_y) + self.gutter * 2,
-            } }) catch |err| {
-                std.log.err("Error appending node: {}\n", .{err});
-            };
+            } });
         }
 
         /// Clear the tree keeping current boundaries
-        pub fn reset(self: *Self) void {
-            self.nodes.clearRetainingCapacity();
-            self.nodes.append(self.allocator, .{ .boundary = .{
+        pub fn reset(self: *Self) !void {
+            const boundary = Rectangle{
                 .x = self.lowest_x - self.gutter,
                 .y = self.lowest_y - self.gutter,
                 .width = (self.highest_x - self.lowest_x) + self.gutter * 2,
                 .height = (self.highest_y - self.lowest_y) + self.gutter * 2,
-            } }) catch |err| {
-                std.log.err("Error appending node: {}\n", .{err});
             };
+            self.nodes.clearRetainingCapacity();
             self.lowest_x = std.math.inf(f32);
             self.lowest_y = std.math.inf(f32);
             self.highest_x = -std.math.inf(f32);
             self.highest_y = -std.math.inf(f32);
+            try self.nodes.append(self.allocator, .{ .boundary = boundary });
         }
 
         /// Insert a point into the tree
@@ -319,7 +314,7 @@ pub fn QuadTree(comptime T: type) type {
 test "QuadTree basic operations" {
     const allocator = std.testing.allocator;
 
-    var qt = QuadTree(u32).init(allocator, .{ .x = 0, .y = 0, .width = 100, .height = 100 });
+    var qt = try QuadTree(u32).init(allocator, .{ .x = 0, .y = 0, .width = 100, .height = 100 });
     defer qt.deinit();
 
     // Insert points
@@ -349,7 +344,7 @@ test "QuadTree basic operations" {
 test "QuadTree subdivide" {
     const allocator = std.testing.allocator;
 
-    var qt = QuadTree(u32).init(allocator, .{ .x = 0, .y = 0, .width = 100, .height = 100 });
+    var qt = try QuadTree(u32).init(allocator, .{ .x = 0, .y = 0, .width = 100, .height = 100 });
     defer qt.deinit();
 
     // Insert more than capacity to trigger subdivide

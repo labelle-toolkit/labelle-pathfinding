@@ -8,19 +8,20 @@ const pathfinding = @import("pathfinding");
 
 const print = std.debug.print;
 
-// Your game's entity type (can be any integer type)
-const Entity = u64;
-
 // Your game context passed to callbacks
 const Game = struct {
     name: []const u8,
 };
 
 // Configure the engine with your types
+// Entity can be any integer type (u32, u64, etc.)
 const Config = struct {
     pub const Entity = u64;
     pub const Context = *Game;
 };
+
+// Alias for convenience
+const Entity = Config.Entity;
 
 const Engine = pathfinding.PathfindingEngine(Config);
 
@@ -32,7 +33,7 @@ pub fn main() !void {
     print("\n=== Basic PathfindingEngine Example ===\n\n", .{});
 
     var game = Game{ .name = "My Game" };
-    var engine = Engine.init(allocator);
+    var engine = try Engine.init(allocator);
     defer engine.deinit();
 
     // ===== Step 1: Create waypoints (nodes) =====

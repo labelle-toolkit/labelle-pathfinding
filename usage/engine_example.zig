@@ -49,7 +49,7 @@ pub fn main() !void {
 
     // Initialize game state and pathfinding engine
     var game = Game{};
-    var engine = Engine.init(allocator);
+    var engine = try Engine.init(allocator);
     defer engine.deinit();
 
     // Set up callbacks

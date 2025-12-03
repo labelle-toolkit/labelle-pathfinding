@@ -12,7 +12,7 @@ const TestConfig = struct {
 const Engine = PathfindingEngine(TestConfig);
 
 test "engine: add and remove nodes" {
-    var engine = Engine.init(std.testing.allocator);
+    var engine = try Engine.init(std.testing.allocator);
     defer engine.deinit();
 
     try engine.addNode(0, 0, 0);
@@ -26,7 +26,7 @@ test "engine: add and remove nodes" {
 }
 
 test "engine: auto node id" {
-    var engine = Engine.init(std.testing.allocator);
+    var engine = try Engine.init(std.testing.allocator);
     defer engine.deinit();
 
     const id1 = try engine.addNodeAuto(0, 0);
@@ -39,7 +39,7 @@ test "engine: auto node id" {
 }
 
 test "engine: omnidirectional connections" {
-    var engine = Engine.init(std.testing.allocator);
+    var engine = try Engine.init(std.testing.allocator);
     defer engine.deinit();
 
     // Create a grid of nodes
@@ -58,7 +58,7 @@ test "engine: omnidirectional connections" {
 }
 
 test "engine: directional connections" {
-    var engine = Engine.init(std.testing.allocator);
+    var engine = try Engine.init(std.testing.allocator);
     defer engine.deinit();
 
     // Create nodes in a cross pattern
@@ -79,7 +79,7 @@ test "engine: directional connections" {
 }
 
 test "engine: entity registration" {
-    var engine = Engine.init(std.testing.allocator);
+    var engine = try Engine.init(std.testing.allocator);
     defer engine.deinit();
 
     try engine.addNode(0, 0, 0);
@@ -103,7 +103,7 @@ test "engine: entity registration" {
 }
 
 test "engine: pathfinding" {
-    var engine = Engine.init(std.testing.allocator);
+    var engine = try Engine.init(std.testing.allocator);
     defer engine.deinit();
 
     // Create a line of nodes
@@ -139,7 +139,7 @@ test "engine: pathfinding" {
 }
 
 test "engine: spatial queries" {
-    var engine = Engine.init(std.testing.allocator);
+    var engine = try Engine.init(std.testing.allocator);
     defer engine.deinit();
 
     try engine.addNode(0, 0, 0);
@@ -162,7 +162,7 @@ test "engine: spatial queries" {
 }
 
 test "engine: cancel path" {
-    var engine = Engine.init(std.testing.allocator);
+    var engine = try Engine.init(std.testing.allocator);
     defer engine.deinit();
 
     try engine.addNode(0, 0, 0);
@@ -194,7 +194,7 @@ test "engine: callbacks" {
         }
     };
 
-    var engine = Engine.init(std.testing.allocator);
+    var engine = try Engine.init(std.testing.allocator);
     defer engine.deinit();
 
     engine.on_path_completed = CallbackState.onCompleted;

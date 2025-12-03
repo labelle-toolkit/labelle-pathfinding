@@ -108,16 +108,16 @@ pub fn PathfindingEngine(comptime Config: type) type {
         path_completed_events: std.ArrayListUnmanaged(PathEvent),
         path_blocked_events: std.ArrayListUnmanaged(PathEvent),
 
-        pub fn init(allocator: std.mem.Allocator) Self {
+        pub fn init(allocator: std.mem.Allocator) !Self {
             return .{
                 .allocator = allocator,
                 .nodes = std.AutoHashMap(NodeId, NodeData).init(allocator),
                 .edges = std.AutoHashMap(NodeId, std.ArrayListUnmanaged(NodeId)).init(allocator),
                 .directional_edges = std.AutoHashMap(NodeId, DirectionalEdges).init(allocator),
-                .node_spatial = QuadTree(NodeId).init(allocator, .{ .x = -50000, .y = -50000, .width = 100000, .height = 100000 }),
+                .node_spatial = try QuadTree(NodeId).init(allocator, .{ .x = -50000, .y = -50000, .width = 100000, .height = 100000 }),
                 .floyd_warshall = FloydWarshall.init(allocator),
                 .entities = std.AutoHashMap(Entity, PositionPF).init(allocator),
-                .entity_spatial = QuadTree(Entity).init(allocator, .{ .x = -50000, .y = -50000, .width = 100000, .height = 100000 }),
+                .entity_spatial = try QuadTree(Entity).init(allocator, .{ .x = -50000, .y = -50000, .width = 100000, .height = 100000 }),
                 .node_reached_events = .{},
                 .path_completed_events = .{},
                 .path_blocked_events = .{},
@@ -219,7 +219,7 @@ pub fn PathfindingEngine(comptime Config: type) type {
                 try points.append(self.allocator, Point2D{ .x = entry.value_ptr.x, .y = entry.value_ptr.y });
             }
 
-            self.node_spatial.resetWithBoundaries(points.items);
+            try self.node_spatial.resetWithBoundaries(points.items);
 
             node_iter = self.nodes.iterator();
             while (node_iter.next()) |entry| {
@@ -403,7 +403,7 @@ pub fn PathfindingEngine(comptime Config: type) type {
                     const to_node = self.nodes.get(to) orelse continue;
                     const dx = to_node.x - from_node.x;
                     const dy = to_node.y - from_node.y;
-                    const dist: u64 = @intFromFloat(@sqrt(dx * dx + dy * dy));
+                    const dist: u64 = @intFromFloat(@round(@sqrt(dx * dx + dy * dy)));
                     self.floyd_warshall.addEdgeWithMapping(from, to, @max(1, dist));
                 }
             }
@@ -616,12 +616,16 @@ pub fn PathfindingEngine(comptime Config: type) type {
                     pos.edge_progress = 0;
 
                     // Queue node reached event
-                    self.node_reached_events.append(self.allocator, .{ .entity = entity, .node = next_node_id }) catch {};
+                    self.node_reached_events.append(self.allocator, .{ .entity = entity, .node = next_node_id }) catch |err| {
+                        std.log.err("Failed to queue node_reached event: {}", .{err});
+                    };
 
                     // Check if path complete
                     if (pos.path_index >= pos.path.items.len) {
                         pos.target_node = null;
-                        self.path_completed_events.append(self.allocator, .{ .entity = entity, .node = next_node_id }) catch {};
+                        self.path_completed_events.append(self.allocator, .{ .entity = entity, .node = next_node_id }) catch |err| {
+                            std.log.err("Failed to queue path_completed event: {}", .{err});
+                        };
                     }
                 } else {
                     // Move towards node
@@ -733,7 +737,7 @@ test "PathfindingEngine basic" {
     };
 
     const Engine = PathfindingEngine(TestConfig);
-    var engine = Engine.init(std.testing.allocator);
+    var engine = try Engine.init(std.testing.allocator);
     defer engine.deinit();
 
     // Add nodes

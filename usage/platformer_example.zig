@@ -22,7 +22,7 @@ pub fn main() !void {
 
     print("\n=== Platformer Pathfinding Example ===\n\n", .{});
 
-    var engine = Engine.init(allocator);
+    var engine = try Engine.init(allocator);
     defer engine.deinit();
 
     // ===== Build a platformer level =====
