@@ -60,7 +60,7 @@ const pathfinding = @import("pathfinding");
 const Config = struct {
     pub const Entity = u64;
     pub const Context = *Game;
-    // Optional: configure log verbosity (defaults to .err)
+    // Optional: configure log verbosity (defaults to .none)
     pub const log_level: pathfinding.LogLevel = .info;
 };
 
@@ -122,8 +122,8 @@ const Config = struct {
 
 | Level | Description |
 |-------|-------------|
-| `.none` | Disable all logging |
-| `.err` | Critical failures only (default) |
+| `.none` | Disable all logging (default) |
+| `.err` | Critical failures only |
 | `.warning` | Recoverable errors (e.g., entity not found, no path exists) |
 | `.info` | Path requests, entity registration/unregistration, graph rebuilds |
 | `.debug` | Detailed: path steps, stair queue operations, spatial updates |
