@@ -111,6 +111,8 @@ pub const ConnectionMode = engine.ConnectionMode;
 pub const NodeId = engine.NodeId;
 pub const NodeData = engine.NodeData;
 pub const NodePoint = engine.NodePoint;
+pub const StairMode = engine.StairMode;
+pub const VerticalDirection = engine.VerticalDirection;
 
 // Spatial indexing
 pub const quad_tree = @import("quad_tree.zig");

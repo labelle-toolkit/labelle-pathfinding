@@ -22,6 +22,24 @@ const FloydWarshall = @import("floyd_warshall.zig").FloydWarshall;
 /// Node identifier type
 pub const NodeId = u32;
 
+/// Stair mode for vertical connection traffic control
+pub const StairMode = enum {
+    /// Not a stair - no vertical connections (default)
+    none,
+    /// Multi-lane stair - unlimited concurrent usage in any direction
+    all,
+    /// Directional stair - entities can only use if another is going same direction (or empty)
+    direction,
+    /// Single-file stair - only one entity can use at a time
+    single,
+};
+
+/// Vertical direction for stair traversal
+pub const VerticalDirection = enum {
+    up,
+    down,
+};
+
 /// Connection mode for automatic graph building
 pub const ConnectionMode = union(enum) {
     /// Top-down games: connect to N closest neighbors in any direction
@@ -34,12 +52,18 @@ pub const ConnectionMode = union(enum) {
         horizontal_range: f32,
         vertical_range: f32,
     },
+    /// Building games: horizontal connections + stair-based vertical connections
+    building: struct {
+        horizontal_range: f32,
+        floor_height: f32,
+    },
 };
 
 /// Node data stored in the graph
 pub const NodeData = struct {
     x: f32,
     y: f32,
+    stair_mode: StairMode = .none,
 };
 
 /// Point with ID for bulk node creation
@@ -67,6 +91,14 @@ pub fn PathfindingEngine(comptime Config: type) type {
             speed: f32,
             path: std.ArrayListUnmanaged(NodeId),
             path_index: usize,
+            /// Node the entity is waiting to enter (stair)
+            waiting_for_stair: ?NodeId = null,
+            /// Node where entity is waiting (dispersal spot)
+            waiting_at_node: ?NodeId = null,
+            /// Direction entity wants to travel on stair
+            waiting_direction: ?VerticalDirection = null,
+            /// The stair node this entity is currently using (for exit tracking)
+            using_stair: ?NodeId = null,
         };
 
         /// Directional edges for platformer-style connections
@@ -75,6 +107,80 @@ pub fn PathfindingEngine(comptime Config: type) type {
             right: ?NodeId = null,
             up: ?NodeId = null,
             down: ?NodeId = null,
+        };
+
+        /// Runtime state for stair traffic management
+        pub const StairState = struct {
+            mode: StairMode,
+            current_direction: ?VerticalDirection = null,
+            users_count: u32 = 0,
+            waiting_queue: std.ArrayListUnmanaged(Entity) = .{},
+
+            pub fn canEnter(self: *const StairState, dir: VerticalDirection) bool {
+                return switch (self.mode) {
+                    .none => false,
+                    .all => true,
+                    .direction => self.users_count == 0 or self.current_direction == dir,
+                    .single => self.users_count == 0,
+                };
+            }
+
+            pub fn enter(self: *StairState, dir: VerticalDirection) void {
+                self.users_count += 1;
+                if (self.mode == .direction and self.current_direction == null) {
+                    self.current_direction = dir;
+                }
+            }
+
+            pub fn exit(self: *StairState) void {
+                if (self.users_count > 0) {
+                    self.users_count -= 1;
+                }
+                if (self.users_count == 0) {
+                    self.current_direction = null;
+                }
+            }
+
+            pub fn deinit(self: *StairState, allocator: std.mem.Allocator) void {
+                self.waiting_queue.deinit(allocator);
+            }
+        };
+
+        /// Waiting area for entities queued at a stair
+        pub const WaitingArea = struct {
+            stair_node: NodeId,
+            waiting_spots: std.ArrayListUnmanaged(NodeId) = .{},
+            /// Tracks which spots are occupied (spot NodeId -> occupying Entity)
+            occupied_spots: std.AutoHashMap(NodeId, Entity) = undefined,
+
+            pub fn init(allocator: std.mem.Allocator, stair_node: NodeId) WaitingArea {
+                return .{
+                    .stair_node = stair_node,
+                    .occupied_spots = std.AutoHashMap(NodeId, Entity).init(allocator),
+                };
+            }
+
+            pub fn deinit(self: *WaitingArea, allocator: std.mem.Allocator) void {
+                self.waiting_spots.deinit(allocator);
+                self.occupied_spots.deinit();
+            }
+
+            pub fn occupySpot(self: *WaitingArea, spot: NodeId, entity: Entity) void {
+                self.occupied_spots.put(spot, entity) catch {};
+            }
+
+            pub fn releaseSpot(self: *WaitingArea, spot: NodeId) void {
+                _ = self.occupied_spots.remove(spot);
+            }
+
+            pub fn findAvailableSpot(self: *WaitingArea) ?NodeId {
+                for (self.waiting_spots.items) |spot| {
+                    if (!self.occupied_spots.contains(spot)) {
+                        return spot;
+                    }
+                }
+                return null;
+            }
         };
 
         /// Event types for deferred callback invocation
@@ -98,6 +204,10 @@ pub fn PathfindingEngine(comptime Config: type) type {
         entities: std.AutoHashMap(Entity, PositionPF),
         entity_spatial: QuadTree(Entity),
 
+        // Stair management
+        stair_states: std.AutoHashMap(NodeId, StairState),
+        waiting_areas: std.AutoHashMap(NodeId, WaitingArea),
+
         // === Callbacks ===
         on_node_reached: ?*const fn (Context, Entity, NodeId) void = null,
         on_path_completed: ?*const fn (Context, Entity, NodeId) void = null,
@@ -118,6 +228,8 @@ pub fn PathfindingEngine(comptime Config: type) type {
                 .floyd_warshall = FloydWarshall.init(allocator),
                 .entities = std.AutoHashMap(Entity, PositionPF).init(allocator),
                 .entity_spatial = try QuadTree(Entity).init(allocator, .{ .x = -50000, .y = -50000, .width = 100000, .height = 100000 }),
+                .stair_states = std.AutoHashMap(NodeId, StairState).init(allocator),
+                .waiting_areas = std.AutoHashMap(NodeId, WaitingArea).init(allocator),
                 .node_reached_events = .{},
                 .path_completed_events = .{},
                 .path_blocked_events = .{},
@@ -139,6 +251,20 @@ pub fn PathfindingEngine(comptime Config: type) type {
             }
             self.edges.deinit();
 
+            // Clean up stair states
+            var stair_iter = self.stair_states.valueIterator();
+            while (stair_iter.next()) |state| {
+                state.deinit(self.allocator);
+            }
+            self.stair_states.deinit();
+
+            // Clean up waiting areas
+            var waiting_iter = self.waiting_areas.valueIterator();
+            while (waiting_iter.next()) |area| {
+                area.deinit(self.allocator);
+            }
+            self.waiting_areas.deinit();
+
             self.nodes.deinit();
             self.directional_edges.deinit();
             self.node_spatial.deinit();
@@ -153,31 +279,54 @@ pub fn PathfindingEngine(comptime Config: type) type {
         // Graph Building
         // =======================================================
 
-        /// Add a node at the given position
+        /// Add a node at the given position with optional stair mode
         pub fn addNode(self: *Self, id: NodeId, x: f32, y: f32) !void {
-            try self.nodes.put(id, .{ .x = x, .y = y });
+            try self.addNodeWithStairMode(id, x, y, .none);
+        }
+
+        /// Add a node with a specific stair mode
+        pub fn addNodeWithStairMode(self: *Self, id: NodeId, x: f32, y: f32, stair_mode: StairMode) !void {
+            try self.nodes.put(id, .{ .x = x, .y = y, .stair_mode = stair_mode });
             _ = self.node_spatial.insert(.{ .id = id, .x = x, .y = y });
             if (id >= self.next_node_id) {
                 self.next_node_id = id + 1;
+            }
+            // Initialize stair state if this is a stair node
+            if (stair_mode != .none) {
+                try self.stair_states.put(id, .{ .mode = stair_mode });
             }
         }
 
         /// Add a node and return the auto-generated ID
         pub fn addNodeAuto(self: *Self, x: f32, y: f32) !NodeId {
+            return self.addNodeAutoWithStairMode(x, y, .none);
+        }
+
+        /// Add a node with stair mode and return the auto-generated ID
+        pub fn addNodeAutoWithStairMode(self: *Self, x: f32, y: f32, stair_mode: StairMode) !NodeId {
             const id = self.next_node_id;
-            try self.addNode(id, x, y);
+            try self.addNodeWithStairMode(id, x, y, stair_mode);
             return id;
         }
 
         /// Remove a node from the graph
         pub fn removeNode(self: *Self, id: NodeId) void {
             _ = self.nodes.remove(id);
-            if (self.edges.getPtr(id)) |edge_list| {
+            if (self.edges.fetchRemove(id)) |removed| {
+                var edge_list = removed.value;
                 edge_list.deinit(self.allocator);
             }
-            _ = self.edges.remove(id);
             _ = self.directional_edges.remove(id);
             _ = self.node_spatial.remove(id);
+            // Clean up stair state if present
+            if (self.stair_states.fetchRemove(id)) |removed| {
+                var state = removed.value;
+                state.deinit(self.allocator);
+            }
+            if (self.waiting_areas.fetchRemove(id)) |removed| {
+                var area = removed.value;
+                area.deinit(self.allocator);
+            }
         }
 
         /// Add multiple nodes from an array of points
@@ -196,6 +345,18 @@ pub fn PathfindingEngine(comptime Config: type) type {
             self.edges.clearRetainingCapacity();
             self.nodes.clearRetainingCapacity();
             self.directional_edges.clearRetainingCapacity();
+            // Clear stair states
+            var stair_iter = self.stair_states.valueIterator();
+            while (stair_iter.next()) |state| {
+                state.deinit(self.allocator);
+            }
+            self.stair_states.clearRetainingCapacity();
+            // Clear waiting areas
+            var waiting_iter = self.waiting_areas.valueIterator();
+            while (waiting_iter.next()) |area| {
+                area.deinit(self.allocator);
+            }
+            self.waiting_areas.clearRetainingCapacity();
             self.node_spatial.reset();
             self.next_node_id = 0;
         }
@@ -230,6 +391,7 @@ pub fn PathfindingEngine(comptime Config: type) type {
             switch (mode) {
                 .omnidirectional => |config| try self.connectOmnidirectional(config.max_distance, config.max_connections),
                 .directional => |config| try self.connectDirectional(config.horizontal_range, config.vertical_range),
+                .building => |config| try self.connectBuilding(config.horizontal_range, config.floor_height),
             }
         }
 
@@ -332,6 +494,76 @@ pub fn PathfindingEngine(comptime Config: type) type {
             }
         }
 
+        /// Building mode: horizontal connections + stair-based vertical connections
+        /// Vertical connections only occur between stair nodes
+        fn connectBuilding(self: *Self, horizontal_range: f32, floor_height: f32) !void {
+            var buffer: std.ArrayListUnmanaged(EntityPoint(NodeId)) = .{};
+            defer buffer.deinit(self.allocator);
+
+            var node_iter = self.nodes.iterator();
+            while (node_iter.next()) |entry| {
+                const id = entry.key_ptr.*;
+                const node = entry.value_ptr.*;
+
+                var dir_edges = DirectionalEdges{};
+
+                // Right - always connect horizontally
+                buffer.clearRetainingCapacity();
+                try self.node_spatial.queryRect(.{
+                    .x = node.x + 1,
+                    .y = node.y - 5,
+                    .width = horizontal_range,
+                    .height = 10,
+                }, &buffer);
+                dir_edges.right = self.findClosest(id, node, buffer.items);
+
+                // Left - always connect horizontally
+                buffer.clearRetainingCapacity();
+                try self.node_spatial.queryRect(.{
+                    .x = node.x - horizontal_range - 1,
+                    .y = node.y - 5,
+                    .width = horizontal_range,
+                    .height = 10,
+                }, &buffer);
+                dir_edges.left = self.findClosest(id, node, buffer.items);
+
+                // Down - only connect if current node is a stair
+                if (node.stair_mode != .none) {
+                    buffer.clearRetainingCapacity();
+                    try self.node_spatial.queryRect(.{
+                        .x = node.x - 5,
+                        .y = node.y + 1,
+                        .width = 10,
+                        .height = floor_height,
+                    }, &buffer);
+                    // Find closest stair node below
+                    dir_edges.down = self.findClosestStair(id, node, buffer.items);
+                }
+
+                // Up - only connect if current node is a stair
+                // Both nodes must be stairs for bidirectional vertical connection
+                if (node.stair_mode != .none) {
+                    buffer.clearRetainingCapacity();
+                    try self.node_spatial.queryRect(.{
+                        .x = node.x - 5,
+                        .y = node.y - floor_height - 1,
+                        .width = 10,
+                        .height = floor_height,
+                    }, &buffer);
+                    // Find closest stair node above
+                    dir_edges.up = self.findClosestStair(id, node, buffer.items);
+                }
+
+                try self.directional_edges.put(id, dir_edges);
+
+                // Also add to general edges for pathfinding
+                if (dir_edges.right) |r| try self.addEdgeInternal(id, r);
+                if (dir_edges.left) |l| try self.addEdgeInternal(id, l);
+                if (dir_edges.up) |u| try self.addEdgeInternal(id, u);
+                if (dir_edges.down) |d| try self.addEdgeInternal(id, d);
+            }
+        }
+
         fn findClosest(self: *Self, exclude_id: NodeId, from: NodeData, candidates: []const EntityPoint(NodeId)) ?NodeId {
             _ = self;
             var closest: ?NodeId = null;
@@ -339,6 +571,29 @@ pub fn PathfindingEngine(comptime Config: type) type {
 
             for (candidates) |c| {
                 if (c.id == exclude_id) continue;
+                const dx = c.x - from.x;
+                const dy = c.y - from.y;
+                const dist = dx * dx + dy * dy;
+                if (dist < closest_dist) {
+                    closest_dist = dist;
+                    closest = c.id;
+                }
+            }
+
+            return closest;
+        }
+
+        /// Find closest node that is a stair (has stair_mode != .none)
+        fn findClosestStair(self: *Self, exclude_id: NodeId, from: NodeData, candidates: []const EntityPoint(NodeId)) ?NodeId {
+            var closest: ?NodeId = null;
+            var closest_dist: f32 = std.math.inf(f32);
+
+            for (candidates) |c| {
+                if (c.id == exclude_id) continue;
+                // Check if this node is a stair
+                const candidate_node = self.nodes.get(c.id) orelse continue;
+                if (candidate_node.stair_mode == .none) continue;
+
                 const dx = c.x - from.x;
                 const dy = c.y - from.y;
                 const dist = dx * dx + dy * dy;
@@ -589,11 +844,19 @@ pub fn PathfindingEngine(comptime Config: type) type {
             self.path_completed_events.clearRetainingCapacity();
             self.path_blocked_events.clearRetainingCapacity();
 
+            // First pass: check waiting entities to see if they can now proceed
+            self.processWaitingEntities();
+
             // Update all entities
             var iter = self.entities.iterator();
             while (iter.next()) |entry| {
                 const entity = entry.key_ptr.*;
                 const pos = entry.value_ptr;
+
+                // Skip entities that are waiting for a stair
+                if (pos.waiting_for_stair != null) {
+                    continue;
+                }
 
                 if (pos.target_node == null or pos.path_index >= pos.path.items.len) {
                     continue;
@@ -602,13 +865,75 @@ pub fn PathfindingEngine(comptime Config: type) type {
                 const next_node_id = pos.path.items[pos.path_index];
                 const next_node = self.nodes.get(next_node_id) orelse continue;
 
+                // Check if next movement involves a stair
+                const vertical_dir = self.getVerticalDirection(pos.current_node, next_node_id);
+                if (vertical_dir) |dir| {
+                    // This is vertical movement - check stair access
+                    const stair_node = if (self.getStairMode(next_node_id) != .none)
+                        next_node_id
+                    else if (self.getStairMode(pos.current_node) != .none)
+                        pos.current_node
+                    else
+                        null;
+
+                    if (stair_node) |sn| {
+                        if (self.stair_states.getPtr(sn)) |state| {
+                            if (!state.canEnter(dir)) {
+                                // Cannot enter stair - find waiting spot
+                                if (self.findAvailableWaitingSpot(sn)) |wait_spot| {
+                                    const wait_node = self.nodes.get(wait_spot) orelse continue;
+                                    pos.waiting_for_stair = sn;
+                                    pos.waiting_at_node = wait_spot;
+                                    pos.waiting_direction = dir;
+                                    // Mark spot as occupied
+                                    if (self.waiting_areas.getPtr(sn)) |area| {
+                                        area.occupySpot(wait_spot, entity);
+                                    }
+                                    // Move to waiting spot
+                                    pos.x = wait_node.x;
+                                    pos.y = wait_node.y;
+                                    _ = self.entity_spatial.update(entity, pos.x, pos.y);
+                                }
+                                // Add to waiting queue
+                                state.waiting_queue.append(self.allocator, entity) catch |err| {
+                                    std.log.err("Failed to add entity to stair waiting queue: {}", .{err});
+                                    // Clear waiting state since we couldn't add to queue
+                                    if (pos.waiting_at_node) |spot| {
+                                        if (self.waiting_areas.getPtr(sn)) |area| {
+                                            area.releaseSpot(spot);
+                                        }
+                                    }
+                                    pos.waiting_for_stair = null;
+                                    pos.waiting_at_node = null;
+                                    pos.waiting_direction = null;
+                                };
+                                continue;
+                            } else {
+                                // Can enter - register as user
+                                state.enter(dir);
+                                pos.using_stair = sn;
+                            }
+                        }
+                    }
+                }
+
                 // Calculate direction and distance
                 const dx = next_node.x - pos.x;
                 const dy = next_node.y - pos.y;
                 const dist = @sqrt(dx * dx + dy * dy);
 
                 if (dist < 1.0) {
-                    // Reached node
+                    // Reached node - check if we need to exit a stair
+                    if (pos.using_stair) |stair_node| {
+                        // Check if we're leaving the stair (current node is different from stair node)
+                        if (next_node_id != stair_node) {
+                            if (self.stair_states.getPtr(stair_node)) |state| {
+                                state.exit();
+                            }
+                            pos.using_stair = null;
+                        }
+                    }
+
                     pos.x = next_node.x;
                     pos.y = next_node.y;
                     pos.current_node = next_node_id;
@@ -623,6 +948,13 @@ pub fn PathfindingEngine(comptime Config: type) type {
                     // Check if path complete
                     if (pos.path_index >= pos.path.items.len) {
                         pos.target_node = null;
+                        // Make sure to exit stair if we finished on one
+                        if (pos.using_stair) |stair_node| {
+                            if (self.stair_states.getPtr(stair_node)) |state| {
+                                state.exit();
+                            }
+                            pos.using_stair = null;
+                        }
                         self.path_completed_events.append(self.allocator, .{ .entity = entity, .node = next_node_id }) catch |err| {
                             std.log.err("Failed to queue path_completed event: {}", .{err});
                         };
@@ -655,6 +987,48 @@ pub fn PathfindingEngine(comptime Config: type) type {
             if (self.on_path_blocked) |cb| {
                 for (self.path_blocked_events.items) |event| {
                     cb(ctx, event.entity, event.node);
+                }
+            }
+        }
+
+        /// Process entities waiting for stairs
+        fn processWaitingEntities(self: *Self) void {
+            var iter = self.entities.iterator();
+            while (iter.next()) |entry| {
+                const entity = entry.key_ptr.*;
+                const pos = entry.value_ptr;
+
+                const stair_node = pos.waiting_for_stair orelse continue;
+                const dir = pos.waiting_direction orelse continue;
+
+                if (self.stair_states.getPtr(stair_node)) |state| {
+                    if (state.canEnter(dir)) {
+                        // Can now enter - remove from waiting
+                        state.enter(dir);
+                        pos.using_stair = stair_node;
+
+                        // Release the waiting spot
+                        if (pos.waiting_at_node) |wait_spot| {
+                            if (self.waiting_areas.getPtr(stair_node)) |area| {
+                                area.releaseSpot(wait_spot);
+                            }
+                        }
+
+                        pos.waiting_for_stair = null;
+                        pos.waiting_at_node = null;
+                        pos.waiting_direction = null;
+
+                        // Remove from waiting queue
+                        if (std.mem.indexOfScalar(Entity, state.waiting_queue.items, entity)) |idx| {
+                            _ = state.waiting_queue.swapRemove(idx);
+                        }
+
+                        // Move back to the node before the stair
+                        const current = self.nodes.get(pos.current_node) orelse continue;
+                        pos.x = current.x;
+                        pos.y = current.y;
+                        _ = self.entity_spatial.update(entity, pos.x, pos.y);
+                    }
                 }
             }
         }
@@ -726,6 +1100,77 @@ pub fn PathfindingEngine(comptime Config: type) type {
         /// Get total entity count
         pub fn getEntityCount(self: *Self) usize {
             return self.entities.count();
+        }
+
+        // =======================================================
+        // Stair Management
+        // =======================================================
+
+        /// Get stair state for a node
+        pub fn getStairState(self: *Self, node: NodeId) ?*StairState {
+            return self.stair_states.getPtr(node);
+        }
+
+        /// Get stair mode for a node
+        pub fn getStairMode(self: *Self, node: NodeId) StairMode {
+            if (self.nodes.get(node)) |data| {
+                return data.stair_mode;
+            }
+            return .none;
+        }
+
+        /// Set waiting area spots for a stair node
+        pub fn setWaitingArea(self: *Self, stair_node: NodeId, spots: []const NodeId) !void {
+            // Clean up existing if present
+            if (self.waiting_areas.fetchRemove(stair_node)) |removed| {
+                var existing = removed.value;
+                existing.deinit(self.allocator);
+            }
+            var area = WaitingArea.init(self.allocator, stair_node);
+            for (spots) |spot| {
+                try area.waiting_spots.append(self.allocator, spot);
+            }
+            try self.waiting_areas.put(stair_node, area);
+        }
+
+        /// Get waiting area for a stair node
+        pub fn getWaitingArea(self: *Self, node: NodeId) ?*WaitingArea {
+            return self.waiting_areas.getPtr(node);
+        }
+
+        /// Check if an entity can enter a stair
+        pub fn canEnterStair(self: *Self, stair_node: NodeId, direction: VerticalDirection) bool {
+            if (self.stair_states.getPtr(stair_node)) |state| {
+                return state.canEnter(direction);
+            }
+            // If no stair state, it's not a stair
+            return false;
+        }
+
+        /// Find an available waiting spot around a stair (O(spots) instead of O(entities))
+        fn findAvailableWaitingSpot(self: *Self, stair_node: NodeId) ?NodeId {
+            const area = self.waiting_areas.getPtr(stair_node) orelse return null;
+            return area.findAvailableSpot();
+        }
+
+        /// Determine vertical direction between two nodes
+        fn getVerticalDirection(self: *Self, from_node: NodeId, to_node: NodeId) ?VerticalDirection {
+            const from = self.nodes.get(from_node) orelse return null;
+            const to = self.nodes.get(to_node) orelse return null;
+
+            if (to.y < from.y) return .up;
+            if (to.y > from.y) return .down;
+            return null;
+        }
+
+        /// Check if movement between two nodes involves a stair
+        fn isStairMovement(self: *Self, from_node: NodeId, to_node: NodeId) bool {
+            const dir = self.getVerticalDirection(from_node, to_node) orelse return false;
+            _ = dir;
+            // Check if either node is a stair
+            const from_mode = self.getStairMode(from_node);
+            const to_mode = self.getStairMode(to_node);
+            return from_mode != .none or to_mode != .none;
         }
     };
 }
