@@ -1078,7 +1078,7 @@ pub fn PathfindingEngine(comptime Config: type) type {
                 if (self.stair_states.getPtr(stair_node)) |state| {
                     if (state.canEnter(dir)) {
                         // Can now enter - remove from waiting
-                        logDebug("Entity proceeding from stair {} queue (direction: {})", .{ stair_node, @intFromEnum(dir) });
+                        logDebug("Entity {} proceeding from stair {} queue (direction: {})", .{ entity, stair_node, @intFromEnum(dir) });
                         state.enter(dir);
                         pos.using_stair = stair_node;
 

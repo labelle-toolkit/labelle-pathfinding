@@ -142,7 +142,7 @@ fn onPathCompleted(game: *Game, entity: u64, node: u32) void {
 }
 
 fn onPathBlocked(game: *Game, entity: u64, node: u32) void {
-    // No path available
+    // No path available to target node
 }
 
 // Set callbacks
