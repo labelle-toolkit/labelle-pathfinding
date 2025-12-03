@@ -106,28 +106,33 @@ pub fn PathfindingEngine(comptime Config: type) type {
         // Logging
         // =======================================================
 
-        fn logErr(comptime fmt: []const u8, args: anytype) void {
-            if (comptime log_level.allows(.err)) {
-                std.log.scoped(.pathfinding).err(fmt, args);
+        fn log(comptime level: LogLevel, comptime fmt: []const u8, args: anytype) void {
+            if (comptime !log_level.allows(level)) return;
+
+            const scoped = std.log.scoped(.pathfinding);
+            switch (level) {
+                .err => scoped.err(fmt, args),
+                .warning => scoped.warn(fmt, args),
+                .info => scoped.info(fmt, args),
+                .debug => scoped.debug(fmt, args),
+                .none => {},
             }
+        }
+
+        fn logErr(comptime fmt: []const u8, args: anytype) void {
+            log(.err, fmt, args);
         }
 
         fn logWarn(comptime fmt: []const u8, args: anytype) void {
-            if (comptime log_level.allows(.warning)) {
-                std.log.scoped(.pathfinding).warn(fmt, args);
-            }
+            log(.warning, fmt, args);
         }
 
         fn logInfo(comptime fmt: []const u8, args: anytype) void {
-            if (comptime log_level.allows(.info)) {
-                std.log.scoped(.pathfinding).info(fmt, args);
-            }
+            log(.info, fmt, args);
         }
 
         fn logDebug(comptime fmt: []const u8, args: anytype) void {
-            if (comptime log_level.allows(.debug)) {
-                std.log.scoped(.pathfinding).debug(fmt, args);
-            }
+            log(.debug, fmt, args);
         }
 
         /// Position data owned by pathfinding
@@ -744,7 +749,7 @@ pub fn PathfindingEngine(comptime Config: type) type {
 
         /// Unregister an entity
         pub fn unregisterEntity(self: *Self, entity: Entity) void {
-            logInfo("Unregistering entity", .{});
+            logInfo("Unregistering entity {}", .{entity});
             if (self.entities.getPtr(entity)) |pos| {
                 pos.path.deinit(self.allocator);
             }
@@ -774,11 +779,11 @@ pub fn PathfindingEngine(comptime Config: type) type {
         /// Request a path to a specific node
         pub fn requestPath(self: *Self, entity: Entity, target: NodeId) !void {
             const pos = self.entities.getPtr(entity) orelse {
-                logWarn("Path request for unknown entity", .{});
+                logWarn("Path request for unknown entity {}", .{entity});
                 return error.EntityNotFound;
             };
 
-            logInfo("Path requested from node {} to node {}", .{ pos.current_node, target });
+            logInfo("Entity {} path requested from node {} to node {}", .{ entity, pos.current_node, target });
 
             pos.path.clearRetainingCapacity();
             pos.path_index = 0;
