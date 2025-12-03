@@ -980,7 +980,14 @@ pub fn PathfindingEngine(comptime Config: type) type {
                             } else {
                                 // Can enter - register as user (only if not already using this stair)
                                 if (pos.using_stair != sn) {
-                                    logDebug("Entity entering stair {} (direction: {})", .{ sn, @intFromEnum(dir) });
+                                    // If switching from a different stair, exit the old one first
+                                    if (pos.using_stair) |old_stair| {
+                                        if (self.stair_states.getPtr(old_stair)) |old_state| {
+                                            logDebug("Entity {} exiting stair {} before entering {}", .{ entity, old_stair, sn });
+                                            old_state.exit();
+                                        }
+                                    }
+                                    logDebug("Entity {} entering stair {} (direction: {})", .{ entity, sn, @intFromEnum(dir) });
                                     state.enter(dir);
                                     pos.using_stair = sn;
                                 }
