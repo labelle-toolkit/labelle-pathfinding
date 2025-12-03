@@ -8,7 +8,8 @@ A pathfinding library for Zig game development. Part of the [labelle-toolkit](ht
 - **QuadTree** - Spatial partitioning for O(log n) entity and node lookups
 - **Floyd-Warshall Algorithm** - All-pairs shortest path computation
 - **A\* Algorithm** - Single-source shortest path with multiple heuristics
-- **Connection Modes** - Omnidirectional (top-down) and directional (platformer) graph building
+- **Connection Modes** - Omnidirectional (top-down), directional (platformer), and building (vertical via stairs) graph building
+- **Stair Traffic Control** - Multi-lane, directional, or single-file stair usage with waiting areas
 - **Legacy ECS Support** - Components for [zig-ecs](https://github.com/prime31/zig-ecs) integration
 
 ## Requirements
@@ -22,7 +23,7 @@ Add to your `build.zig.zon`:
 ```zig
 .dependencies = .{
     .pathfinding = .{
-        .url = "https://github.com/labelle-toolkit/labelle-pathfinding/archive/refs/tags/v2.0.0.tar.gz",
+        .url = "https://github.com/labelle-toolkit/labelle-pathfinding/archive/refs/tags/v2.1.0.tar.gz",
         .hash = "...",
     },
 },
@@ -31,7 +32,7 @@ Add to your `build.zig.zon`:
 Or use `zig fetch`:
 
 ```bash
-zig fetch --save https://github.com/labelle-toolkit/labelle-pathfinding/archive/refs/tags/v2.0.0.tar.gz
+zig fetch --save https://github.com/labelle-toolkit/labelle-pathfinding/archive/refs/tags/v2.1.0.tar.gz
 ```
 
 Then in your `build.zig`:
@@ -149,6 +150,59 @@ if (engine.getDirectionalEdges(node_id)) |edges| {
 try engine.addEdge(top_node, bottom_node, false);  // one-way
 ```
 
+### Building Mode with Stairs
+
+For 2D building games where vertical movement is only allowed via stair nodes:
+
+```zig
+// Add nodes with stair modes
+try engine.addNode(0, 0, 0);    // regular floor node
+try engine.addNode(1, 100, 0);  // regular floor node
+try engine.addNode(2, 100, 100);  // regular upper floor node
+
+// Mark nodes as stairs with traffic control
+try engine.setStairMode(1, .single);     // single-file stair at ground
+try engine.setStairMode(2, .single);     // single-file stair at upper floor
+
+// Connect with building mode (horizontal + vertical via stairs only)
+try engine.connectNodes(.{
+    .building = .{
+        .horizontal_range = 60,
+        .vertical_range = 120,
+    },
+});
+try engine.rebuildPaths();
+```
+
+#### Stair Modes
+
+| Mode | Description |
+|------|-------------|
+| `.none` | Not a stair - no vertical connections (default) |
+| `.all` | Multi-lane stair - unlimited concurrent usage |
+| `.direction` | Directional stair - multiple entities same direction only |
+| `.single` | Single-file stair - only one entity at a time |
+
+#### Waiting Areas
+
+When stairs are busy, entities wait at designated spots instead of stacking:
+
+```zig
+// Define waiting area for a stair
+try engine.setWaitingArea(stair_node_id, &[_]pathfinding.Position{
+    .{ .x = 80, .y = 0 },   // waiting spot 1
+    .{ .x = 60, .y = 0 },   // waiting spot 2
+    .{ .x = 40, .y = 0 },   // waiting spot 3
+});
+
+// Check if entity is waiting
+if (engine.getPosition(entity)) |pos| {
+    if (pos.waiting_for_stair) |stair_id| {
+        // Entity is waiting to use this stair
+    }
+}
+```
+
 ### Floyd-Warshall (Direct Usage)
 
 Best for dense graphs or when you need paths between many node pairs.
@@ -239,6 +293,10 @@ if (try astar.findPathWithMapping(100, 200, &path)) |cost| {
 | `getEntitiesInRadius(x, y, r, buf)` | Spatial query |
 | `getEntitiesInRect(x, y, w, h, buf)` | Rectangle query |
 | `getNodesInRadius(x, y, r, buf)` | Find nearby nodes |
+| `setStairMode(node, mode)` | Set stair traffic mode |
+| `getStairMode(node)` | Get stair traffic mode |
+| `setWaitingArea(node, spots)` | Define waiting area for stair |
+| `getStairState(node)` | Get runtime stair traffic state |
 
 ### Heuristics
 
