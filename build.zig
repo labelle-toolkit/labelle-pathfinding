@@ -158,6 +158,24 @@ pub fn build(b: *std.Build) void {
     const building_step = b.step("run-building", "Run building example (multi-floor with stairs)");
     building_step.dependOn(&run_building.step);
 
+    // Single stair mode example
+    const single_stair_example = b.addExecutable(.{
+        .name = "single_stair_example",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("usage/single_stair_example.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "pathfinding", .module = pathfinding_module },
+            },
+        }),
+    });
+    b.installArtifact(single_stair_example);
+
+    const run_single_stair = b.addRunArtifact(single_stair_example);
+    const single_stair_step = b.step("run-single-stair", "Run single stair mode example");
+    single_stair_step.dependOn(&run_single_stair.step);
+
     // Run all examples
     const examples_step = b.step("run-examples", "Run all usage examples");
     examples_step.dependOn(&run_basic.step);
@@ -165,6 +183,7 @@ pub fn build(b: *std.Build) void {
     examples_step.dependOn(&run_platformer.step);
     examples_step.dependOn(&run_engine.step);
     examples_step.dependOn(&run_building.step);
+    examples_step.dependOn(&run_single_stair.step);
 
     // ===== Benchmark =====
 
@@ -232,4 +251,27 @@ pub fn build(b: *std.Build) void {
     const run_raylib_building = b.addRunArtifact(raylib_building);
     const raylib_building_step = b.step("run-raylib-building", "Run raylib multi-floor building example");
     raylib_building_step.dependOn(&run_raylib_building.step);
+
+    // ===== System Tests =====
+
+    const single_stair_test = b.addExecutable(.{
+        .name = "single_stair_test",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("system_tests/single_stair_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "pathfinding", .module = pathfinding_module },
+            },
+        }),
+    });
+    b.installArtifact(single_stair_test);
+
+    const run_single_stair_test = b.addRunArtifact(single_stair_test);
+    const single_stair_test_step = b.step("run-system-test-single-stair", "Run single stair system test");
+    single_stair_test_step.dependOn(&run_single_stair_test.step);
+
+    // Run all system tests
+    const system_tests_step = b.step("run-system-tests", "Run all system tests");
+    system_tests_step.dependOn(&run_single_stair_test.step);
 }
