@@ -314,15 +314,171 @@ pub fn FloydWarshallOptimized(comptime config: Config) type {
             }
         }
 
-        /// Multi-threaded parallel implementation
-        /// Note: For simplicity, this currently falls back to SIMD.
-        /// Full parallel implementation requires more complex thread management.
+        /// Multi-threaded parallel implementation using row decomposition
+        /// Based on the semaphore-per-row synchronization pattern
         fn generateParallel(self: *Self) void {
-            // For now, parallel mode uses SIMD which is already quite fast.
-            // True multi-threading would require spawning threads per-k iteration
-            // which has significant overhead for smaller graphs.
-            // The SIMD implementation already provides substantial speedup.
-            self.generateSimd();
+            const n = self.size;
+            if (n == 0) return;
+
+            // Determine thread count
+            const cpu_count = std.Thread.getCpuCount() catch 4;
+            const thread_count: usize = @min(cpu_count, n);
+
+            // Fall back to SIMD for small graphs or single core
+            if (thread_count <= 1 or n < 32) {
+                self.generateSimd();
+                return;
+            }
+
+            // Allocate synchronization counters (one per k value + 1)
+            // Each counter tracks how many threads have signaled that row k is ready
+            const sync_counters = self.allocator.alloc(std.atomic.Value(u32), n + 1) catch {
+                self.generateSimd();
+                return;
+            };
+            defer self.allocator.free(sync_counters);
+
+            // Initialize: first counter allows all threads to start, rest are 0
+            sync_counters[0] = std.atomic.Value(u32).init(@intCast(thread_count));
+            for (1..n + 1) |i| {
+                sync_counters[i] = std.atomic.Value(u32).init(0);
+            }
+
+            // Calculate row distribution
+            const rows_per_thread = n / thread_count;
+            const extra_rows = n % thread_count;
+
+            // Spawn worker threads
+            const threads = self.allocator.alloc(std.Thread, thread_count - 1) catch {
+                self.generateSimd();
+                return;
+            };
+            defer self.allocator.free(threads);
+
+            var next_row: usize = 0;
+            for (0..thread_count - 1) |t| {
+                const start = next_row;
+                var end = start + rows_per_thread;
+                if (t < extra_rows) end += 1;
+                next_row = end;
+
+                threads[t] = std.Thread.spawn(.{}, parallelWorker, .{
+                    self,
+                    start,
+                    end,
+                    thread_count,
+                    sync_counters,
+                }) catch {
+                    // If thread spawn fails, fall back to SIMD
+                    self.generateSimd();
+                    return;
+                };
+            }
+
+            // Main thread processes its portion
+            const main_start = next_row;
+            const main_end = n;
+            self.parallelWorkerImpl(main_start, main_end, thread_count, sync_counters);
+
+            // Join all threads
+            for (threads) |t| {
+                t.join();
+            }
+        }
+
+        /// Worker function for parallel threads
+        fn parallelWorker(
+            self: *Self,
+            start_row: usize,
+            end_row: usize,
+            thread_count: usize,
+            sync_counters: []std.atomic.Value(u32),
+        ) void {
+            self.parallelWorkerImpl(start_row, end_row, thread_count, sync_counters);
+        }
+
+        /// Implementation of parallel worker logic
+        fn parallelWorkerImpl(
+            self: *Self,
+            start_row: usize,
+            end_row: usize,
+            thread_count: usize,
+            sync_counters: []std.atomic.Value(u32),
+        ) void {
+            const n = self.size;
+            const thread_count_u32: u32 = @intCast(thread_count);
+
+            for (0..n) |k| {
+                // Wait until row k is ready (counter reaches thread_count)
+                // Use a spin loop with exponential backoff
+                var spins: u32 = 0;
+                while (sync_counters[k].load(.acquire) < thread_count_u32) {
+                    spins += 1;
+                    if (spins < 100) {
+                        std.atomic.spinLoopHint();
+                    } else {
+                        // Yield to OS scheduler after spinning
+                        std.Thread.yield() catch {};
+                        spins = 0;
+                    }
+                }
+
+                // Process our assigned rows for this k iteration (with SIMD)
+                for (start_row..end_row) |i| {
+                    self.processRowSimd(k, i);
+                }
+
+                // If we own row k, signal that row k+1 is ready
+                // Each thread that owns row k signals all threads
+                if (k >= start_row and k < end_row) {
+                    _ = sync_counters[k + 1].fetchAdd(thread_count_u32, .release);
+                }
+            }
+        }
+
+        /// Process a single row with SIMD (for parallel use)
+        fn processRowSimd(self: *Self, k: usize, i: usize) void {
+            const n = self.size;
+            const n_usize: usize = n;
+
+            const dist_ik = self.dist[i * n_usize + k];
+            if (dist_ik == INF) return;
+
+            const next_ik = self.next[i * n_usize + k];
+            const dist_ik_vec: DistVector = @splat(dist_ik);
+            const next_ik_vec: IndexVector = @splat(next_ik);
+
+            const row_i_start = i * n_usize;
+            const row_k_start = k * n_usize;
+
+            // SIMD processing
+            var j: usize = 0;
+            while (j + VectorWidth <= n_usize) : (j += VectorWidth) {
+                const dist_kj_vec: DistVector = self.dist[row_k_start + j ..][0..VectorWidth].*;
+                const dist_ij_ptr = self.dist[row_i_start + j ..][0..VectorWidth];
+                const dist_ij_vec: DistVector = dist_ij_ptr.*;
+                const next_ij_ptr = self.next[row_i_start + j ..][0..VectorWidth];
+                const next_ij_vec: IndexVector = next_ij_ptr.*;
+
+                const new_dist_vec = dist_ik_vec +| dist_kj_vec;
+                const mask = new_dist_vec < dist_ij_vec;
+
+                dist_ij_ptr.* = @select(u32, mask, new_dist_vec, dist_ij_vec);
+                next_ij_ptr.* = @select(u32, mask, next_ik_vec, next_ij_vec);
+            }
+
+            // Handle remaining elements
+            while (j < n_usize) : (j += 1) {
+                const dist_kj = self.dist[row_k_start + j];
+                if (dist_kj == INF) continue;
+
+                const new_dist = dist_ik +| dist_kj;
+                const idx = row_i_start + j;
+                if (new_dist < self.dist[idx]) {
+                    self.dist[idx] = new_dist;
+                    self.next[idx] = next_ik;
+                }
+            }
         }
 
         /// Process a range of rows for parallel execution

@@ -30,7 +30,7 @@ pub fn main() !void {
     print("  - Parallel: SIMD + multi-threading\n\n", .{});
 
     // Test different graph sizes
-    const sizes = [_]u32{ 32, 64, 128, 256 };
+    const sizes = [_]u32{ 32, 64, 128, 256, 512 };
 
     for (sizes) |size| {
         print("Graph size: {} nodes ({}x{} = {} edges max)\n", .{
