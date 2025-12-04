@@ -1010,7 +1010,8 @@ pub fn PathfindingEngine(comptime Config: type) type {
 
                     if (stair_node) |sn| {
                         if (self.stair_states.getPtr(sn)) |state| {
-                            if (!state.canEnter(dir)) {
+                            // Skip stair check if entity is already using this stair
+                            if (pos.using_stair != sn and !state.canEnter(dir)) {
                                 logDebug("Entity waiting for stair {} (direction: {})", .{ sn, @intFromEnum(dir) });
                                 // Cannot enter stair - find waiting spot
                                 if (self.findAvailableWaitingSpot(sn)) |wait_spot| {
