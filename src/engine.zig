@@ -434,7 +434,7 @@ pub fn PathfindingEngine(comptime Config: type) type {
                 area.deinit(self.allocator);
             }
             self.waiting_areas.clearRetainingCapacity();
-            self.node_spatial.reset();
+            self.node_spatial.reset() catch {};
             self.next_node_id = 0;
         }
 

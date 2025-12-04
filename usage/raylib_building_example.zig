@@ -10,6 +10,7 @@
 //! - R: Reset all entities
 //! - N: Toggle random wandering mode
 //! - V: Increase speed
+//! - S: Cycle stair mode (all -> single -> direction -> all)
 //! - =: Add more entities
 //! - -: Remove entities
 
@@ -36,6 +37,7 @@ const Engine = PathfindingEngine(Config);
 
 const Game = struct {
     engine: *Engine,
+    allocator: std.mem.Allocator,
     next_entity_id: u32 = 0,
     selected_entity: ?u32 = null,
     message: [:0]const u8 = "Click a node to move the entity",
@@ -45,6 +47,8 @@ const Game = struct {
     random_mode: bool = false,
     speed_multiplier: f32 = 1.0,
     rand_state: u32 = 12345,
+    stair_mode: pathfinding.StairMode = .all,
+    stair_positions: []const u32 = &[_]u32{ 1, 4, 6 },
 
     fn nextRandom(self: *Game) u32 {
         // Simple LCG random
@@ -67,10 +71,13 @@ const COLORS = struct {
     const node_outline = rl.Color.init(100, 130, 180, 255);
     const stair = rl.Color.init(255, 180, 50, 255);
     const stair_outline = rl.Color.init(255, 220, 100, 255);
+    const stair_occupied = rl.Color.init(255, 100, 100, 255); // Red when occupied
+    const stair_single = rl.Color.init(255, 150, 50, 255); // Orange for single mode
     const edge = rl.Color.init(40, 50, 70, 255);
     const stair_edge = rl.Color.init(200, 140, 40, 255);
     const entity = rl.Color.init(80, 200, 120, 255);
     const entity_selected = rl.Color.init(120, 255, 160, 255);
+    const entity_waiting = rl.Color.init(200, 200, 80, 255); // Yellow when waiting
     const text = rl.Color.init(200, 200, 210, 255);
     const text_dim = rl.Color.init(100, 110, 130, 255);
     const panel = rl.Color.init(25, 30, 40, 240);
@@ -88,6 +95,7 @@ pub fn main() !void {
 
     var game = Game{
         .engine = &engine,
+        .allocator = allocator,
     };
 
     // Setup callbacks
@@ -131,9 +139,6 @@ fn setupBuilding(engine: *Engine, game: *Game) !void {
     const node_spacing: f32 = 100;
     const start_x: f32 = 100;
 
-    // Stair positions (indices within each floor)
-    const stair_positions = [_]u32{ 1, 4, 6 }; // 3 staircases
-
     var node_id: u32 = 0;
 
     // Create nodes for each floor
@@ -147,7 +152,7 @@ fn setupBuilding(engine: *Engine, game: *Game) !void {
 
             // Check if this is a stair position
             var is_stair = false;
-            for (stair_positions) |stair_pos| {
+            for (game.stair_positions) |stair_pos| {
                 if (idx == stair_pos) {
                     is_stair = true;
                     break;
@@ -155,12 +160,41 @@ fn setupBuilding(engine: *Engine, game: *Game) !void {
             }
 
             if (is_stair) {
-                try engine.addNodeWithStairMode(node_id, x, y, .all);
+                try engine.addNodeWithStairMode(node_id, x, y, game.stair_mode);
             } else {
                 try engine.addNode(node_id, x, y);
             }
 
             node_id += 1;
+        }
+    }
+
+    // Set up waiting areas for single/direction stair modes
+    if (game.stair_mode == .single or game.stair_mode == .direction) {
+        // For each stair column, set waiting areas
+        for (game.stair_positions) |stair_pos| {
+            // For each floor's stair node
+            for (0..floors) |floor_idx| {
+                const stair_node: u32 = @intCast(floor_idx * nodes_per_floor + stair_pos);
+                // Waiting spots are adjacent nodes on the same floor
+                var waiting_spots: [2]pathfinding.NodeId = undefined;
+                var spot_count: usize = 0;
+
+                // Left neighbor
+                if (stair_pos > 0) {
+                    waiting_spots[spot_count] = @intCast(floor_idx * nodes_per_floor + stair_pos - 1);
+                    spot_count += 1;
+                }
+                // Right neighbor
+                if (stair_pos < nodes_per_floor - 1) {
+                    waiting_spots[spot_count] = @intCast(floor_idx * nodes_per_floor + stair_pos + 1);
+                    spot_count += 1;
+                }
+
+                if (spot_count > 0) {
+                    try engine.setWaitingArea(stair_node, waiting_spots[0..spot_count]);
+                }
+            }
         }
     }
 
@@ -172,6 +206,53 @@ fn setupBuilding(engine: *Engine, game: *Game) !void {
         },
     });
     try engine.rebuildPaths();
+}
+
+fn rebuildBuilding(game: *Game) !void {
+    // Save entity positions
+    const EntityState = struct {
+        x: f32,
+        y: f32,
+        speed: f32,
+    };
+    var saved_entities: [64]EntityState = undefined;
+    var entity_count: u32 = 0;
+
+    for (0..game.next_entity_id) |i| {
+        const entity: u32 = @intCast(i);
+        if (game.engine.getPosition(entity)) |pos| {
+            if (entity_count < 64) {
+                saved_entities[entity_count] = .{
+                    .x = pos.x,
+                    .y = pos.y,
+                    .speed = game.engine.getSpeed(entity) orelse 80.0,
+                };
+                entity_count += 1;
+            }
+        }
+        game.engine.unregisterEntity(entity);
+    }
+
+    // Clear the engine graph
+    game.engine.clearGraph();
+
+    // Rebuild with new stair mode
+    try setupBuilding(game.engine, game);
+
+    // Restore entities
+    game.next_entity_id = 0;
+    for (0..entity_count) |i| {
+        const state = saved_entities[i];
+        try game.engine.registerEntity(game.next_entity_id, state.x, state.y, state.speed);
+        game.next_entity_id += 1;
+    }
+
+    // Reset selected entity if needed
+    if (game.selected_entity) |sel| {
+        if (sel >= game.next_entity_id) {
+            game.selected_entity = if (game.next_entity_id > 0) game.next_entity_id - 1 else null;
+        }
+    }
 }
 
 fn addEntityAtNode(game: *Game, node_id: u32) !void {
@@ -312,6 +393,32 @@ fn handleInput(game: *Game) void {
             game.message_timer = 1.0;
         }
     }
+
+    // S - Cycle stair mode
+    if (rl.isKeyPressed(.s)) {
+        // Cycle: all -> single -> direction -> all
+        game.stair_mode = switch (game.stair_mode) {
+            .all => .single,
+            .single => .direction,
+            .direction => .all,
+            .none => .all,
+        };
+
+        // Rebuild the building with new stair mode
+        rebuildBuilding(game) catch {
+            game.message = "Failed to rebuild!";
+            game.message_timer = 2.0;
+            return;
+        };
+
+        game.message = switch (game.stair_mode) {
+            .all => "Stair mode: ALL (unlimited)",
+            .single => "Stair mode: SINGLE (one at a time)",
+            .direction => "Stair mode: DIRECTION (same dir only)",
+            .none => "Stair mode: NONE",
+        };
+        game.message_timer = 2.0;
+    }
 }
 
 fn selectEntity(game: *Game, id: u32) void {
@@ -401,16 +508,36 @@ fn drawBuilding(game: *Game) void {
     i = 0;
     while (i < @as(u32, @intCast(engine.getNodeCount()))) : (i += 1) {
         if (engine.getNodePosition(i)) |pos| {
-            const is_stair = engine.getStairMode(i) != .none;
-            const color = if (is_stair) COLORS.stair else COLORS.node;
-            const outline = if (is_stair) COLORS.stair_outline else COLORS.node_outline;
+            const stair_mode = engine.getStairMode(i);
+            const is_stair = stair_mode != .none;
+
+            // Determine stair color based on state
+            var color = if (is_stair) COLORS.stair else COLORS.node;
+            var outline = if (is_stair) COLORS.stair_outline else COLORS.node_outline;
+
+            if (is_stair) {
+                if (engine.getStairState(i)) |state| {
+                    if (state.users_count > 0) {
+                        color = COLORS.stair_occupied;
+                        outline = rl.Color.init(255, 150, 150, 255);
+                    }
+                }
+                // Different outline for single mode
+                if (stair_mode == .single) {
+                    outline = COLORS.stair_single;
+                }
+            }
 
             const x: i32 = @intFromFloat(pos.x);
             const y: i32 = @intFromFloat(pos.y);
 
             // Draw stair indicator (vertical line)
             if (is_stair) {
-                rl.drawRectangle(x - 3, y - NODE_RADIUS - 8, 6, NODE_RADIUS * 2 + 16, COLORS.stair_edge);
+                const edge_color = if (engine.getStairState(i)) |state|
+                    if (state.users_count > 0) COLORS.stair_occupied else COLORS.stair_edge
+                else
+                    COLORS.stair_edge;
+                rl.drawRectangle(x - 3, y - NODE_RADIUS - 8, 6, NODE_RADIUS * 2 + 16, edge_color);
             }
 
             rl.drawCircle(x, y, NODE_RADIUS, outline);
@@ -421,6 +548,16 @@ fn drawBuilding(game: *Game) void {
             const id_str = std.fmt.bufPrintZ(&buf, "{d}", .{i}) catch "?";
             const text_x = x - @divFloor(@as(i32, @intCast(id_str.len)) * 4, 2);
             rl.drawText(id_str, text_x, y - 5, 10, COLORS.text);
+
+            // Show stair mode indicator for single/direction
+            if (is_stair and stair_mode != .all) {
+                const mode_char: [:0]const u8 = switch (stair_mode) {
+                    .single => "S",
+                    .direction => "D",
+                    else => "",
+                };
+                rl.drawText(mode_char, x - 3, y - NODE_RADIUS - 20, 10, COLORS.text);
+            }
         }
     }
 }
@@ -430,12 +567,20 @@ fn drawEntities(game: *Game) void {
 
     var i: u32 = 0;
     while (i < game.next_entity_id) : (i += 1) {
-        if (engine.getPosition(i)) |pos| {
+        // Use getPositionFull to check waiting state
+        if (engine.getPositionFull(i)) |full_pos| {
             const is_selected = if (game.selected_entity) |sel| sel == i else false;
-            const color = if (is_selected) COLORS.entity_selected else COLORS.entity;
+            const is_waiting = full_pos.waiting_for_stair != null;
 
-            const x: i32 = @intFromFloat(pos.x);
-            const y: i32 = @intFromFloat(pos.y);
+            const color = if (is_selected)
+                COLORS.entity_selected
+            else if (is_waiting)
+                COLORS.entity_waiting
+            else
+                COLORS.entity;
+
+            const x: i32 = @intFromFloat(full_pos.x);
+            const y: i32 = @intFromFloat(full_pos.y);
 
             // Shadow
             rl.drawCircle(x + 2, y + 2, ENTITY_RADIUS, rl.Color.init(0, 0, 0, 80));
@@ -449,13 +594,20 @@ fn drawEntities(game: *Game) void {
                 rl.drawCircleLines(x, y, ENTITY_RADIUS + 6, color);
             }
 
+            // Waiting indicator (pulsing ring)
+            if (is_waiting) {
+                rl.drawCircleLines(x, y, ENTITY_RADIUS + 3, COLORS.entity_waiting);
+            }
+
             // Entity ID
             var buf: [8]u8 = undefined;
             const id_str = std.fmt.bufPrintZ(&buf, "{d}", .{i}) catch "?";
             rl.drawText(id_str, x - 4, y - 5, 12, COLORS.bg);
 
-            // Moving indicator
-            if (engine.isMoving(i)) {
+            // Moving/Waiting indicator
+            if (is_waiting) {
+                rl.drawText("W", x + ENTITY_RADIUS + 3, y - 5, 10, COLORS.entity_waiting);
+            } else if (engine.isMoving(i)) {
                 rl.drawText("->", x + ENTITY_RADIUS + 3, y - 5, 10, color);
             }
         }
@@ -503,8 +655,8 @@ fn drawUI(game: *Game) void {
     rl.drawText(game.message, WINDOW_WIDTH - 240, 150, 11, COLORS.text_dim);
 
     // Legend
-    rl.drawRectangle(WINDOW_WIDTH - 250, 200, 240, 80, COLORS.panel);
-    rl.drawRectangleLines(WINDOW_WIDTH - 250, 200, 240, 80, COLORS.panel_border);
+    rl.drawRectangle(WINDOW_WIDTH - 250, 200, 240, 110, COLORS.panel);
+    rl.drawRectangleLines(WINDOW_WIDTH - 250, 200, 240, 110, COLORS.panel_border);
 
     rl.drawText("Legend:", WINDOW_WIDTH - 240, 210, 12, COLORS.text);
     rl.drawCircle(WINDOW_WIDTH - 225, 235, 6, COLORS.node);
@@ -513,9 +665,22 @@ fn drawUI(game: *Game) void {
     rl.drawText("Staircase", WINDOW_WIDTH - 130, 230, 11, COLORS.text_dim);
     rl.drawCircle(WINDOW_WIDTH - 225, 260, 6, COLORS.entity);
     rl.drawText("Entity", WINDOW_WIDTH - 210, 255, 11, COLORS.text_dim);
+    rl.drawCircle(WINDOW_WIDTH - 145, 260, 6, COLORS.entity_waiting);
+    rl.drawText("Waiting", WINDOW_WIDTH - 130, 255, 11, COLORS.text_dim);
+    rl.drawCircle(WINDOW_WIDTH - 225, 285, 6, COLORS.stair_occupied);
+    rl.drawText("Occupied", WINDOW_WIDTH - 210, 280, 11, COLORS.text_dim);
+
+    // Current stair mode
+    const mode_text: [:0]const u8 = switch (game.stair_mode) {
+        .all => "Mode: ALL",
+        .single => "Mode: SINGLE",
+        .direction => "Mode: DIRECTION",
+        .none => "Mode: NONE",
+    };
+    rl.drawText(mode_text, WINDOW_WIDTH - 145, 280, 11, COLORS.title);
 
     // Controls
-    rl.drawText("Click: Move | R: Reset | N: Random | V: Speed | =/- : Add/Remove entities", 10, WINDOW_HEIGHT - 25, 11, COLORS.text_dim);
+    rl.drawText("Click: Move | R: Reset | N: Random | V: Speed | S: Stair Mode | =/- : Entities", 10, WINDOW_HEIGHT - 25, 11, COLORS.text_dim);
 
     // Status indicators
     if (game.random_mode) {
