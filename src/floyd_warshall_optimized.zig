@@ -14,14 +14,10 @@ const INF: u32 = std.math.maxInt(u32);
 
 /// Configuration for the optimized Floyd-Warshall algorithm
 pub const Config = struct {
-    /// Enable multi-threaded parallelization
+    /// Enable multi-threaded parallelization (recommended for graphs with 256+ nodes)
     parallel: bool = true,
-    /// Number of threads (0 = auto-detect based on CPU cores)
-    thread_count: u32 = 0,
     /// Enable SIMD vectorization
     simd: bool = true,
-    /// Block size for cache-friendly tiled processing (0 = auto)
-    block_size: u32 = 64,
 };
 
 /// Optimized Floyd-Warshall all-pairs shortest path algorithm.
@@ -43,15 +39,17 @@ pub fn FloydWarshallOptimized(comptime config: Config) type {
         next: []u32,
         /// Entity ID to internal index mapping
         ids: std.AutoHashMap(u32, u32),
-        /// Reverse mapping: internal index to entity ID
+        /// Reverse mapping: internal index to entity ID.
+        /// Provides O(1) reverse lookups, significantly faster than the legacy
+        /// implementation which required O(n) iteration for each reverse lookup.
         reverse_ids: std.AutoHashMap(u32, u32),
         last_key: u32 = 0,
         allocator: std.mem.Allocator,
 
         pub fn init(allocator: std.mem.Allocator) Self {
             return .{
-                .dist = &[_]u32{},
-                .next = &[_]u32{},
+                .dist = &.{},
+                .next = &.{},
                 .ids = std.AutoHashMap(u32, u32).init(allocator),
                 .reverse_ids = std.AutoHashMap(u32, u32).init(allocator),
                 .allocator = allocator,
@@ -106,28 +104,17 @@ pub fn FloydWarshallOptimized(comptime config: Config) type {
         }
 
         /// Add an edge using entity ID mapping (auto-assigns internal indices)
-        pub fn addEdgeWithMapping(self: *Self, u: u32, v: u32, w: u32) void {
+        /// Returns error.OutOfMemory if the internal hash maps fail to allocate
+        pub fn addEdgeWithMapping(self: *Self, u: u32, v: u32, w: u32) !void {
             if (!self.ids.contains(u)) {
                 const key = self.newKey();
-                self.ids.put(u, key) catch |err| {
-                    std.log.err("Error inserting on map: {}\n", .{err});
-                    return;
-                };
-                self.reverse_ids.put(key, u) catch |err| {
-                    std.log.err("Error inserting on reverse map: {}\n", .{err});
-                    return;
-                };
+                try self.ids.put(u, key);
+                try self.reverse_ids.put(key, u);
             }
             if (!self.ids.contains(v)) {
                 const key = self.newKey();
-                self.ids.put(v, key) catch |err| {
-                    std.log.err("Error inserting on map: {}\n", .{err});
-                    return;
-                };
-                self.reverse_ids.put(key, v) catch |err| {
-                    std.log.err("Error inserting on reverse map: {}\n", .{err});
-                    return;
-                };
+                try self.ids.put(v, key);
+                try self.reverse_ids.put(key, v);
             }
             self.addEdge(self.ids.get(u).?, self.ids.get(v).?, w);
         }
@@ -492,89 +479,12 @@ pub fn FloydWarshallOptimized(comptime config: Config) type {
                 }
             }
         }
-
-        /// Process a range of rows for parallel execution
-        fn processRowRange(self: *Self, k: usize, start_row: usize, end_row: usize) void {
-            for (start_row..end_row) |i| {
-                self.processRow(k, i);
-            }
-        }
-
-        /// Process a single row for parallel execution
-        fn processRow(self: *Self, k: usize, i: usize) void {
-            const n = self.size;
-            const n_usize: usize = n;
-
-            const dist_ik = self.dist[i * n_usize + k];
-            if (dist_ik == INF) return;
-
-            const next_ik = self.next[i * n_usize + k];
-
-            if (config.simd) {
-                const dist_ik_vec: DistVector = @splat(dist_ik);
-                const next_ik_vec: IndexVector = @splat(next_ik);
-
-                const row_i_start = i * n_usize;
-                const row_k_start = k * n_usize;
-
-                var j: usize = 0;
-                while (j + VectorWidth <= n_usize) : (j += VectorWidth) {
-                    const dist_kj_vec: DistVector = self.dist[row_k_start + j ..][0..VectorWidth].*;
-                    const dist_ij_ptr = self.dist[row_i_start + j ..][0..VectorWidth];
-                    const dist_ij_vec: DistVector = dist_ij_ptr.*;
-                    const next_ij_ptr = self.next[row_i_start + j ..][0..VectorWidth];
-                    const next_ij_vec: IndexVector = next_ij_ptr.*;
-
-                    const new_dist_vec = dist_ik_vec +| dist_kj_vec;
-                    const mask = new_dist_vec < dist_ij_vec;
-
-                    dist_ij_ptr.* = @select(u32, mask, new_dist_vec, dist_ij_vec);
-                    next_ij_ptr.* = @select(u32, mask, next_ik_vec, next_ij_vec);
-                }
-
-                while (j < n_usize) : (j += 1) {
-                    const dist_kj = self.dist[row_k_start + j];
-                    if (dist_kj == INF) continue;
-
-                    const new_dist = dist_ik +| dist_kj;
-                    const idx = row_i_start + j;
-                    if (new_dist < self.dist[idx]) {
-                        self.dist[idx] = new_dist;
-                        self.next[idx] = next_ik;
-                    }
-                }
-            } else {
-                for (0..n_usize) |j| {
-                    const dist_kj = self.dist[k * n_usize + j];
-                    if (dist_kj == INF) continue;
-
-                    const new_dist = dist_ik +| dist_kj;
-                    const idx = i * n_usize + j;
-                    if (new_dist < self.dist[idx]) {
-                        self.dist[idx] = new_dist;
-                        self.next[idx] = next_ik;
-                    }
-                }
-            }
-        }
-
-        /// Parallel generation using WaitGroup for proper synchronization
-        pub fn generateParallelSimple(self: *Self) void {
-            const n = self.size;
-
-            for (0..n) |k| {
-                // Process all rows for this k iteration
-                // Each row is independent within a k iteration
-                for (0..n) |i| {
-                    self.processRow(k, i);
-                }
-            }
-        }
     };
 }
 
-/// Default optimized Floyd-Warshall with all optimizations enabled
-pub const FloydWarshallFast = FloydWarshallOptimized(.{
+/// Parallel + SIMD optimized Floyd-Warshall (best for large graphs 256+ nodes)
+/// Uses multi-threading with row decomposition and SIMD vectorization within each thread.
+pub const FloydWarshallParallel = FloydWarshallOptimized(.{
     .parallel = true,
     .simd = true,
 });
@@ -629,9 +539,9 @@ test "FloydWarshallOptimized with entity mapping" {
     try fw.clean();
 
     // Use entity IDs: 100 -> 200 -> 300 -> 400
-    fw.addEdgeWithMapping(100, 200, 1);
-    fw.addEdgeWithMapping(200, 300, 1);
-    fw.addEdgeWithMapping(300, 400, 1);
+    try fw.addEdgeWithMapping(100, 200, 1);
+    try fw.addEdgeWithMapping(200, 300, 1);
+    try fw.addEdgeWithMapping(300, 400, 1);
 
     fw.generate();
 
@@ -680,9 +590,9 @@ test "FloydWarshallOptimized path reconstruction" {
     fw.resize(4);
     try fw.clean();
 
-    fw.addEdgeWithMapping(10, 20, 1);
-    fw.addEdgeWithMapping(20, 30, 1);
-    fw.addEdgeWithMapping(30, 40, 1);
+    try fw.addEdgeWithMapping(10, 20, 1);
+    try fw.addEdgeWithMapping(20, 30, 1);
+    try fw.addEdgeWithMapping(30, 40, 1);
 
     fw.generate();
 

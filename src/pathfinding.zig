@@ -128,7 +128,7 @@ pub const AStar = @import("a_star.zig").AStar;
 // Optimized Floyd-Warshall variants
 pub const floyd_warshall_optimized = @import("floyd_warshall_optimized.zig");
 pub const FloydWarshallOptimized = floyd_warshall_optimized.FloydWarshallOptimized;
-pub const FloydWarshallFast = floyd_warshall_optimized.FloydWarshallFast;
+pub const FloydWarshallParallel = floyd_warshall_optimized.FloydWarshallParallel;
 pub const FloydWarshallSimd = floyd_warshall_optimized.FloydWarshallSimd;
 pub const FloydWarshallScalar = floyd_warshall_optimized.FloydWarshallScalar;
 

@@ -119,7 +119,7 @@ pub fn PathfindingEngine(comptime Config: type) type {
     const FloydWarshallImpl = switch (fw_variant) {
         .legacy => FloydWarshall,
         .optimized_simd => floyd_warshall_optimized.FloydWarshallSimd,
-        .optimized_parallel => floyd_warshall_optimized.FloydWarshallFast,
+        .optimized_parallel => floyd_warshall_optimized.FloydWarshallParallel,
     };
 
     return struct {
@@ -743,7 +743,12 @@ pub fn PathfindingEngine(comptime Config: type) type {
                         @as(u64, @intFromFloat(dist_float))
                     else
                         @as(u32, @intFromFloat(dist_float));
-                    self.floyd_warshall.addEdgeWithMapping(from, to, @max(1, weight));
+                    // Legacy FW returns void, optimized returns !void
+                    if (fw_variant == .legacy) {
+                        self.floyd_warshall.addEdgeWithMapping(from, to, @max(1, weight));
+                    } else {
+                        try self.floyd_warshall.addEdgeWithMapping(from, to, @max(1, weight));
+                    }
                 }
             }
 

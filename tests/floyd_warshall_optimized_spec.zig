@@ -60,9 +60,9 @@ pub const FloydWarshallOptimizedSpec = struct {
             fw.resize(4);
             try fw.clean();
             // Use entity IDs: 100 -> 200 -> 300 -> 400
-            fw.addEdgeWithMapping(100, 200, 1);
-            fw.addEdgeWithMapping(200, 300, 1);
-            fw.addEdgeWithMapping(300, 400, 1);
+            try fw.addEdgeWithMapping(100, 200, 1);
+            try fw.addEdgeWithMapping(200, 300, 1);
+            try fw.addEdgeWithMapping(300, 400, 1);
             fw.generate();
         }
 
@@ -134,7 +134,7 @@ pub const FloydWarshallOptimizedSpec = struct {
         test "tests:before" {
             fw.resize(3);
             try fw.clean();
-            fw.addEdgeWithMapping(10, 20, 1);
+            try fw.addEdgeWithMapping(10, 20, 1);
             fw.generate();
         }
 

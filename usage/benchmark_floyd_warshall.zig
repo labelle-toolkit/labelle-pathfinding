@@ -14,7 +14,7 @@ const pathfinding = @import("pathfinding");
 
 const FloydWarshall = pathfinding.FloydWarshall;
 const FloydWarshallSimd = pathfinding.FloydWarshallSimd;
-const FloydWarshallFast = pathfinding.FloydWarshallFast;
+const FloydWarshallParallel = pathfinding.FloydWarshallParallel;
 
 const print = std.debug.print;
 
@@ -99,7 +99,7 @@ fn benchmarkSimd(allocator: std.mem.Allocator, size: u32) !f64 {
     try fw.clean();
 
     // Create a dense graph (grid-like connections)
-    createDenseGraphOptimized(&fw, size);
+    createDenseGraph(&fw, size);
 
     // Measure generation time
     var timer = try std.time.Timer.start();
@@ -111,14 +111,14 @@ fn benchmarkSimd(allocator: std.mem.Allocator, size: u32) !f64 {
 }
 
 fn benchmarkParallel(allocator: std.mem.Allocator, size: u32) !f64 {
-    var fw = FloydWarshallFast.init(allocator);
+    var fw = FloydWarshallParallel.init(allocator);
     defer fw.deinit();
 
     fw.resize(size);
     try fw.clean();
 
     // Create a dense graph (grid-like connections)
-    createDenseGraphOptimized(&fw, size);
+    createDenseGraph(&fw, size);
 
     // Measure generation time
     var timer = try std.time.Timer.start();
@@ -129,26 +129,9 @@ fn benchmarkParallel(allocator: std.mem.Allocator, size: u32) !f64 {
     return @as(f64, @floatFromInt(elapsed)) / std.time.ns_per_ms;
 }
 
-fn createDenseGraph(fw: *FloydWarshall, size: u32) void {
-    // Create grid-like connections
-    // Each node connects to neighbors within distance 2
-    var i: u32 = 0;
-    while (i < size) : (i += 1) {
-        var j: u32 = 0;
-        while (j < size) : (j += 1) {
-            if (i != j) {
-                const diff = if (i > j) i - j else j - i;
-                if (diff <= 2) {
-                    fw.addEdge(i, j, diff);
-                }
-            }
-        }
-    }
-}
-
-fn createDenseGraphOptimized(fw: anytype, size: u32) void {
-    // Create grid-like connections
-    // Each node connects to neighbors within distance 2
+/// Creates a dense graph with grid-like connections for benchmarking.
+/// Each node connects to neighbors within distance 2.
+fn createDenseGraph(fw: anytype, size: u32) void {
     var i: u32 = 0;
     while (i < size) : (i += 1) {
         var j: u32 = 0;

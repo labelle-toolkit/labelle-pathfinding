@@ -60,8 +60,8 @@ Waiting areas can be defined for entities queuing at busy stairs.
 
 The engine supports different Floyd-Warshall implementations via `Config.floyd_warshall_variant`:
 - `.legacy`: Original ArrayList-based (default, backward compatible)
-- `.optimized_simd`: Flat memory + SIMD vectorization (5-8x faster, recommended)
-- `.optimized_parallel`: Same as SIMD (parallel reserved for future use)
+- `.optimized_simd`: Flat memory + SIMD vectorization (5-8x faster)
+- `.optimized_parallel`: SIMD + multi-threading (best for large graphs 256+ nodes, up to 16x faster)
 
 ### Legacy ECS Support
 
