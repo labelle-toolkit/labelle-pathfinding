@@ -251,4 +251,27 @@ pub fn build(b: *std.Build) void {
     const run_raylib_building = b.addRunArtifact(raylib_building);
     const raylib_building_step = b.step("run-raylib-building", "Run raylib multi-floor building example");
     raylib_building_step.dependOn(&run_raylib_building.step);
+
+    // ===== System Tests =====
+
+    const single_stair_test = b.addExecutable(.{
+        .name = "single_stair_test",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("system_tests/single_stair_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "pathfinding", .module = pathfinding_module },
+            },
+        }),
+    });
+    b.installArtifact(single_stair_test);
+
+    const run_single_stair_test = b.addRunArtifact(single_stair_test);
+    const single_stair_test_step = b.step("run-system-test-single-stair", "Run single stair system test");
+    single_stair_test_step.dependOn(&run_single_stair_test.step);
+
+    // Run all system tests
+    const system_tests_step = b.step("run-system-tests", "Run all system tests");
+    system_tests_step.dependOn(&run_single_stair_test.step);
 }
