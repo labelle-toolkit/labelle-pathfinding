@@ -289,11 +289,15 @@ pub fn PathfindingEngine(comptime Config: type) type {
         on_node_reached: ?*const fn (Context, Entity, NodeId) void = null,
         on_path_completed: ?*const fn (Context, Entity, NodeId) void = null,
         on_path_blocked: ?*const fn (Context, Entity, NodeId) void = null,
+        on_waiting_started: ?*const fn (Context, Entity, NodeId) void = null,
+        on_waiting_ended: ?*const fn (Context, Entity, NodeId) void = null,
 
         // Event buffers for deferred callbacks
         node_reached_events: std.ArrayListUnmanaged(PathEvent),
         path_completed_events: std.ArrayListUnmanaged(PathEvent),
         path_blocked_events: std.ArrayListUnmanaged(PathEvent),
+        waiting_started_events: std.ArrayListUnmanaged(PathEvent),
+        waiting_ended_events: std.ArrayListUnmanaged(PathEvent),
 
         pub fn init(allocator: std.mem.Allocator) !Self {
             return .{
@@ -310,6 +314,8 @@ pub fn PathfindingEngine(comptime Config: type) type {
                 .node_reached_events = .{},
                 .path_completed_events = .{},
                 .path_blocked_events = .{},
+                .waiting_started_events = .{},
+                .waiting_ended_events = .{},
             };
         }
 
@@ -350,6 +356,8 @@ pub fn PathfindingEngine(comptime Config: type) type {
             self.node_reached_events.deinit(self.allocator);
             self.path_completed_events.deinit(self.allocator);
             self.path_blocked_events.deinit(self.allocator);
+            self.waiting_started_events.deinit(self.allocator);
+            self.waiting_ended_events.deinit(self.allocator);
         }
 
         // =======================================================
@@ -975,6 +983,8 @@ pub fn PathfindingEngine(comptime Config: type) type {
             self.node_reached_events.clearRetainingCapacity();
             self.path_completed_events.clearRetainingCapacity();
             self.path_blocked_events.clearRetainingCapacity();
+            self.waiting_started_events.clearRetainingCapacity();
+            self.waiting_ended_events.clearRetainingCapacity();
 
             // First pass: check waiting entities to see if they can now proceed
             self.processWaitingEntities();
@@ -1028,6 +1038,8 @@ pub fn PathfindingEngine(comptime Config: type) type {
                                     pos.x = wait_node.x;
                                     pos.y = wait_node.y;
                                     _ = self.entity_spatial.update(entity, pos.x, pos.y);
+                                    // Queue waiting started event
+                                    self.waiting_started_events.append(self.allocator, .{ .entity = entity, .node = sn }) catch {};
                                 }
                                 // Add to waiting queue
                                 state.waiting_queue.append(self.allocator, entity) catch |err| {
@@ -1151,6 +1163,18 @@ pub fn PathfindingEngine(comptime Config: type) type {
                     cb(ctx, event.entity, event.node);
                 }
             }
+
+            if (self.on_waiting_started) |cb| {
+                for (self.waiting_started_events.items) |event| {
+                    cb(ctx, event.entity, event.node);
+                }
+            }
+
+            if (self.on_waiting_ended) |cb| {
+                for (self.waiting_ended_events.items) |event| {
+                    cb(ctx, event.entity, event.node);
+                }
+            }
         }
 
         /// Process entities waiting for stairs
@@ -1181,6 +1205,9 @@ pub fn PathfindingEngine(comptime Config: type) type {
                         pos.waiting_for_stair = null;
                         pos.waiting_at_node = null;
                         pos.waiting_direction = null;
+
+                        // Queue waiting ended event
+                        self.waiting_ended_events.append(self.allocator, .{ .entity = entity, .node = stair_node }) catch {};
 
                         // Remove from waiting queue
                         if (std.mem.indexOfScalar(Entity, state.waiting_queue.items, entity)) |idx| {

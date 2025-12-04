@@ -51,6 +51,18 @@ fn onPathCompleted(state: *TestState, entity: u32, node: pathfinding.NodeId) voi
     _ = node;
 }
 
+fn onWaitingStarted(state: *TestState, entity: u32, node: pathfinding.NodeId) void {
+    state.waiting_started_count += 1;
+    _ = entity;
+    _ = node;
+}
+
+fn onWaitingEnded(state: *TestState, entity: u32, node: pathfinding.NodeId) void {
+    state.waiting_ended_count += 1;
+    _ = entity;
+    _ = node;
+}
+
 fn runBasicTest(allocator: std.mem.Allocator) !bool {
     print("=== Test 1: Basic Two-Entity Cross ===\n\n", .{});
 
@@ -61,6 +73,8 @@ fn runBasicTest(allocator: std.mem.Allocator) !bool {
 
     engine.on_node_reached = onNodeReached;
     engine.on_path_completed = onPathCompleted;
+    engine.on_waiting_started = onWaitingStarted;
+    engine.on_waiting_ended = onWaitingEnded;
 
     // Build a simple 2-floor layout:
     //   FLOOR 2 (y = 100):  [2]----[3] (stair)
@@ -106,7 +120,12 @@ fn runBasicTest(allocator: std.mem.Allocator) !bool {
     const final_b = engine.getCurrentNode(1) orelse 99;
 
     print("Results: A at node {d}, B at node {d}\n", .{ final_a, final_b });
-    print("Callbacks: reached={d}, completed={d}\n", .{ state.node_reached_count, state.path_completed_count });
+    print("Callbacks: reached={d}, completed={d}, waiting_started={d}, waiting_ended={d}\n", .{
+        state.node_reached_count,
+        state.path_completed_count,
+        state.waiting_started_count,
+        state.waiting_ended_count,
+    });
     print("Max concurrent stair users: {d}\n\n", .{state.max_concurrent_stair_users});
 
     var passed = true;
@@ -120,6 +139,14 @@ fn runBasicTest(allocator: std.mem.Allocator) !bool {
     }
     if (state.max_concurrent_stair_users > 1) {
         print("FAIL: More than 1 entity used stair concurrently!\n", .{});
+        passed = false;
+    }
+    // Waiting callbacks should be balanced
+    if (state.waiting_started_count != state.waiting_ended_count) {
+        print("FAIL: waiting_started ({d}) != waiting_ended ({d})\n", .{
+            state.waiting_started_count,
+            state.waiting_ended_count,
+        });
         passed = false;
     }
 
@@ -136,6 +163,8 @@ fn runContentionTest(allocator: std.mem.Allocator) !bool {
 
     engine.on_node_reached = onNodeReached;
     engine.on_path_completed = onPathCompleted;
+    engine.on_waiting_started = onWaitingStarted;
+    engine.on_waiting_ended = onWaitingEnded;
 
     // Build layout with multiple waiting spots:
     //   FLOOR 2 (y = 100):  [4]--[5]--[6/stair]--[7]
@@ -244,7 +273,12 @@ fn runContentionTest(allocator: std.mem.Allocator) !bool {
         if (!arrived) all_arrived = false;
     }
 
-    print("\nCallbacks: reached={d}, completed={d}\n", .{ state.node_reached_count, state.path_completed_count });
+    print("\nCallbacks: reached={d}, completed={d}, waiting_started={d}, waiting_ended={d}\n", .{
+        state.node_reached_count,
+        state.path_completed_count,
+        state.waiting_started_count,
+        state.waiting_ended_count,
+    });
     print("Max concurrent stair users: {d}\n\n", .{state.max_concurrent_stair_users});
 
     if (!all_arrived) {
@@ -257,6 +291,14 @@ fn runContentionTest(allocator: std.mem.Allocator) !bool {
     }
     if (state.max_concurrent_stair_users > 1) {
         print("FAIL: More than 1 entity used stair concurrently!\n", .{});
+        passed = false;
+    }
+    // Waiting callbacks should be balanced
+    if (state.waiting_started_count != state.waiting_ended_count) {
+        print("FAIL: waiting_started ({d}) != waiting_ended ({d})\n", .{
+            state.waiting_started_count,
+            state.waiting_ended_count,
+        });
         passed = false;
     }
 
@@ -273,6 +315,8 @@ fn runMultiFloorTest(allocator: std.mem.Allocator) !bool {
 
     engine.on_node_reached = onNodeReached;
     engine.on_path_completed = onPathCompleted;
+    engine.on_waiting_started = onWaitingStarted;
+    engine.on_waiting_ended = onWaitingEnded;
 
     // Raylib-like layout: 4 floors, 8 nodes per floor, stairs at positions 1, 4, 6
     const floors: u32 = 4;
@@ -413,7 +457,12 @@ fn runMultiFloorTest(allocator: std.mem.Allocator) !bool {
         if (!arrived) all_arrived = false;
     }
 
-    print("\nCallbacks: reached={d}, completed={d}\n", .{ state.node_reached_count, state.path_completed_count });
+    print("\nCallbacks: reached={d}, completed={d}, waiting_started={d}, waiting_ended={d}\n", .{
+        state.node_reached_count,
+        state.path_completed_count,
+        state.waiting_started_count,
+        state.waiting_ended_count,
+    });
     print("Max concurrent stair users: {d}\n\n", .{state.max_concurrent_stair_users});
 
     if (!all_arrived) {
@@ -422,6 +471,14 @@ fn runMultiFloorTest(allocator: std.mem.Allocator) !bool {
     }
     if (state.max_concurrent_stair_users > 1) {
         print("FAIL: More than 1 entity used stair concurrently!\n", .{});
+        passed = false;
+    }
+    // Waiting callbacks should be balanced
+    if (state.waiting_started_count != state.waiting_ended_count) {
+        print("FAIL: waiting_started ({d}) != waiting_ended ({d})\n", .{
+            state.waiting_started_count,
+            state.waiting_ended_count,
+        });
         passed = false;
     }
 
