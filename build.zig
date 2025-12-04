@@ -166,6 +166,25 @@ pub fn build(b: *std.Build) void {
     examples_step.dependOn(&run_engine.step);
     examples_step.dependOn(&run_building.step);
 
+    // ===== Benchmark =====
+
+    const benchmark = b.addExecutable(.{
+        .name = "benchmark",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("usage/benchmark_floyd_warshall.zig"),
+            .target = target,
+            .optimize = .ReleaseFast, // Always optimize for benchmarks
+            .imports = &.{
+                .{ .name = "pathfinding", .module = pathfinding_module },
+            },
+        }),
+    });
+    b.installArtifact(benchmark);
+
+    const run_benchmark = b.addRunArtifact(benchmark);
+    const benchmark_step = b.step("run-benchmark", "Run Floyd-Warshall performance benchmark");
+    benchmark_step.dependOn(&run_benchmark.step);
+
     // ===== Raylib Example =====
 
     const raylib_dep = b.dependency("raylib_zig", .{

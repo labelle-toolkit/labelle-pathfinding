@@ -114,6 +114,7 @@ pub const NodePoint = engine.NodePoint;
 pub const StairMode = engine.StairMode;
 pub const VerticalDirection = engine.VerticalDirection;
 pub const LogLevel = engine.LogLevel;
+pub const FloydWarshallVariant = engine.FloydWarshallVariant;
 
 // Spatial indexing
 pub const quad_tree = @import("quad_tree.zig");
@@ -123,6 +124,13 @@ pub const Rectangle = quad_tree.Rectangle;
 // Algorithms
 pub const FloydWarshall = @import("floyd_warshall.zig").FloydWarshall;
 pub const AStar = @import("a_star.zig").AStar;
+
+// Optimized Floyd-Warshall variants
+pub const floyd_warshall_optimized = @import("floyd_warshall_optimized.zig");
+pub const FloydWarshallOptimized = floyd_warshall_optimized.FloydWarshallOptimized;
+pub const FloydWarshallFast = floyd_warshall_optimized.FloydWarshallFast;
+pub const FloydWarshallSimd = floyd_warshall_optimized.FloydWarshallSimd;
+pub const FloydWarshallScalar = floyd_warshall_optimized.FloydWarshallScalar;
 
 // Heuristics
 pub const heuristics = @import("heuristics.zig");
@@ -157,6 +165,7 @@ test {
     _ = @import("engine.zig");
     _ = @import("quad_tree.zig");
     _ = @import("floyd_warshall.zig");
+    _ = @import("floyd_warshall_optimized.zig");
     _ = @import("a_star.zig");
     _ = @import("heuristics.zig");
     _ = @import("components.zig");
