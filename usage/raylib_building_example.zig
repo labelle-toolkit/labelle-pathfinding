@@ -215,20 +215,17 @@ fn rebuildBuilding(game: *Game) !void {
         y: f32,
         speed: f32,
     };
-    var saved_entities: [64]EntityState = undefined;
-    var entity_count: u32 = 0;
+    var saved_entities = std.ArrayList(EntityState).init(game.allocator);
+    defer saved_entities.deinit();
 
     for (0..game.next_entity_id) |i| {
         const entity: u32 = @intCast(i);
         if (game.engine.getPosition(entity)) |pos| {
-            if (entity_count < 64) {
-                saved_entities[entity_count] = .{
-                    .x = pos.x,
-                    .y = pos.y,
-                    .speed = game.engine.getSpeed(entity) orelse 80.0,
-                };
-                entity_count += 1;
-            }
+            saved_entities.append(.{
+                .x = pos.x,
+                .y = pos.y,
+                .speed = game.engine.getSpeed(entity) orelse 80.0,
+            }) catch {};
         }
         game.engine.unregisterEntity(entity);
     }
@@ -241,8 +238,7 @@ fn rebuildBuilding(game: *Game) !void {
 
     // Restore entities
     game.next_entity_id = 0;
-    for (0..entity_count) |i| {
-        const state = saved_entities[i];
+    for (saved_entities.items) |state| {
         try game.engine.registerEntity(game.next_entity_id, state.x, state.y, state.speed);
         game.next_entity_id += 1;
     }

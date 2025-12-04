@@ -442,7 +442,9 @@ pub fn PathfindingEngine(comptime Config: type) type {
                 area.deinit(self.allocator);
             }
             self.waiting_areas.clearRetainingCapacity();
-            self.node_spatial.reset() catch {};
+            self.node_spatial.reset() catch |err| {
+                logErr("Failed to reset node_spatial: {}", .{err});
+            };
             self.next_node_id = 0;
         }
 
@@ -1039,7 +1041,9 @@ pub fn PathfindingEngine(comptime Config: type) type {
                                     pos.y = wait_node.y;
                                     _ = self.entity_spatial.update(entity, pos.x, pos.y);
                                     // Queue waiting started event
-                                    self.waiting_started_events.append(self.allocator, .{ .entity = entity, .node = sn }) catch {};
+                                    self.waiting_started_events.append(self.allocator, .{ .entity = entity, .node = sn }) catch |err| {
+                                        logErr("Failed to queue waiting_started event: {}", .{err});
+                                    };
                                 }
                                 // Add to waiting queue
                                 state.waiting_queue.append(self.allocator, entity) catch |err| {
@@ -1207,7 +1211,9 @@ pub fn PathfindingEngine(comptime Config: type) type {
                         pos.waiting_direction = null;
 
                         // Queue waiting ended event
-                        self.waiting_ended_events.append(self.allocator, .{ .entity = entity, .node = stair_node }) catch {};
+                        self.waiting_ended_events.append(self.allocator, .{ .entity = entity, .node = stair_node }) catch |err| {
+                            logErr("Failed to queue waiting_ended event: {}", .{err});
+                        };
 
                         // Remove from waiting queue
                         if (std.mem.indexOfScalar(Entity, state.waiting_queue.items, entity)) |idx| {
