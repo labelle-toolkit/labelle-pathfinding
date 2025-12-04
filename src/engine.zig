@@ -18,6 +18,7 @@ const Rectangle = quad_tree.Rectangle;
 const EntityPoint = quad_tree.EntityPoint;
 const Point2D = quad_tree.Point2D;
 const FloydWarshall = @import("floyd_warshall.zig").FloydWarshall;
+const floyd_warshall_optimized = @import("floyd_warshall_optimized.zig");
 
 /// Log level for controlling pathfinding engine verbosity
 pub const LogLevel = enum {
@@ -93,11 +94,33 @@ pub const NodePoint = struct {
 };
 
 /// Pathfinding engine with comptime configuration
+/// Floyd-Warshall algorithm variant selection
+pub const FloydWarshallVariant = enum {
+    /// Original implementation (ArrayList-based, compatible with older code)
+    legacy,
+    /// Optimized with flat memory layout and SIMD (recommended for large graphs)
+    optimized_simd,
+    /// Optimized with SIMD and multi-threading (best for very large graphs, 100+ nodes)
+    optimized_parallel,
+};
+
 pub fn PathfindingEngine(comptime Config: type) type {
     const Entity = Config.Entity;
     const Context = Config.Context;
     // Extract log_level from Config, defaulting to .none (silent)
     const log_level: LogLevel = if (@hasDecl(Config, "log_level")) Config.log_level else .none;
+    // Extract Floyd-Warshall variant, defaulting to legacy for backward compatibility
+    const fw_variant: FloydWarshallVariant = if (@hasDecl(Config, "floyd_warshall_variant"))
+        Config.floyd_warshall_variant
+    else
+        .legacy;
+
+    // Select the Floyd-Warshall implementation based on config
+    const FloydWarshallImpl = switch (fw_variant) {
+        .legacy => FloydWarshall,
+        .optimized_simd => floyd_warshall_optimized.FloydWarshallSimd,
+        .optimized_parallel => floyd_warshall_optimized.FloydWarshallParallel,
+    };
 
     return struct {
         const Self = @This();
@@ -251,7 +274,7 @@ pub fn PathfindingEngine(comptime Config: type) type {
         edges: std.AutoHashMap(NodeId, std.ArrayListUnmanaged(NodeId)),
         directional_edges: std.AutoHashMap(NodeId, DirectionalEdges),
         node_spatial: QuadTree(NodeId),
-        floyd_warshall: FloydWarshall,
+        floyd_warshall: FloydWarshallImpl,
         next_node_id: NodeId = 0,
 
         // Entities
@@ -279,7 +302,7 @@ pub fn PathfindingEngine(comptime Config: type) type {
                 .edges = std.AutoHashMap(NodeId, std.ArrayListUnmanaged(NodeId)).init(allocator),
                 .directional_edges = std.AutoHashMap(NodeId, DirectionalEdges).init(allocator),
                 .node_spatial = try QuadTree(NodeId).init(allocator, .{ .x = -50000, .y = -50000, .width = 100000, .height = 100000 }),
-                .floyd_warshall = FloydWarshall.init(allocator),
+                .floyd_warshall = FloydWarshallImpl.init(allocator),
                 .entities = std.AutoHashMap(Entity, PositionPF).init(allocator),
                 .entity_spatial = try QuadTree(Entity).init(allocator, .{ .x = -50000, .y = -50000, .width = 100000, .height = 100000 }),
                 .stair_states = std.AutoHashMap(NodeId, StairState).init(allocator),
@@ -714,8 +737,18 @@ pub fn PathfindingEngine(comptime Config: type) type {
                     const to_node = self.nodes.get(to) orelse continue;
                     const dx = to_node.x - from_node.x;
                     const dy = to_node.y - from_node.y;
-                    const dist: u64 = @intFromFloat(@round(@sqrt(dx * dx + dy * dy)));
-                    self.floyd_warshall.addEdgeWithMapping(from, to, @max(1, dist));
+                    const dist_float = @round(@sqrt(dx * dx + dy * dy));
+                    // Optimized FW uses u32, legacy uses u64 - use appropriate type
+                    const weight = if (fw_variant == .legacy)
+                        @as(u64, @intFromFloat(dist_float))
+                    else
+                        @as(u32, @intFromFloat(dist_float));
+                    // Legacy FW returns void, optimized returns !void
+                    if (fw_variant == .legacy) {
+                        self.floyd_warshall.addEdgeWithMapping(from, to, @max(1, weight));
+                    } else {
+                        try self.floyd_warshall.addEdgeWithMapping(from, to, @max(1, weight));
+                    }
                 }
             }
 
