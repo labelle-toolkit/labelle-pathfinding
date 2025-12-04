@@ -17,6 +17,8 @@ zig build run-game       # Game integration with callbacks
 zig build run-platformer # Platformer with directional connections
 zig build run-engine     # Full engine features demo
 zig build run-building   # Multi-floor building with stairs
+zig build run-raylib     # Interactive raylib visualization
+zig build run-raylib-building  # Interactive multi-floor building
 zig build run-examples   # Run all examples
 ```
 

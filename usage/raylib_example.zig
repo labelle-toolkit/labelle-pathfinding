@@ -92,7 +92,7 @@ pub fn main() !void {
         rl.clearBackground(rl.Color.init(26, 26, 46, 255));
 
         drawGraph(&engine);
-        drawEntities(&engine, game.selected_entity);
+        drawEntities(&game);
         drawUI(&game);
     }
 }
@@ -267,13 +267,16 @@ fn drawGraph(engine: *Engine) void {
     }
 }
 
-fn drawEntities(engine: *Engine, selected: ?u32) void {
+fn drawEntities(game: *Game) void {
+    const engine = game.engine;
+    const selected = game.selected_entity;
+
     const selected_color = rl.Color.init(74, 222, 128, 255);
     const entity_color = rl.Color.init(0, 212, 255, 255);
     const text_color = rl.Color.init(26, 26, 46, 255);
 
     var i: u32 = 0;
-    while (i < 100) : (i += 1) {
+    while (i < game.next_entity_id) : (i += 1) {
         if (engine.getPosition(i)) |pos| {
             const is_selected = if (selected) |sel| sel == i else false;
             const color = if (is_selected) selected_color else entity_color;
