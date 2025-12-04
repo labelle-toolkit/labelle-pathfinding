@@ -155,41 +155,53 @@ pub fn FloydWarshallOptimized(comptime config: Config) type {
             return self.hasPath(u_idx, v_idx);
         }
 
+        pub const PathError = error{
+            NoPathFound,
+            OutOfMemory,
+        };
+
         /// Build the path from u to v and store in the provided ArrayList
-        pub fn setPathWithMapping(self: *const Self, path_list: *std.array_list.Managed(u32), u_node: u32, v_node: u32) !void {
+        /// Returns error.NoPathFound if no path exists between the nodes
+        pub fn setPathWithMapping(self: *const Self, path_list: *std.array_list.Managed(u32), u_node: u32, v_node: u32) PathError!void {
             var current = u_node;
             while (current != v_node) {
                 try path_list.append(current);
                 current = self.nextWithMapping(current, v_node);
                 if (current == INF) {
-                    std.log.err("No path found from {} to {}\n", .{ u_node, v_node });
-                    return;
+                    return error.NoPathFound;
                 }
             }
             try path_list.append(v_node);
         }
 
         /// Build the path from u to v and store in the provided unmanaged ArrayList
-        pub fn setPathWithMappingUnmanaged(self: *const Self, allocator: std.mem.Allocator, path_list: *std.ArrayListUnmanaged(u32), u_node: u32, v_node: u32) !void {
+        /// Returns error.NoPathFound if no path exists between the nodes
+        pub fn setPathWithMappingUnmanaged(self: *const Self, allocator: std.mem.Allocator, path_list: *std.ArrayListUnmanaged(u32), u_node: u32, v_node: u32) PathError!void {
             var current = u_node;
             while (current != v_node) {
                 try path_list.append(allocator, current);
                 current = self.nextWithMapping(current, v_node);
                 if (current == INF) {
-                    std.log.err("No path found from {} to {}\n", .{ u_node, v_node });
-                    return;
+                    return error.NoPathFound;
                 }
             }
             try path_list.append(allocator, v_node);
         }
 
+        pub const CleanError = error{
+            SizeOverflow,
+            OutOfMemory,
+        };
+
         /// Reset the graph and prepare for new data
-        pub fn clean(self: *Self) !void {
+        pub fn clean(self: *Self) CleanError!void {
             self.last_key = 0;
             self.ids.clearRetainingCapacity();
             self.reverse_ids.clearRetainingCapacity();
 
-            const matrix_size = @as(usize, self.size) * @as(usize, self.size);
+            // Check for overflow before computing matrix_size
+            const n: usize = self.size;
+            const matrix_size = std.math.mul(usize, n, n) catch return error.SizeOverflow;
 
             // Reallocate if needed
             if (self.capacity < self.size) {
