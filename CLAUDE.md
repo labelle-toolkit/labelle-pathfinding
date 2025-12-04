@@ -20,6 +20,9 @@ zig build run-building   # Multi-floor building with stairs
 zig build run-raylib     # Interactive raylib visualization
 zig build run-raylib-building  # Interactive multi-floor building
 zig build run-examples   # Run all examples
+
+# Run benchmark
+zig build run-benchmark  # Floyd-Warshall performance comparison
 ```
 
 ## Architecture
@@ -30,7 +33,7 @@ This is a Zig pathfinding library for games. It requires Zig 0.15.2+.
 
 - **PathfindingEngine** (`src/engine.zig`): Self-contained engine that owns entity positions. Games query the engine for positions rather than managing them directly. Configured via comptime Config struct with `Entity` and `Context` types.
 
-- **Floyd-Warshall** (`src/floyd_warshall.zig`): Precomputes all-pairs shortest paths. Used internally by PathfindingEngine. Best for dense graphs with frequent queries between many node pairs.
+- **Floyd-Warshall** (`src/floyd_warshall.zig`): Precomputes all-pairs shortest paths. Used internally by PathfindingEngine. Best for dense graphs with frequent queries between many node pairs. An optimized SIMD version is available in `src/floyd_warshall_optimized.zig` (5-8x faster).
 
 - **A*** (`src/a_star.zig`): Single-source shortest path with pluggable heuristics. Better for large sparse graphs or dynamic scenarios.
 
@@ -52,6 +55,13 @@ For building mode, stairs can have traffic modes:
 - `.single`: Single-file, one entity at a time
 
 Waiting areas can be defined for entities queuing at busy stairs.
+
+### Floyd-Warshall Variants
+
+The engine supports different Floyd-Warshall implementations via `Config.floyd_warshall_variant`:
+- `.legacy`: Original ArrayList-based (default, backward compatible)
+- `.optimized_simd`: Flat memory + SIMD vectorization (5-8x faster, recommended)
+- `.optimized_parallel`: Same as SIMD (parallel reserved for future use)
 
 ### Legacy ECS Support
 
