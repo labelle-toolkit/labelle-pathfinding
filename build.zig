@@ -165,4 +165,52 @@ pub fn build(b: *std.Build) void {
     examples_step.dependOn(&run_platformer.step);
     examples_step.dependOn(&run_engine.step);
     examples_step.dependOn(&run_building.step);
+
+    // ===== Raylib Example =====
+
+    const raylib_dep = b.dependency("raylib_zig", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    const raylib = raylib_dep.module("raylib");
+    const raylib_artifact = raylib_dep.artifact("raylib");
+
+    const raylib_example = b.addExecutable(.{
+        .name = "raylib_example",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("usage/raylib_example.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "pathfinding", .module = pathfinding_module },
+                .{ .name = "raylib", .module = raylib },
+            },
+        }),
+    });
+    raylib_example.linkLibrary(raylib_artifact);
+    b.installArtifact(raylib_example);
+
+    const run_raylib = b.addRunArtifact(raylib_example);
+    const raylib_step = b.step("run-raylib", "Run raylib pathfinding visualization");
+    raylib_step.dependOn(&run_raylib.step);
+
+    // Raylib building example
+    const raylib_building = b.addExecutable(.{
+        .name = "raylib_building",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("usage/raylib_building_example.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "pathfinding", .module = pathfinding_module },
+                .{ .name = "raylib", .module = raylib },
+            },
+        }),
+    });
+    raylib_building.linkLibrary(raylib_artifact);
+    b.installArtifact(raylib_building);
+
+    const run_raylib_building = b.addRunArtifact(raylib_building);
+    const raylib_building_step = b.step("run-raylib-building", "Run raylib multi-floor building example");
+    raylib_building_step.dependOn(&run_raylib_building.step);
 }

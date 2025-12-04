@@ -1287,6 +1287,81 @@ pub fn PathfindingEngine(comptime Config: type) type {
             const to_mode = self.getStairMode(to_node);
             return from_mode != .none or to_mode != .none;
         }
+
+        // =======================================================
+        // Debug Functions
+        // =======================================================
+
+        /// Connection matrix entry for debug output
+        pub const ConnectionEntry = struct {
+            from: NodeId,
+            to: NodeId,
+            distance: u64,
+        };
+
+        /// Debug info for the connection matrix
+        pub const DebugConnectionMatrix = struct {
+            node_count: usize,
+            connections: []ConnectionEntry,
+            allocator: std.mem.Allocator,
+
+            pub fn deinit(self: *DebugConnectionMatrix) void {
+                self.allocator.free(self.connections);
+            }
+        };
+
+        /// Returns the connection matrix for debugging purposes.
+        /// The returned struct contains all node connections with their distances.
+        /// Caller must call deinit() on the returned struct to free memory.
+        pub fn getDebugConnectionMatrix(self: *Self) !DebugConnectionMatrix {
+            var entries: std.ArrayListUnmanaged(ConnectionEntry) = .{};
+            defer entries.deinit(self.allocator);
+
+            // Iterate through all edges and get distances from Floyd-Warshall
+            var edge_iter = self.edges.iterator();
+            while (edge_iter.next()) |entry| {
+                const from = entry.key_ptr.*;
+                for (entry.value_ptr.items) |to| {
+                    const distance = if (self.floyd_warshall.hasPathWithMapping(from, to))
+                        self.floyd_warshall.valueWithMapping(from, to)
+                    else
+                        std.math.maxInt(u64);
+
+                    try entries.append(self.allocator, .{
+                        .from = from,
+                        .to = to,
+                        .distance = distance,
+                    });
+                }
+            }
+
+            const connections = try self.allocator.dupe(ConnectionEntry, entries.items);
+
+            return .{
+                .node_count = self.nodes.count(),
+                .connections = connections,
+                .allocator = self.allocator,
+            };
+        }
+
+        /// Returns direct edge connections as a simple format (from -> [to1, to2, ...])
+        /// Returns a slice of node IDs that the given node connects to
+        pub fn getNodeConnections(self: *Self, node: NodeId) ?[]const NodeId {
+            return self.getEdges(node);
+        }
+
+        /// Check if there's a path between two nodes
+        pub fn hasPathBetween(self: *Self, from: NodeId, to: NodeId) bool {
+            return self.floyd_warshall.hasPathWithMapping(from, to);
+        }
+
+        /// Get the shortest path distance between two nodes
+        pub fn getPathDistance(self: *Self, from: NodeId, to: NodeId) ?u64 {
+            if (!self.floyd_warshall.hasPathWithMapping(from, to)) {
+                return null;
+            }
+            return self.floyd_warshall.valueWithMapping(from, to);
+        }
     };
 }
 
@@ -1331,4 +1406,144 @@ test "PathfindingEngine basic" {
     // Position should have moved
     const new_pos = engine.getPosition(1);
     try std.testing.expect(new_pos.?.x > 0);
+}
+
+test "getDebugConnectionMatrix returns node count" {
+    const TestConfig = struct {
+        pub const Entity = u32;
+        pub const Context = *anyopaque;
+    };
+
+    const Engine = PathfindingEngine(TestConfig);
+    var engine = try Engine.init(std.testing.allocator);
+    defer engine.deinit();
+
+    try engine.addNode(0, 0, 0);
+    try engine.addNode(1, 100, 0);
+    try engine.addNode(2, 200, 0);
+
+    try engine.connectNodes(.{ .omnidirectional = .{ .max_distance = 150, .max_connections = 2 } });
+    try engine.rebuildPaths();
+
+    var matrix = try engine.getDebugConnectionMatrix();
+    defer matrix.deinit();
+
+    try std.testing.expectEqual(@as(usize, 3), matrix.node_count);
+}
+
+test "getDebugConnectionMatrix returns connections with distances" {
+    const TestConfig = struct {
+        pub const Entity = u32;
+        pub const Context = *anyopaque;
+    };
+
+    const Engine = PathfindingEngine(TestConfig);
+    var engine = try Engine.init(std.testing.allocator);
+    defer engine.deinit();
+
+    try engine.addNode(0, 0, 0);
+    try engine.addNode(1, 100, 0);
+
+    try engine.connectNodes(.{ .omnidirectional = .{ .max_distance = 150, .max_connections = 2 } });
+    try engine.rebuildPaths();
+
+    var matrix = try engine.getDebugConnectionMatrix();
+    defer matrix.deinit();
+
+    // Bidirectional: 0->1 and 1->0
+    try std.testing.expect(matrix.connections.len >= 2);
+
+    var found_connection = false;
+    for (matrix.connections) |conn| {
+        if (conn.from == 0 and conn.to == 1) {
+            found_connection = true;
+            try std.testing.expect(conn.distance >= 99 and conn.distance <= 101);
+        }
+    }
+    try std.testing.expect(found_connection);
+}
+
+test "hasPathBetween returns true for connected nodes" {
+    const TestConfig = struct {
+        pub const Entity = u32;
+        pub const Context = *anyopaque;
+    };
+
+    const Engine = PathfindingEngine(TestConfig);
+    var engine = try Engine.init(std.testing.allocator);
+    defer engine.deinit();
+
+    try engine.addNode(0, 0, 0);
+    try engine.addNode(1, 100, 0);
+    try engine.addNode(2, 200, 0);
+
+    try engine.connectNodes(.{ .omnidirectional = .{ .max_distance = 150, .max_connections = 2 } });
+    try engine.rebuildPaths();
+
+    try std.testing.expect(engine.hasPathBetween(0, 2));
+    try std.testing.expect(engine.hasPathBetween(2, 0));
+}
+
+test "getPathDistance returns correct distance through intermediate nodes" {
+    const TestConfig = struct {
+        pub const Entity = u32;
+        pub const Context = *anyopaque;
+    };
+
+    const Engine = PathfindingEngine(TestConfig);
+    var engine = try Engine.init(std.testing.allocator);
+    defer engine.deinit();
+
+    try engine.addNode(0, 0, 0);
+    try engine.addNode(1, 100, 0);
+    try engine.addNode(2, 200, 0);
+
+    try engine.connectNodes(.{ .omnidirectional = .{ .max_distance = 150, .max_connections = 2 } });
+    try engine.rebuildPaths();
+
+    const dist = engine.getPathDistance(0, 2);
+    try std.testing.expect(dist != null);
+    try std.testing.expect(dist.? >= 199 and dist.? <= 201);
+}
+
+test "getNodeConnections returns edges for node" {
+    const TestConfig = struct {
+        pub const Entity = u32;
+        pub const Context = *anyopaque;
+    };
+
+    const Engine = PathfindingEngine(TestConfig);
+    var engine = try Engine.init(std.testing.allocator);
+    defer engine.deinit();
+
+    try engine.addNode(0, 0, 0);
+    try engine.addNode(1, 100, 0);
+    try engine.addNode(2, 200, 0);
+
+    try engine.connectNodes(.{ .omnidirectional = .{ .max_distance = 150, .max_connections = 2 } });
+
+    const connections = engine.getNodeConnections(1);
+    try std.testing.expect(connections != null);
+    try std.testing.expect(connections.?.len >= 2);
+}
+
+test "getPathDistance returns null for disconnected nodes" {
+    const TestConfig = struct {
+        pub const Entity = u32;
+        pub const Context = *anyopaque;
+    };
+
+    const Engine = PathfindingEngine(TestConfig);
+    var engine = try Engine.init(std.testing.allocator);
+    defer engine.deinit();
+
+    try engine.addNode(0, 0, 0);
+    try engine.addNode(1, 500, 0); // Too far to connect
+
+    try engine.connectNodes(.{ .omnidirectional = .{ .max_distance = 100, .max_connections = 2 } });
+    try engine.rebuildPaths();
+
+    const dist = engine.getPathDistance(0, 1);
+    try std.testing.expect(dist == null);
+    try std.testing.expect(!engine.hasPathBetween(0, 1));
 }
