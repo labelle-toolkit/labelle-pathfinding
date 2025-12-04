@@ -6,7 +6,7 @@ A pathfinding library for Zig game development. Part of the [labelle-toolkit](ht
 
 - **PathfindingEngine** - Self-contained engine that owns entity positions, with callbacks and spatial queries
 - **QuadTree** - Spatial partitioning for O(log n) entity and node lookups
-- **Floyd-Warshall Algorithm** - All-pairs shortest path computation
+- **Floyd-Warshall Algorithm** - All-pairs shortest path computation with SIMD and parallel optimizations (5-16x faster)
 - **A\* Algorithm** - Single-source shortest path with multiple heuristics
 - **Connection Modes** - Omnidirectional (top-down), directional (platformer), and building (vertical via stairs) graph building
 - **Stair Traffic Control** - Multi-lane, directional, or single-file stair usage with waiting areas
@@ -23,7 +23,7 @@ Add to your `build.zig.zon`:
 ```zig
 .dependencies = .{
     .pathfinding = .{
-        .url = "https://github.com/labelle-toolkit/labelle-pathfinding/archive/refs/tags/v2.2.1.tar.gz",
+        .url = "https://github.com/labelle-toolkit/labelle-pathfinding/archive/refs/tags/v2.3.0.tar.gz",
         .hash = "...",
     },
 },
@@ -32,7 +32,7 @@ Add to your `build.zig.zon`:
 Or use `zig fetch`:
 
 ```bash
-zig fetch --save https://github.com/labelle-toolkit/labelle-pathfinding/archive/refs/tags/v2.2.1.tar.gz
+zig fetch --save https://github.com/labelle-toolkit/labelle-pathfinding/archive/refs/tags/v2.3.0.tar.gz
 ```
 
 Then in your `build.zig`:
@@ -248,6 +248,42 @@ fw.generate();
 // Query paths
 const dist = fw.valueWithMapping(100, 300);  // Returns 2
 const next = fw.nextWithMapping(100, 300);   // Returns 200
+```
+
+#### Optimized Variants
+
+For performance-critical applications, use the optimized implementations:
+
+```zig
+// SIMD-optimized (5-8x faster, single-threaded)
+var fw = pathfinding.FloydWarshallSimd.init(allocator);
+
+// Parallel + SIMD (up to 16x faster, multi-threaded)
+var fw = pathfinding.FloydWarshallParallel.init(allocator);
+```
+
+The optimized variants have the same API as the legacy implementation. Use `FloydWarshallParallel` for graphs with 256+ nodes where multi-threading provides the most benefit.
+
+You can also configure PathfindingEngine to use an optimized variant:
+
+```zig
+const Config = struct {
+    pub const Entity = u64;
+    pub const Context = *Game;
+    pub const floyd_warshall_variant: pathfinding.FloydWarshallVariant = .optimized_parallel;
+};
+```
+
+| Variant | Description | Best For |
+|---------|-------------|----------|
+| `.legacy` | Original ArrayList-based (default) | Backward compatibility |
+| `.optimized_simd` | Flat memory + SIMD vectorization | Small-medium graphs, single-threaded |
+| `.optimized_parallel` | SIMD + multi-threading | Large graphs (256+ nodes) |
+
+Run the benchmark to see performance on your hardware:
+
+```bash
+zig build run-benchmark
 ```
 
 ### A* Algorithm (Direct Usage)
