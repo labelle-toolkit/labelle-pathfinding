@@ -10,7 +10,6 @@ A pathfinding library for Zig game development. Part of the [labelle-toolkit](ht
 - **A\* Algorithm** - Single-source shortest path with multiple heuristics
 - **Connection Modes** - Omnidirectional (top-down), directional (platformer), and building (vertical via stairs) graph building
 - **Stair Traffic Control** - Multi-lane, directional, or single-file stair usage with waiting areas
-- **Legacy ECS Support** - Components for [zig-ecs](https://github.com/prime31/zig-ecs) integration
 
 ## Requirements
 
@@ -23,7 +22,7 @@ Add to your `build.zig.zon`:
 ```zig
 .dependencies = .{
     .pathfinding = .{
-        .url = "https://github.com/labelle-toolkit/labelle-pathfinding/archive/refs/tags/v2.3.0.tar.gz",
+        .url = "https://github.com/labelle-toolkit/labelle-pathfinding/archive/refs/tags/v2.4.0.tar.gz",
         .hash = "...",
     },
 },
@@ -32,7 +31,7 @@ Add to your `build.zig.zon`:
 Or use `zig fetch`:
 
 ```bash
-zig fetch --save https://github.com/labelle-toolkit/labelle-pathfinding/archive/refs/tags/v2.3.0.tar.gz
+zig fetch --save https://github.com/labelle-toolkit/labelle-pathfinding/archive/refs/tags/v2.4.0.tar.gz
 ```
 
 Then in your `build.zig`:
