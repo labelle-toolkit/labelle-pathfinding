@@ -12,10 +12,6 @@
             .url = "https://github.com/apotema/zspec/archive/refs/heads/main.tar.gz",
             .hash = "zspec-0.3.0-jaKLbbqZAgAB-MBfy6M3HKB3jSTQ-TsNW9OxpLhLlav5",
         },
-        .zig_ecs = .{
-            .url = "git+https://github.com/prime31/zig-ecs#dbf3647c2cc4f327fe87067e40f8436c7f87f209",
-            .hash = "entt-1.0.0-qJPtbNLVAgDPXaUbyRSsBTK75Cr1WujUA92kToJugWry",
-        },
         .raylib_zig = .{
             .url = "git+https://github.com/raylib-zig/raylib-zig#a4d18b2d1cf8fdddec68b5b084535fca0475f466",
             .hash = "raylib_zig-5.6.0-dev-KE8REL5MBQAf3p497t52Xw9P7ojndIkVOWPXnLiLLw2P",

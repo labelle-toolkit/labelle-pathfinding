@@ -8,10 +8,6 @@ pub fn build(b: *std.Build) void {
     const zig_utils_dep = b.dependency("zig_utils", .{});
     const zig_utils = zig_utils_dep.module("zig_utils");
 
-    // zig-ecs dependency (kept for legacy components)
-    const zig_ecs_dep = b.dependency("zig_ecs", .{});
-    const zig_ecs = zig_ecs_dep.module("zig-ecs");
-
     // Main module
     const pathfinding_module = b.addModule("pathfinding", .{
         .root_source_file = b.path("src/pathfinding.zig"),
@@ -19,7 +15,6 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{
             .{ .name = "zig_utils", .module = zig_utils },
-            .{ .name = "ecs", .module = zig_ecs },
         },
     });
 
@@ -37,7 +32,6 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "zig_utils", .module = zig_utils },
-                .{ .name = "ecs", .module = zig_ecs },
             },
         }),
     });
@@ -56,7 +50,6 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "zspec", .module = zspec.module("zspec") },
                 .{ .name = "pathfinding", .module = pathfinding_module },
                 .{ .name = "zig_utils", .module = zig_utils },
-                .{ .name = "ecs", .module = zig_ecs },
             },
         }),
         .test_runner = .{ .path = zspec.path("src/runner.zig"), .mode = .simple },
