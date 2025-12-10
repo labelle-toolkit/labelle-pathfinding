@@ -22,6 +22,7 @@ const Config = struct {
 
 // Alias for convenience
 const Entity = Config.Entity;
+const Vec2 = pathfinding.Vec2;
 
 const Engine = pathfinding.PathfindingEngine(Config);
 
@@ -89,12 +90,17 @@ pub fn main() !void {
     // ===== Step 6: Query final position =====
     print("\n6. Final state:\n", .{});
 
-    const final_pos = engine.getPosition(player).?;
+    // getPosition returns Vec2 from zig-utils for ecosystem compatibility
+    const final_pos: Vec2 = engine.getPosition(player).?;
     const current_node = engine.getCurrentNode(player).?;
 
     print("   Position: ({d:.0}, {d:.0})\n", .{ final_pos.x, final_pos.y });
     print("   Current waypoint: {d}\n", .{current_node});
     print("   Is moving: {}\n", .{engine.isMoving(player)});
+
+    // Vec2 provides useful methods like distance calculation
+    const start = Vec2{ .x = 0, .y = 0 };
+    print("   Distance traveled: {d:.0}\n", .{start.distance(final_pos)});
 
     print("\n=== Basic Example Complete ===\n\n", .{});
 }

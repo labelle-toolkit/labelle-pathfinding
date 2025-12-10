@@ -101,8 +101,10 @@ const std = @import("std");
 pub const zig_utils = @import("zig_utils");
 pub const ecs = @import("ecs");
 
-// Re-export Position (Vector2) from zig-utils for convenience
-pub const Position = zig_utils.Vector2;
+// Re-export Vector2 from zig-utils for position compatibility across labelle ecosystem
+pub const Vec2 = zig_utils.Vector2;
+/// Alias for Vec2 (deprecated, use Vec2 for consistency)
+pub const Position = Vec2;
 
 // Engine (self-contained pathfinding)
 pub const engine = @import("engine.zig");
@@ -115,6 +117,7 @@ pub const StairMode = engine.StairMode;
 pub const VerticalDirection = engine.VerticalDirection;
 pub const LogLevel = engine.LogLevel;
 pub const FloydWarshallVariant = engine.FloydWarshallVariant;
+// Note: Vec2 is also available via engine.Vec2, but prefer the top-level export
 
 // Spatial indexing
 pub const quad_tree = @import("quad_tree.zig");

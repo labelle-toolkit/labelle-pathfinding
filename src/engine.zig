@@ -12,6 +12,7 @@
 //! - Callbacks for path events (node reached, path completed, path blocked)
 
 const std = @import("std");
+const zig_utils = @import("zig_utils");
 const quad_tree = @import("quad_tree.zig");
 const QuadTree = quad_tree.QuadTree;
 const Rectangle = quad_tree.Rectangle;
@@ -19,6 +20,9 @@ const EntityPoint = quad_tree.EntityPoint;
 const Point2D = quad_tree.Point2D;
 const FloydWarshall = @import("floyd_warshall.zig").FloydWarshall;
 const floyd_warshall_optimized = @import("floyd_warshall_optimized.zig");
+
+/// Vector2 type from zig-utils for position compatibility across labelle ecosystem
+pub const Vec2 = zig_utils.Vector2;
 
 /// Log level for controlling pathfinding engine verbosity
 pub const LogLevel = enum {
@@ -421,6 +425,30 @@ pub fn PathfindingEngine(comptime Config: type) type {
             }
         }
 
+        // =======================================================
+        // Vec2 Convenience Methods
+        // =======================================================
+
+        /// Add a node at the given Vec2 position
+        pub fn addNodeVec2(self: *Self, id: NodeId, pos: Vec2) !void {
+            try self.addNode(id, pos.x, pos.y);
+        }
+
+        /// Add a node at Vec2 position with stair mode
+        pub fn addNodeVec2WithStairMode(self: *Self, id: NodeId, pos: Vec2, stair_mode: StairMode) !void {
+            try self.addNodeWithStairMode(id, pos.x, pos.y, stair_mode);
+        }
+
+        /// Add a node at Vec2 position and return auto-generated ID
+        pub fn addNodeAutoVec2(self: *Self, pos: Vec2) !NodeId {
+            return self.addNodeAuto(pos.x, pos.y);
+        }
+
+        /// Add a node at Vec2 position with stair mode and return auto-generated ID
+        pub fn addNodeAutoVec2WithStairMode(self: *Self, pos: Vec2, stair_mode: StairMode) !NodeId {
+            return self.addNodeAutoWithStairMode(pos.x, pos.y, stair_mode);
+        }
+
         /// Clear all nodes and edges
         pub fn clearGraph(self: *Self) void {
             var edge_iter = self.edges.valueIterator();
@@ -790,6 +818,11 @@ pub fn PathfindingEngine(comptime Config: type) type {
             _ = self.entity_spatial.insert(.{ .id = entity, .x = x, .y = y });
         }
 
+        /// Register an entity at a Vec2 position (snaps to nearest node)
+        pub fn registerEntityVec2(self: *Self, entity: Entity, pos: Vec2, speed: f32) !void {
+            try self.registerEntity(entity, pos.x, pos.y, speed);
+        }
+
         /// Unregister an entity
         pub fn unregisterEntity(self: *Self, entity: Entity) void {
             logInfo("Unregistering entity {}", .{entity});
@@ -906,10 +939,10 @@ pub fn PathfindingEngine(comptime Config: type) type {
         // Position Queries
         // =======================================================
 
-        /// Get entity position (x, y only)
-        pub fn getPosition(self: *Self, entity: Entity) ?struct { x: f32, y: f32 } {
+        /// Get entity position as Vec2
+        pub fn getPosition(self: *Self, entity: Entity) ?Vec2 {
             if (self.entities.get(entity)) |pos| {
-                return .{ .x = pos.x, .y = pos.y };
+                return Vec2{ .x = pos.x, .y = pos.y };
             }
             return null;
         }
@@ -1268,10 +1301,10 @@ pub fn PathfindingEngine(comptime Config: type) type {
             return error.NoNodesFound;
         }
 
-        /// Get node position
-        pub fn getNodePosition(self: *Self, node: NodeId) ?struct { x: f32, y: f32 } {
+        /// Get node position as Vec2
+        pub fn getNodePosition(self: *Self, node: NodeId) ?Vec2 {
             if (self.nodes.get(node)) |data| {
-                return .{ .x = data.x, .y = data.y };
+                return Vec2{ .x = data.x, .y = data.y };
             }
             return null;
         }
