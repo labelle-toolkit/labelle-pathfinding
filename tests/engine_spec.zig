@@ -155,6 +155,63 @@ test "engine: connectAsGrid8 convenience" {
     try std.testing.expectEqual(@as(usize, 3), edges_0.?.len);
 }
 
+test "engine: createGrid helper" {
+    var engine = try Engine.init(std.testing.allocator);
+    defer engine.deinit();
+
+    const grid = try engine.createGrid(.{
+        .rows = 3,
+        .cols = 4,
+        .cell_size = 50,
+        .offset_x = 100,
+        .offset_y = 200,
+        .connection = .four_way,
+    });
+
+    // Should have created 12 nodes (3x4)
+    try std.testing.expectEqual(@as(usize, 12), engine.getNodeCount());
+
+    // Test grid coordinate conversion
+    const pos = grid.toScreen(2, 1); // col 2, row 1
+    try std.testing.expectEqual(@as(f32, 200), pos.x); // 2 * 50 + 100
+    try std.testing.expectEqual(@as(f32, 250), pos.y); // 1 * 50 + 200
+
+    // Test node ID conversion
+    const node_id = grid.toNodeId(2, 1); // col 2, row 1
+    try std.testing.expectEqual(@as(u32, 6), node_id); // 1 * 4 + 2 = 6
+
+    // Test reverse conversion
+    const coords = grid.fromNodeId(6);
+    try std.testing.expectEqual(@as(u32, 2), coords.col);
+    try std.testing.expectEqual(@as(u32, 1), coords.row);
+
+    // Test node count
+    try std.testing.expectEqual(@as(u32, 12), grid.nodeCount());
+
+    // Test isValid
+    try std.testing.expect(grid.isValid(3, 2)); // valid: col 3, row 2
+    try std.testing.expect(!grid.isValid(4, 2)); // invalid: col 4 >= cols
+    try std.testing.expect(!grid.isValid(3, 3)); // invalid: row 3 >= rows
+}
+
+test "engine: createGrid with eight_way connections" {
+    var engine = try Engine.init(std.testing.allocator);
+    defer engine.deinit();
+
+    const grid = try engine.createGrid(.{
+        .rows = 3,
+        .cols = 3,
+        .cell_size = 100,
+        .connection = .eight_way,
+    });
+
+    // Center node (1,1) should have 8 connections
+    const center_id = grid.toNodeId(1, 1);
+    const edges = engine.getEdges(center_id);
+    try std.testing.expect(edges != null);
+    try std.testing.expectEqual(@as(usize, 8), edges.?.len);
+}
+
 test "engine: entity registration" {
     var engine = try Engine.init(std.testing.allocator);
     defer engine.deinit();
