@@ -510,6 +510,34 @@ pub fn PathfindingEngine(comptime Config: type) type {
             }
         }
 
+        // =======================================================
+        // Connection Convenience Methods
+        // =======================================================
+
+        /// Connect nodes as a 4-directional grid (up/down/left/right only).
+        /// Uses slightly more than cell_size to account for floating point precision.
+        pub fn connectAsGrid4(self: *Self, cell_size: f32) !void {
+            try self.connectNodes(.{
+                .omnidirectional = .{
+                    .max_distance = cell_size * 1.1,
+                    .max_connections = 4,
+                },
+            });
+        }
+
+        /// Connect nodes as an 8-directional grid (including diagonals).
+        /// For diagonals, uses cell_size * sqrt(2) * 1.1 to reach diagonal neighbors.
+        pub fn connectAsGrid8(self: *Self, cell_size: f32) !void {
+            // Diagonal distance is cell_size * sqrt(2) ≈ cell_size * 1.414
+            // Add 10% margin for floating point precision
+            try self.connectNodes(.{
+                .omnidirectional = .{
+                    .max_distance = cell_size * 1.5,
+                    .max_connections = 8,
+                },
+            });
+        }
+
         fn connectOmnidirectional(self: *Self, max_distance: f32, max_connections: u8) !void {
             var buffer: std.ArrayListUnmanaged(EntityPoint(NodeId)) = .{};
             defer buffer.deinit(self.allocator);

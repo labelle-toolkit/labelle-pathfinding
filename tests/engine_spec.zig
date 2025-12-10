@@ -95,6 +95,66 @@ test "engine: directional connections" {
     try std.testing.expectEqual(@as(?u32, 4), dir_edges.?.down);
 }
 
+test "engine: connectAsGrid4 convenience" {
+    var engine = try Engine.init(std.testing.allocator);
+    defer engine.deinit();
+
+    const cell_size: f32 = 100;
+
+    // Create a 3x3 grid
+    try engine.addNode(0, 0, 0);
+    try engine.addNode(1, cell_size, 0);
+    try engine.addNode(2, cell_size * 2, 0);
+    try engine.addNode(3, 0, cell_size);
+    try engine.addNode(4, cell_size, cell_size); // center
+    try engine.addNode(5, cell_size * 2, cell_size);
+    try engine.addNode(6, 0, cell_size * 2);
+    try engine.addNode(7, cell_size, cell_size * 2);
+    try engine.addNode(8, cell_size * 2, cell_size * 2);
+
+    try engine.connectAsGrid4(cell_size);
+
+    // Center node (4) should have exactly 4 connections (no diagonals)
+    const edges_4 = engine.getEdges(4);
+    try std.testing.expect(edges_4 != null);
+    try std.testing.expectEqual(@as(usize, 4), edges_4.?.len);
+
+    // Corner node (0) should have 2 connections
+    const edges_0 = engine.getEdges(0);
+    try std.testing.expect(edges_0 != null);
+    try std.testing.expectEqual(@as(usize, 2), edges_0.?.len);
+}
+
+test "engine: connectAsGrid8 convenience" {
+    var engine = try Engine.init(std.testing.allocator);
+    defer engine.deinit();
+
+    const cell_size: f32 = 100;
+
+    // Create a 3x3 grid
+    try engine.addNode(0, 0, 0);
+    try engine.addNode(1, cell_size, 0);
+    try engine.addNode(2, cell_size * 2, 0);
+    try engine.addNode(3, 0, cell_size);
+    try engine.addNode(4, cell_size, cell_size); // center
+    try engine.addNode(5, cell_size * 2, cell_size);
+    try engine.addNode(6, 0, cell_size * 2);
+    try engine.addNode(7, cell_size, cell_size * 2);
+    try engine.addNode(8, cell_size * 2, cell_size * 2);
+
+    try engine.connectAsGrid8(cell_size);
+
+    // Center node (4) should have 8 connections (including diagonals)
+    const edges_4 = engine.getEdges(4);
+    try std.testing.expect(edges_4 != null);
+    try std.testing.expectEqual(@as(usize, 8), edges_4.?.len);
+
+    // Corner node (0) should have 3 connections (right, down, diagonal)
+    const edges_0 = engine.getEdges(0);
+    try std.testing.expect(edges_0 != null);
+    try std.testing.expectEqual(@as(usize, 3), edges_0.?.len);
+}
+
 test "engine: entity registration" {
     var engine = try Engine.init(std.testing.allocator);
     defer engine.deinit();
