@@ -63,10 +63,6 @@ The engine supports different Floyd-Warshall implementations via `Config.floyd_w
 - `.optimized_simd`: Flat memory + SIMD vectorization (5-8x faster)
 - `.optimized_parallel`: SIMD + multi-threading (best for large graphs 256+ nodes, up to 16x faster)
 
-### Legacy ECS Support
-
-`src/components.zig` and `src/movement_node_controller.zig` provide zig-ecs integration for legacy codebases that manage positions externally.
-
 ## Testing
 
 Tests are in `tests/` using zspec. Each `*_spec.zig` file tests a specific module. The `tests/spec_tests.zig` aggregates all specs.

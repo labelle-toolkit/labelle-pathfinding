@@ -9,7 +9,6 @@
 //! - Floyd-Warshall all-pairs shortest path algorithm
 //! - A* single-source shortest path algorithm with multiple heuristics
 //! - QuadTree spatial indexing for fast queries
-//! - Movement node components for zig-ecs (legacy)
 //!
 //! ## Algorithm Selection Guide
 //! - **PathfindingEngine**: Best for most games - complete solution with position
@@ -98,11 +97,6 @@
 //! ```
 
 const std = @import("std");
-pub const zig_utils = @import("zig_utils");
-pub const ecs = @import("ecs");
-
-// Re-export Vector2 from zig-utils for position compatibility across labelle ecosystem
-pub const Vec2 = zig_utils.Vector2;
 
 // Engine (self-contained pathfinding)
 pub const engine = @import("engine.zig");
@@ -115,7 +109,7 @@ pub const StairMode = engine.StairMode;
 pub const VerticalDirection = engine.VerticalDirection;
 pub const LogLevel = engine.LogLevel;
 pub const FloydWarshallVariant = engine.FloydWarshallVariant;
-// Note: Vec2 is also available via engine.Vec2, but prefer the top-level export
+pub const Vec2 = engine.Vec2;
 
 // Spatial indexing
 pub const quad_tree = @import("quad_tree.zig");
@@ -142,24 +136,6 @@ pub const HeuristicFn = heuristics.HeuristicFn;
 pub const DistanceGraph = @import("distance_graph.zig").DistanceGraph;
 pub const validateDistanceGraph = @import("distance_graph.zig").validateDistanceGraph;
 
-// Components
-pub const components = @import("components.zig");
-pub const MovementNode = components.MovementNode;
-pub const ClosestMovementNode = components.ClosestMovementNode;
-pub const MovingTowards = components.MovingTowards;
-pub const WithPath = components.WithPath;
-
-// Controllers
-pub const movement_node_controller = @import("movement_node_controller.zig");
-pub const MovementNodeController = movement_node_controller.MovementNodeController;
-pub const MovementNodeControllerError = movement_node_controller.MovementNodeControllerError;
-pub const distance = movement_node_controller.distance;
-pub const distanceSqr = movement_node_controller.distanceSqr;
-
-// ECS types (re-exported from zig-ecs)
-pub const Entity = ecs.Entity;
-pub const Registry = ecs.Registry;
-
 test {
     // Run all tests from submodules
     std.testing.refAllDecls(@This());
@@ -169,6 +145,4 @@ test {
     _ = @import("floyd_warshall_optimized.zig");
     _ = @import("a_star.zig");
     _ = @import("heuristics.zig");
-    _ = @import("components.zig");
-    _ = @import("movement_node_controller.zig");
 }
