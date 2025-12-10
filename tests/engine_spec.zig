@@ -195,6 +195,11 @@ test "engine: createGrid helper" {
     try std.testing.expect(grid.isValid(3, 2)); // valid: col 3, row 2
     try std.testing.expect(!grid.isValid(4, 2)); // invalid: col 4 >= cols
     try std.testing.expect(!grid.isValid(3, 3)); // invalid: row 3 >= rows
+
+    // Test nodePosition (composition of fromNodeId + toScreen)
+    const node_pos = grid.nodePosition(6); // node 6 is at col 2, row 1
+    try std.testing.expectEqual(@as(f32, 200), node_pos.x); // 2 * 50 + 100
+    try std.testing.expectEqual(@as(f32, 250), node_pos.y); // 1 * 50 + 200
 }
 
 test "engine: createGrid with eight_way connections" {

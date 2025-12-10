@@ -631,10 +631,11 @@ pub fn PathfindingEngine(comptime Config: type) type {
         /// For diagonals, uses cell_size * sqrt(2) * 1.1 to reach diagonal neighbors.
         pub fn connectAsGrid8(self: *Self, cell_size: f32) !void {
             // Diagonal distance is cell_size * sqrt(2) ≈ cell_size * 1.414
-            // Add 10% margin for floating point precision
+            // Add 10% margin for floating point precision: 1.414 * 1.1 ≈ 1.556
+            const sqrt2: f32 = @sqrt(2.0);
             try self.connectNodes(.{
                 .omnidirectional = .{
-                    .max_distance = cell_size * 1.5,
+                    .max_distance = cell_size * sqrt2 * 1.1,
                     .max_connections = 8,
                 },
             });
