@@ -109,6 +109,7 @@ pub const StairMode = engine.StairMode;
 pub const VerticalDirection = engine.VerticalDirection;
 pub const LogLevel = engine.LogLevel;
 pub const FloydWarshallVariant = engine.FloydWarshallVariant;
+pub const Vec2 = engine.Vec2;
 
 // Spatial indexing
 pub const quad_tree = @import("quad_tree.zig");
