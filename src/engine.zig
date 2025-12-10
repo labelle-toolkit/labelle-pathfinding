@@ -175,6 +175,41 @@ pub const FloydWarshallVariant = enum {
     optimized_parallel,
 };
 
+/// Helper to create a simple config struct from Entity and Context types.
+/// Use this for the common case where you don't need advanced options.
+///
+/// Example:
+/// ```zig
+/// const Engine = PathfindingEngine(SimpleConfig(u32, void));
+/// // or equivalently:
+/// const Engine = PathfindingEngineSimple(u32, void);
+/// ```
+pub fn SimpleConfig(comptime EntityType: type, comptime ContextType: type) type {
+    return struct {
+        pub const Entity = EntityType;
+        pub const Context = ContextType;
+    };
+}
+
+/// Convenience wrapper for PathfindingEngine with direct Entity and Context types.
+/// For simple use cases that don't need log_level or floyd_warshall_variant options.
+///
+/// Example:
+/// ```zig
+/// // Instead of:
+/// const Config = struct {
+///     pub const Entity = u32;
+///     pub const Context = void;
+/// };
+/// const Engine = PathfindingEngine(Config);
+///
+/// // You can use:
+/// const Engine = PathfindingEngineSimple(u32, void);
+/// ```
+pub fn PathfindingEngineSimple(comptime EntityType: type, comptime ContextType: type) type {
+    return PathfindingEngine(SimpleConfig(EntityType, ContextType));
+}
+
 pub fn PathfindingEngine(comptime Config: type) type {
     const Entity = Config.Entity;
     const Context = Config.Context;

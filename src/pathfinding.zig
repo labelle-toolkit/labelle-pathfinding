@@ -101,6 +101,8 @@ const std = @import("std");
 // Engine (self-contained pathfinding)
 pub const engine = @import("engine.zig");
 pub const PathfindingEngine = engine.PathfindingEngine;
+pub const PathfindingEngineSimple = engine.PathfindingEngineSimple;
+pub const SimpleConfig = engine.SimpleConfig;
 pub const ConnectionMode = engine.ConnectionMode;
 pub const NodeId = engine.NodeId;
 pub const NodeData = engine.NodeData;

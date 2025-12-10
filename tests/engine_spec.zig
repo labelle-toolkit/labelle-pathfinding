@@ -12,6 +12,9 @@ const TestConfig = struct {
 
 const Engine = PathfindingEngine(TestConfig);
 
+// Test the simplified config pattern
+const SimpleEngine = pathfinding.PathfindingEngineSimple(u32, *u32);
+
 // Config with explicit log level for testing
 const DebugConfig = struct {
     pub const Entity = u32;
@@ -210,6 +213,18 @@ test "engine: createGrid with eight_way connections" {
     const edges = engine.getEdges(center_id);
     try std.testing.expect(edges != null);
     try std.testing.expectEqual(@as(usize, 8), edges.?.len);
+}
+
+test "engine: PathfindingEngineSimple convenience" {
+    // Test that SimpleEngine works exactly like Engine
+    var engine = try SimpleEngine.init(std.testing.allocator);
+    defer engine.deinit();
+
+    try engine.addNode(0, 0, 0);
+    try engine.addNode(1, 100, 0);
+    try engine.connectAsGrid4(100);
+
+    try std.testing.expectEqual(@as(usize, 2), engine.getNodeCount());
 }
 
 test "engine: entity registration" {
