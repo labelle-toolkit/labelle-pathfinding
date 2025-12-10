@@ -12,6 +12,9 @@ const TestConfig = struct {
 
 const Engine = PathfindingEngine(TestConfig);
 
+// Test the simplified config pattern
+const SimpleEngine = pathfinding.PathfindingEngineSimple(u32, *u32);
+
 // Config with explicit log level for testing
 const DebugConfig = struct {
     pub const Entity = u32;
@@ -93,6 +96,140 @@ test "engine: directional connections" {
     try std.testing.expectEqual(@as(?u32, 2), dir_edges.?.left);
     try std.testing.expectEqual(@as(?u32, 3), dir_edges.?.up);
     try std.testing.expectEqual(@as(?u32, 4), dir_edges.?.down);
+}
+
+test "engine: connectAsGrid4 convenience" {
+    var engine = try Engine.init(std.testing.allocator);
+    defer engine.deinit();
+
+    const cell_size: f32 = 100;
+
+    // Create a 3x3 grid
+    try engine.addNode(0, 0, 0);
+    try engine.addNode(1, cell_size, 0);
+    try engine.addNode(2, cell_size * 2, 0);
+    try engine.addNode(3, 0, cell_size);
+    try engine.addNode(4, cell_size, cell_size); // center
+    try engine.addNode(5, cell_size * 2, cell_size);
+    try engine.addNode(6, 0, cell_size * 2);
+    try engine.addNode(7, cell_size, cell_size * 2);
+    try engine.addNode(8, cell_size * 2, cell_size * 2);
+
+    try engine.connectAsGrid4(cell_size);
+
+    // Center node (4) should have exactly 4 connections (no diagonals)
+    const edges_4 = engine.getEdges(4);
+    try std.testing.expect(edges_4 != null);
+    try std.testing.expectEqual(@as(usize, 4), edges_4.?.len);
+
+    // Corner node (0) should have 2 connections
+    const edges_0 = engine.getEdges(0);
+    try std.testing.expect(edges_0 != null);
+    try std.testing.expectEqual(@as(usize, 2), edges_0.?.len);
+}
+
+test "engine: connectAsGrid8 convenience" {
+    var engine = try Engine.init(std.testing.allocator);
+    defer engine.deinit();
+
+    const cell_size: f32 = 100;
+
+    // Create a 3x3 grid
+    try engine.addNode(0, 0, 0);
+    try engine.addNode(1, cell_size, 0);
+    try engine.addNode(2, cell_size * 2, 0);
+    try engine.addNode(3, 0, cell_size);
+    try engine.addNode(4, cell_size, cell_size); // center
+    try engine.addNode(5, cell_size * 2, cell_size);
+    try engine.addNode(6, 0, cell_size * 2);
+    try engine.addNode(7, cell_size, cell_size * 2);
+    try engine.addNode(8, cell_size * 2, cell_size * 2);
+
+    try engine.connectAsGrid8(cell_size);
+
+    // Center node (4) should have 8 connections (including diagonals)
+    const edges_4 = engine.getEdges(4);
+    try std.testing.expect(edges_4 != null);
+    try std.testing.expectEqual(@as(usize, 8), edges_4.?.len);
+
+    // Corner node (0) should have 3 connections (right, down, diagonal)
+    const edges_0 = engine.getEdges(0);
+    try std.testing.expect(edges_0 != null);
+    try std.testing.expectEqual(@as(usize, 3), edges_0.?.len);
+}
+
+test "engine: createGrid helper" {
+    var engine = try Engine.init(std.testing.allocator);
+    defer engine.deinit();
+
+    const grid = try engine.createGrid(.{
+        .rows = 3,
+        .cols = 4,
+        .cell_size = 50,
+        .offset_x = 100,
+        .offset_y = 200,
+        .connection = .four_way,
+    });
+
+    // Should have created 12 nodes (3x4)
+    try std.testing.expectEqual(@as(usize, 12), engine.getNodeCount());
+
+    // Test grid coordinate conversion
+    const pos = grid.toScreen(2, 1); // col 2, row 1
+    try std.testing.expectEqual(@as(f32, 200), pos.x); // 2 * 50 + 100
+    try std.testing.expectEqual(@as(f32, 250), pos.y); // 1 * 50 + 200
+
+    // Test node ID conversion
+    const node_id = grid.toNodeId(2, 1); // col 2, row 1
+    try std.testing.expectEqual(@as(u32, 6), node_id); // 1 * 4 + 2 = 6
+
+    // Test reverse conversion
+    const coords = grid.fromNodeId(6);
+    try std.testing.expectEqual(@as(u32, 2), coords.col);
+    try std.testing.expectEqual(@as(u32, 1), coords.row);
+
+    // Test node count
+    try std.testing.expectEqual(@as(u32, 12), grid.nodeCount());
+
+    // Test isValid
+    try std.testing.expect(grid.isValid(3, 2)); // valid: col 3, row 2
+    try std.testing.expect(!grid.isValid(4, 2)); // invalid: col 4 >= cols
+    try std.testing.expect(!grid.isValid(3, 3)); // invalid: row 3 >= rows
+
+    // Test nodePosition (composition of fromNodeId + toScreen)
+    const node_pos = grid.nodePosition(6); // node 6 is at col 2, row 1
+    try std.testing.expectEqual(@as(f32, 200), node_pos.x); // 2 * 50 + 100
+    try std.testing.expectEqual(@as(f32, 250), node_pos.y); // 1 * 50 + 200
+}
+
+test "engine: createGrid with eight_way connections" {
+    var engine = try Engine.init(std.testing.allocator);
+    defer engine.deinit();
+
+    const grid = try engine.createGrid(.{
+        .rows = 3,
+        .cols = 3,
+        .cell_size = 100,
+        .connection = .eight_way,
+    });
+
+    // Center node (1,1) should have 8 connections
+    const center_id = grid.toNodeId(1, 1);
+    const edges = engine.getEdges(center_id);
+    try std.testing.expect(edges != null);
+    try std.testing.expectEqual(@as(usize, 8), edges.?.len);
+}
+
+test "engine: PathfindingEngineSimple convenience" {
+    // Test that SimpleEngine works exactly like Engine
+    var engine = try SimpleEngine.init(std.testing.allocator);
+    defer engine.deinit();
+
+    try engine.addNode(0, 0, 0);
+    try engine.addNode(1, 100, 0);
+    try engine.connectAsGrid4(100);
+
+    try std.testing.expectEqual(@as(usize, 2), engine.getNodeCount());
 }
 
 test "engine: entity registration" {

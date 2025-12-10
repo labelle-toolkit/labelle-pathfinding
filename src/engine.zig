@@ -97,6 +97,73 @@ pub const NodePoint = struct {
     y: f32,
 };
 
+/// Grid connection type for createGrid
+pub const GridConnection = enum {
+    /// 4-directional movement (up/down/left/right)
+    four_way,
+    /// 8-directional movement (including diagonals)
+    eight_way,
+};
+
+/// Configuration for creating a grid of nodes
+pub const GridConfig = struct {
+    rows: u32,
+    cols: u32,
+    cell_size: f32,
+    offset_x: f32 = 0,
+    offset_y: f32 = 0,
+    connection: GridConnection = .four_way,
+};
+
+/// Helper struct for working with grid-based nodes.
+/// Provides conversion utilities between grid coordinates and node IDs/positions.
+pub const Grid = struct {
+    rows: u32,
+    cols: u32,
+    cell_size: f32,
+    offset_x: f32,
+    offset_y: f32,
+    start_node_id: NodeId,
+
+    /// Convert grid coordinates to screen/world position
+    pub fn toScreen(self: Grid, col: u32, row: u32) Vec2 {
+        return Vec2{
+            .x = @as(f32, @floatFromInt(col)) * self.cell_size + self.offset_x,
+            .y = @as(f32, @floatFromInt(row)) * self.cell_size + self.offset_y,
+        };
+    }
+
+    /// Convert grid coordinates to node ID
+    pub fn toNodeId(self: Grid, col: u32, row: u32) NodeId {
+        return self.start_node_id + row * self.cols + col;
+    }
+
+    /// Convert node ID to grid coordinates (col, row)
+    pub fn fromNodeId(self: Grid, node_id: NodeId) struct { col: u32, row: u32 } {
+        const local_id = node_id - self.start_node_id;
+        return .{
+            .col = local_id % self.cols,
+            .row = local_id / self.cols,
+        };
+    }
+
+    /// Get the position of a node by its ID
+    pub fn nodePosition(self: Grid, node_id: NodeId) Vec2 {
+        const coords = self.fromNodeId(node_id);
+        return self.toScreen(coords.col, coords.row);
+    }
+
+    /// Check if grid coordinates are valid
+    pub fn isValid(self: Grid, col: u32, row: u32) bool {
+        return col < self.cols and row < self.rows;
+    }
+
+    /// Get total number of nodes in the grid
+    pub fn nodeCount(self: Grid) u32 {
+        return self.rows * self.cols;
+    }
+};
+
 /// Pathfinding engine with comptime configuration
 /// Floyd-Warshall algorithm variant selection
 pub const FloydWarshallVariant = enum {
@@ -107,6 +174,41 @@ pub const FloydWarshallVariant = enum {
     /// Optimized with SIMD and multi-threading (best for very large graphs, 100+ nodes)
     optimized_parallel,
 };
+
+/// Helper to create a simple config struct from Entity and Context types.
+/// Use this for the common case where you don't need advanced options.
+///
+/// Example:
+/// ```zig
+/// const Engine = PathfindingEngine(SimpleConfig(u32, void));
+/// // or equivalently:
+/// const Engine = PathfindingEngineSimple(u32, void);
+/// ```
+pub fn SimpleConfig(comptime EntityType: type, comptime ContextType: type) type {
+    return struct {
+        pub const Entity = EntityType;
+        pub const Context = ContextType;
+    };
+}
+
+/// Convenience wrapper for PathfindingEngine with direct Entity and Context types.
+/// For simple use cases that don't need log_level or floyd_warshall_variant options.
+///
+/// Example:
+/// ```zig
+/// // Instead of:
+/// const Config = struct {
+///     pub const Entity = u32;
+///     pub const Context = void;
+/// };
+/// const Engine = PathfindingEngine(Config);
+///
+/// // You can use:
+/// const Engine = PathfindingEngineSimple(u32, void);
+/// ```
+pub fn PathfindingEngineSimple(comptime EntityType: type, comptime ContextType: type) type {
+    return PathfindingEngine(SimpleConfig(EntityType, ContextType));
+}
 
 pub fn PathfindingEngine(comptime Config: type) type {
     const Entity = Config.Entity;
@@ -508,6 +610,87 @@ pub fn PathfindingEngine(comptime Config: type) type {
                 .directional => |config| try self.connectDirectional(config.horizontal_range, config.vertical_range),
                 .building => |config| try self.connectBuilding(config.horizontal_range, config.floor_height),
             }
+        }
+
+        // =======================================================
+        // Connection Convenience Methods
+        // =======================================================
+
+        /// Connect nodes as a 4-directional grid (up/down/left/right only).
+        /// Uses slightly more than cell_size to account for floating point precision.
+        pub fn connectAsGrid4(self: *Self, cell_size: f32) !void {
+            try self.connectNodes(.{
+                .omnidirectional = .{
+                    .max_distance = cell_size * 1.1,
+                    .max_connections = 4,
+                },
+            });
+        }
+
+        /// Connect nodes as an 8-directional grid (including diagonals).
+        /// For diagonals, uses cell_size * sqrt(2) * 1.1 to reach diagonal neighbors.
+        pub fn connectAsGrid8(self: *Self, cell_size: f32) !void {
+            // Diagonal distance is cell_size * sqrt(2) ≈ cell_size * 1.414
+            // Add 10% margin for floating point precision: 1.414 * 1.1 ≈ 1.556
+            const sqrt2: f32 = @sqrt(2.0);
+            try self.connectNodes(.{
+                .omnidirectional = .{
+                    .max_distance = cell_size * sqrt2 * 1.1,
+                    .max_connections = 8,
+                },
+            });
+        }
+
+        // =======================================================
+        // Grid Helper
+        // =======================================================
+
+        /// Create a rectangular grid of nodes with automatic connections.
+        /// Returns a Grid helper for coordinate conversion utilities.
+        ///
+        /// Example:
+        /// ```zig
+        /// const grid = try engine.createGrid(.{
+        ///     .rows = 8,
+        ///     .cols = 8,
+        ///     .cell_size = 60.0,
+        ///     .offset_x = 100,
+        ///     .offset_y = 60,
+        ///     .connection = .four_way,
+        /// });
+        /// try engine.rebuildPaths();
+        ///
+        /// // Use grid helpers
+        /// const pos = grid.toScreen(3, 4);      // grid coords -> screen position
+        /// const node_id = grid.toNodeId(3, 4);  // grid coords -> node ID
+        /// const coords = grid.fromNodeId(42);   // node ID -> grid coords
+        /// ```
+        pub fn createGrid(self: *Self, config: GridConfig) !Grid {
+            const start_node_id = self.next_node_id;
+
+            // Create nodes for the grid
+            for (0..config.rows) |row| {
+                for (0..config.cols) |col| {
+                    const x = @as(f32, @floatFromInt(col)) * config.cell_size + config.offset_x;
+                    const y = @as(f32, @floatFromInt(row)) * config.cell_size + config.offset_y;
+                    _ = try self.addNodeAuto(x, y);
+                }
+            }
+
+            // Connect based on connection type
+            switch (config.connection) {
+                .four_way => try self.connectAsGrid4(config.cell_size),
+                .eight_way => try self.connectAsGrid8(config.cell_size),
+            }
+
+            return Grid{
+                .rows = config.rows,
+                .cols = config.cols,
+                .cell_size = config.cell_size,
+                .offset_x = config.offset_x,
+                .offset_y = config.offset_y,
+                .start_node_id = start_node_id,
+            };
         }
 
         fn connectOmnidirectional(self: *Self, max_distance: f32, max_connections: u8) !void {

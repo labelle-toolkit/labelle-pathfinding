@@ -101,6 +101,8 @@ const std = @import("std");
 // Engine (self-contained pathfinding)
 pub const engine = @import("engine.zig");
 pub const PathfindingEngine = engine.PathfindingEngine;
+pub const PathfindingEngineSimple = engine.PathfindingEngineSimple;
+pub const SimpleConfig = engine.SimpleConfig;
 pub const ConnectionMode = engine.ConnectionMode;
 pub const NodeId = engine.NodeId;
 pub const NodeData = engine.NodeData;
@@ -109,6 +111,9 @@ pub const StairMode = engine.StairMode;
 pub const VerticalDirection = engine.VerticalDirection;
 pub const LogLevel = engine.LogLevel;
 pub const FloydWarshallVariant = engine.FloydWarshallVariant;
+pub const Grid = engine.Grid;
+pub const GridConfig = engine.GridConfig;
+pub const GridConnection = engine.GridConnection;
 pub const Vec2 = engine.Vec2;
 
 // Spatial indexing
