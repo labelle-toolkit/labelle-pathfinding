@@ -103,8 +103,6 @@ pub const ecs = @import("ecs");
 
 // Re-export Vector2 from zig-utils for position compatibility across labelle ecosystem
 pub const Vec2 = zig_utils.Vector2;
-/// Alias for Vec2 (deprecated, use Vec2 for consistency)
-pub const Position = Vec2;
 
 // Engine (self-contained pathfinding)
 pub const engine = @import("engine.zig");
