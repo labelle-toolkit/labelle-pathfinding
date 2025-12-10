@@ -31,7 +31,11 @@ This is a Zig pathfinding library for games. It requires Zig 0.15.2+.
 
 ### Core Components
 
-- **PathfindingEngine** (`src/engine.zig`): Self-contained engine that owns entity positions. Games query the engine for positions rather than managing them directly. Configured via comptime Config struct with `Entity` and `Context` types.
+- **PathfindingEngine** (`src/engine.zig`): Self-contained engine that owns entity positions. Games query the engine for positions rather than managing them directly. Configured via comptime Config struct with `Entity` and `Context` types. Use `PathfindingEngineSimple(Entity, Context)` for quick setup.
+
+- **Grid Helper**: `createGrid(config)` creates a grid of nodes with automatic connections. Returns a `Grid` struct with coordinate conversion utilities (`toScreen`, `toNodeId`, `fromNodeId`, `nodePosition`).
+
+- **Vec2 Positions**: Position queries (`getPosition`, `getNodePosition`) return `Vec2` from zig-utils for ecosystem compatibility.
 
 - **Floyd-Warshall** (`src/floyd_warshall.zig`): Precomputes all-pairs shortest paths. Used internally by PathfindingEngine. Best for dense graphs with frequent queries between many node pairs. An optimized SIMD version is available in `src/floyd_warshall_optimized.zig` (5-8x faster).
 
@@ -45,6 +49,10 @@ The engine supports three graph connection strategies:
 - `omnidirectional`: Top-down games (connect to N closest neighbors)
 - `directional`: Platformers (4-direction: left/right/up/down)
 - `building`: Multi-floor buildings (horizontal + stair-based vertical only)
+
+Convenience functions for grid-based games:
+- `connectAsGrid4(cell_size)`: 4-directional movement
+- `connectAsGrid8(cell_size)`: 8-directional with diagonals
 
 ### Stair Traffic Control
 

@@ -5,6 +5,9 @@ A pathfinding library for Zig game development. Part of the [labelle-toolkit](ht
 ## Features
 
 - **PathfindingEngine** - Self-contained engine that owns entity positions, with callbacks and spatial queries
+- **Simplified Config** - Use `PathfindingEngineSimple(Entity, Context)` for quick setup
+- **Grid Helper** - `createGrid()` for easy grid-based pathfinding with coordinate utilities
+- **Vec2 Positions** - Returns `Vec2` from zig-utils for ecosystem compatibility
 - **QuadTree** - Spatial partitioning for O(log n) entity and node lookups
 - **Floyd-Warshall Algorithm** - All-pairs shortest path computation with SIMD and parallel optimizations (5-16x faster)
 - **A\* Algorithm** - Single-source shortest path with multiple heuristics
@@ -22,7 +25,7 @@ Add to your `build.zig.zon`:
 ```zig
 .dependencies = .{
     .pathfinding = .{
-        .url = "https://github.com/labelle-toolkit/labelle-pathfinding/archive/refs/tags/v2.4.0.tar.gz",
+        .url = "https://github.com/labelle-toolkit/labelle-pathfinding/archive/refs/tags/v2.5.0.tar.gz",
         .hash = "...",
     },
 },
@@ -31,7 +34,7 @@ Add to your `build.zig.zon`:
 Or use `zig fetch`:
 
 ```bash
-zig fetch --save https://github.com/labelle-toolkit/labelle-pathfinding/archive/refs/tags/v2.4.0.tar.gz
+zig fetch --save https://github.com/labelle-toolkit/labelle-pathfinding/archive/refs/tags/v2.5.0.tar.gz
 ```
 
 Then in your `build.zig`:
@@ -55,15 +58,17 @@ The PathfindingEngine is a complete solution that manages entity positions inter
 const std = @import("std");
 const pathfinding = @import("pathfinding");
 
-// Configure with your entity and context types
+// Simple configuration with direct types
+const Engine = pathfinding.PathfindingEngineSimple(u64, *Game);
+
+// Or use full config for advanced options
 const Config = struct {
     pub const Entity = u64;
     pub const Context = *Game;
     // Optional: configure log verbosity (defaults to .none)
     pub const log_level: pathfinding.LogLevel = .info;
 };
-
-const Engine = pathfinding.PathfindingEngine(Config);
+const EngineWithLogging = pathfinding.PathfindingEngine(Config);
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -105,6 +110,58 @@ pub fn main() !void {
     var nearby: [10]u64 = undefined;
     const enemies = engine.getEntitiesInRadius(x, y, attack_range, &nearby);
 }
+```
+
+### Grid Helper
+
+For grid-based games, use `createGrid` to set up nodes and connections in one call:
+
+```zig
+// Create an 8x8 grid with 4-directional movement
+const grid = try engine.createGrid(.{
+    .rows = 8,
+    .cols = 8,
+    .cell_size = 60.0,
+    .offset_x = 100,
+    .offset_y = 60,
+    .connection = .four_way,  // or .eight_way for diagonals
+});
+try engine.rebuildPaths();
+
+// Use grid helpers for coordinate conversion
+const pos = grid.toScreen(3, 4);      // grid coords -> Vec2 screen position
+const node_id = grid.toNodeId(3, 4);  // grid coords -> node ID
+const coords = grid.fromNodeId(42);   // node ID -> {col, row}
+const node_pos = grid.nodePosition(42); // node ID -> Vec2 position
+```
+
+### Connection Convenience Functions
+
+Simplified grid connection setup:
+
+```zig
+// Instead of:
+try engine.connectNodes(.{ .omnidirectional = .{ .max_distance = cell_size * 1.1, .max_connections = 4 } });
+
+// Use:
+try engine.connectAsGrid4(cell_size);  // 4-directional (up/down/left/right)
+try engine.connectAsGrid8(cell_size);  // 8-directional (including diagonals)
+```
+
+### Vec2 Position Type
+
+Position queries return `Vec2` from zig-utils for ecosystem compatibility:
+
+```zig
+if (engine.getPosition(entity)) |pos| {
+    // pos is Vec2 with useful methods
+    const dist = pos.distance(target);
+    const normalized = pos.normalize();
+}
+
+// Vec2 convenience methods for adding nodes
+try engine.addNodeVec2(id, Vec2{ .x = 100, .y = 200 });
+try engine.registerEntityVec2(entity, pos, speed);
 ```
 
 ### Log Levels
@@ -334,17 +391,23 @@ if (try astar.findPathWithMapping(100, 200, &path)) |cost| {
 | `init(allocator)` | Create engine instance |
 | `deinit()` | Free resources |
 | `addNode(id, x, y)` | Add a waypoint node |
+| `addNodeVec2(id, pos)` | Add node with Vec2 position |
 | `addNodeAuto(x, y)` | Add node with auto-generated ID |
 | `removeNode(id)` | Remove a node |
+| `createGrid(config)` | Create grid of nodes with connections |
 | `connectNodes(mode)` | Auto-connect nodes |
+| `connectAsGrid4(cell_size)` | Connect as 4-directional grid |
+| `connectAsGrid8(cell_size)` | Connect as 8-directional grid |
 | `addEdge(from, to, bidirectional)` | Manually add edge |
 | `rebuildPaths()` | Recompute Floyd-Warshall paths |
 | `registerEntity(id, x, y, speed)` | Register entity at position |
+| `registerEntityVec2(id, pos, speed)` | Register entity with Vec2 |
 | `unregisterEntity(id)` | Remove entity |
 | `requestPath(entity, target_node)` | Start pathfinding |
 | `cancelPath(entity)` | Stop movement |
 | `tick(ctx, delta)` | Update all entities |
-| `getPosition(entity)` | Get entity position |
+| `getPosition(entity)` | Get entity position (returns Vec2) |
+| `getNodePosition(node)` | Get node position (returns Vec2) |
 | `getSpeed(entity)` | Get entity speed |
 | `setSpeed(entity, speed)` | Set entity speed |
 | `isMoving(entity)` | Check if entity is moving |
@@ -356,6 +419,17 @@ if (try astar.findPathWithMapping(100, 200, &path)) |cost| {
 | `getStairMode(node)` | Get stair traffic mode |
 | `setWaitingArea(node, spots)` | Define waiting area for stair |
 | `getStairState(node)` | Get runtime stair traffic state |
+
+### Grid Helper
+
+| Method | Description |
+|--------|-------------|
+| `toScreen(col, row)` | Convert grid coords to Vec2 position |
+| `toNodeId(col, row)` | Convert grid coords to node ID |
+| `fromNodeId(node_id)` | Convert node ID to {col, row} |
+| `nodePosition(node_id)` | Get Vec2 position for node ID |
+| `isValid(col, row)` | Check if grid coords are in bounds |
+| `nodeCount()` | Get total number of nodes in grid |
 
 ### Heuristics
 
