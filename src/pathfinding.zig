@@ -116,6 +116,15 @@ pub const GridConfig = engine.GridConfig;
 pub const GridConnection = engine.GridConnection;
 pub const Vec2 = engine.Vec2;
 
+/// Components exported for ECS integration.
+/// When labelle-pathfinding is added as a plugin, these types become available
+/// in the component registry for use in .zon entity definitions.
+pub const Components = struct {
+    pub const Vec2 = engine.Vec2;
+    pub const NodeId = engine.NodeId;
+    pub const NodePoint = engine.NodePoint;
+};
+
 // Spatial indexing
 pub const quad_tree = @import("quad_tree.zig");
 pub const QuadTree = quad_tree.QuadTree;
