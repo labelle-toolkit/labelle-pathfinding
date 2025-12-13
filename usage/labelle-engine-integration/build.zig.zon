@@ -1,0 +1,19 @@
+.{
+    .fingerprint = 0x74e4d0cd3c2e2c9,
+    .name = .engine_integration_example,
+    .version = "0.1.0",
+    .minimum_zig_version = "0.15.2",
+    .dependencies = .{
+        .@"labelle-engine" = .{
+            .path = "../../../labelle-engine",
+        },
+        .@"labelle-pathfinding" = .{
+            .path = "../..",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}
