@@ -4,7 +4,7 @@
 //! building connection mode and stair traffic management.
 
 const std = @import("std");
-const pathfinding = @import("pathfinding");
+const pathfinding = @import("labelle_pathfinding");
 
 const print = std.debug.print;
 

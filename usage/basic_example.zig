@@ -4,7 +4,7 @@
 //! Shows the most common use case: entities moving along waypoints in a game.
 
 const std = @import("std");
-const pathfinding = @import("pathfinding");
+const pathfinding = @import("labelle_pathfinding");
 
 const print = std.debug.print;
 

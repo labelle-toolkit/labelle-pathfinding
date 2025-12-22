@@ -4,7 +4,7 @@
 //! where movement is constrained to left/right/up/down directions.
 
 const std = @import("std");
-const pathfinding = @import("pathfinding");
+const pathfinding = @import("labelle_pathfinding");
 
 const print = std.debug.print;
 

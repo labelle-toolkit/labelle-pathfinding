@@ -5,7 +5,7 @@
 //! rather than storing them in an ECS.
 
 const std = @import("std");
-const pathfinding = @import("pathfinding");
+const pathfinding = @import("labelle_pathfinding");
 
 const print = std.debug.print;
 

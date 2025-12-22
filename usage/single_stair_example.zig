@@ -13,7 +13,7 @@
 //! Run with: zig build run-single-stair
 
 const std = @import("std");
-const pathfinding = @import("pathfinding");
+const pathfinding = @import("labelle_pathfinding");
 
 const print = std.debug.print;
 

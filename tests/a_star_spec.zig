@@ -1,6 +1,6 @@
 const std = @import("std");
 const zspec = @import("zspec");
-const pathfinding = @import("pathfinding");
+const pathfinding = @import("labelle_pathfinding");
 const zig_utils = @import("zig_utils");
 
 const expect = zspec.expect;

@@ -24,7 +24,7 @@ Add to your `build.zig.zon`:
 
 ```zig
 .dependencies = .{
-    .pathfinding = .{
+    .labelle_pathfinding = .{
         .url = "https://github.com/labelle-toolkit/labelle-pathfinding/archive/refs/tags/v2.5.0.tar.gz",
         .hash = "...",
     },
@@ -40,12 +40,12 @@ zig fetch --save https://github.com/labelle-toolkit/labelle-pathfinding/archive/
 Then in your `build.zig`:
 
 ```zig
-const pathfinding = b.dependency("pathfinding", .{
+const pathfinding_dep = b.dependency("labelle_pathfinding", .{
     .target = target,
     .optimize = optimize,
 });
 
-exe.root_module.addImport("pathfinding", pathfinding.module("pathfinding"));
+exe.root_module.addImport("labelle_pathfinding", pathfinding_dep.module("labelle_pathfinding"));
 ```
 
 ## Usage
@@ -56,7 +56,7 @@ The PathfindingEngine is a complete solution that manages entity positions inter
 
 ```zig
 const std = @import("std");
-const pathfinding = @import("pathfinding");
+const pathfinding = @import("labelle_pathfinding");
 
 // Simple configuration with direct types
 const Engine = pathfinding.PathfindingEngineSimple(u64, *Game);

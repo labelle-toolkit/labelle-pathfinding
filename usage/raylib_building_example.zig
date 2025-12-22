@@ -15,7 +15,7 @@
 //! - -: Remove entities
 
 const std = @import("std");
-const pathfinding = @import("pathfinding");
+const pathfinding = @import("labelle_pathfinding");
 const rl = @import("raylib");
 
 const PathfindingEngine = pathfinding.PathfindingEngine;
