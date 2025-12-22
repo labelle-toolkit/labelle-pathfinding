@@ -15,7 +15,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    const pathfinding = pathfinding_dep.module("pathfinding");
+    const pathfinding = pathfinding_dep.module("labelle_pathfinding");
 
     // Main executable
     const exe = b.addExecutable(.{
@@ -26,7 +26,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "labelle-engine", .module = engine },
-                .{ .name = "pathfinding", .module = pathfinding },
+                .{ .name = "labelle_pathfinding", .module = pathfinding },
             },
         }),
     });

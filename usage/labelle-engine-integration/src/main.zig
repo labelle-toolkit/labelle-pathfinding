@@ -59,13 +59,13 @@ pub fn main() !void {
     print("\n3. Creating component instances:\n", .{});
 
     const vec2: pathfinding.Components.Vec2 = .{ .x = 100.0, .y = 200.0 };
-    print("   - Vec2: ({d}, {d})\n", .{ vec2.x, vec2.y });
+    print("   - Vec2: ({d:.1}, {d:.1})\n", .{ vec2.x, vec2.y });
 
     const node_id: pathfinding.Components.NodeId = 42;
     print("   - NodeId: {d}\n", .{node_id});
 
     const node_point: pathfinding.Components.NodePoint = .{ .id = 5, .x = 150.0, .y = 250.0 };
-    print("   - NodePoint: id={d}, pos=({d}, {d})\n", .{ node_point.id, node_point.x, node_point.y });
+    print("   - NodePoint: id={d}, pos=({d:.1}, {d:.1})\n", .{ node_point.id, node_point.x, node_point.y });
 
     // Demonstrate .zon-style usage (what would happen in scene files)
     print("\n4. Example .zon entity definition:\n", .{});
