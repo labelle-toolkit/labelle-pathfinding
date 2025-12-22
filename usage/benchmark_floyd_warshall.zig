@@ -10,7 +10,7 @@
 //! - Cache sizes
 
 const std = @import("std");
-const pathfinding = @import("pathfinding");
+const pathfinding = @import("labelle_pathfinding");
 
 const FloydWarshall = pathfinding.FloydWarshall;
 const FloydWarshallSimd = pathfinding.FloydWarshallSimd;

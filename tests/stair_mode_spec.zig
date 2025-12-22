@@ -1,7 +1,7 @@
 //! Tests for StairMode functionality in PathfindingEngine
 
 const std = @import("std");
-const pathfinding = @import("pathfinding");
+const pathfinding = @import("labelle_pathfinding");
 const PathfindingEngine = pathfinding.PathfindingEngine;
 const StairMode = pathfinding.StairMode;
 

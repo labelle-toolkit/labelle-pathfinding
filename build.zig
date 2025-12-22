@@ -9,7 +9,7 @@ pub fn build(b: *std.Build) void {
     const zig_utils = zig_utils_dep.module("zig_utils");
 
     // Main module
-    const pathfinding_module = b.addModule("pathfinding", .{
+    const pathfinding_module = b.addModule("labelle_pathfinding", .{
         .root_source_file = b.path("src/pathfinding.zig"),
         .target = target,
         .optimize = optimize,
@@ -48,7 +48,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "zspec", .module = zspec.module("zspec") },
-                .{ .name = "pathfinding", .module = pathfinding_module },
+                .{ .name = "labelle_pathfinding", .module = pathfinding_module },
                 .{ .name = "zig_utils", .module = zig_utils },
             },
         }),
@@ -69,7 +69,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "pathfinding", .module = pathfinding_module },
+                .{ .name = "labelle_pathfinding", .module = pathfinding_module },
             },
         }),
     });
@@ -87,7 +87,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "pathfinding", .module = pathfinding_module },
+                .{ .name = "labelle_pathfinding", .module = pathfinding_module },
             },
         }),
     });
@@ -105,7 +105,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "pathfinding", .module = pathfinding_module },
+                .{ .name = "labelle_pathfinding", .module = pathfinding_module },
             },
         }),
     });
@@ -123,7 +123,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "pathfinding", .module = pathfinding_module },
+                .{ .name = "labelle_pathfinding", .module = pathfinding_module },
             },
         }),
     });
@@ -141,7 +141,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "pathfinding", .module = pathfinding_module },
+                .{ .name = "labelle_pathfinding", .module = pathfinding_module },
             },
         }),
     });
@@ -159,7 +159,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "pathfinding", .module = pathfinding_module },
+                .{ .name = "labelle_pathfinding", .module = pathfinding_module },
             },
         }),
     });
@@ -187,7 +187,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = .ReleaseFast, // Always optimize for benchmarks
             .imports = &.{
-                .{ .name = "pathfinding", .module = pathfinding_module },
+                .{ .name = "labelle_pathfinding", .module = pathfinding_module },
             },
         }),
     });
@@ -213,7 +213,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "pathfinding", .module = pathfinding_module },
+                .{ .name = "labelle_pathfinding", .module = pathfinding_module },
                 .{ .name = "raylib", .module = raylib },
             },
         }),
@@ -233,7 +233,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "pathfinding", .module = pathfinding_module },
+                .{ .name = "labelle_pathfinding", .module = pathfinding_module },
                 .{ .name = "raylib", .module = raylib },
             },
         }),
@@ -254,7 +254,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "pathfinding", .module = pathfinding_module },
+                .{ .name = "labelle_pathfinding", .module = pathfinding_module },
             },
         }),
     });

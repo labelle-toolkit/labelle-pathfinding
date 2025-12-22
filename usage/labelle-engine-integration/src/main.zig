@@ -10,7 +10,7 @@
 
 const std = @import("std");
 const engine = @import("labelle-engine");
-const pathfinding = @import("pathfinding");
+const pathfinding = @import("labelle_pathfinding");
 
 const print = std.debug.print;
 

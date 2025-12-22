@@ -11,7 +11,7 @@
 //! - Reached callbacks are fired for all node arrivals
 
 const std = @import("std");
-const pathfinding = @import("pathfinding");
+const pathfinding = @import("labelle_pathfinding");
 
 const print = std.debug.print;
 

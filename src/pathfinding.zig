@@ -19,7 +19,7 @@
 //!
 //! ## Example (PathfindingEngine - Recommended)
 //! ```zig
-//! const pathfinding = @import("pathfinding");
+//! const pathfinding = @import("labelle_pathfinding");
 //!
 //! const Config = struct {
 //!     pub const Entity = u64;
@@ -54,7 +54,7 @@
 //!
 //! ## Example (Floyd-Warshall)
 //! ```zig
-//! const pathfinding = @import("pathfinding");
+//! const pathfinding = @import("labelle_pathfinding");
 //!
 //! var fw = pathfinding.FloydWarshall.init(allocator);
 //! defer fw.deinit();
@@ -75,7 +75,7 @@
 //!
 //! ## Example (A*)
 //! ```zig
-//! const pathfinding = @import("pathfinding");
+//! const pathfinding = @import("labelle_pathfinding");
 //!
 //! var astar = pathfinding.AStar.init(allocator);
 //! defer astar.deinit();

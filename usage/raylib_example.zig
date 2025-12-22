@@ -9,7 +9,7 @@
 //! - Space: Add a new entity at a random node
 
 const std = @import("std");
-const pathfinding = @import("pathfinding");
+const pathfinding = @import("labelle_pathfinding");
 const rl = @import("raylib");
 
 const PathfindingEngine = pathfinding.PathfindingEngine;

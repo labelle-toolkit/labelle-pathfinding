@@ -1,7 +1,7 @@
 //! Tests for PathfindingEngine
 
 const std = @import("std");
-const pathfinding = @import("pathfinding");
+const pathfinding = @import("labelle_pathfinding");
 const PathfindingEngine = pathfinding.PathfindingEngine;
 const LogLevel = pathfinding.LogLevel;
 
