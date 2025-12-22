@@ -25,7 +25,7 @@ Add to your `build.zig.zon`:
 ```zig
 .dependencies = .{
     .labelle_pathfinding = .{
-        .url = "https://github.com/labelle-toolkit/labelle-pathfinding/archive/refs/tags/v2.5.0.tar.gz",
+        .url = "https://github.com/labelle-toolkit/labelle-pathfinding/archive/refs/tags/v2.6.0.tar.gz",
         .hash = "...",
     },
 },
@@ -34,7 +34,7 @@ Add to your `build.zig.zon`:
 Or use `zig fetch`:
 
 ```bash
-zig fetch --save https://github.com/labelle-toolkit/labelle-pathfinding/archive/refs/tags/v2.5.0.tar.gz
+zig fetch --save https://github.com/labelle-toolkit/labelle-pathfinding/archive/refs/tags/v2.6.0.tar.gz
 ```
 
 Then in your `build.zig`:
