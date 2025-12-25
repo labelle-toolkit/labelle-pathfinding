@@ -369,3 +369,456 @@ pub const AStar = struct {
         // A* computes paths on-demand, no pre-computation needed
     }
 };
+
+// ============================================================================
+// A* with Hooks
+// ============================================================================
+
+const hooks = @import("hooks.zig");
+
+/// A* pathfinding algorithm with hook dispatching.
+/// Wraps the base AStar and emits hooks at lifecycle points.
+///
+/// Example:
+/// ```zig
+/// const MyHooks = struct {
+///     pub fn path_found(payload: hooks.HookPayload) void {
+///         std.log.info("Path found!", .{});
+///     }
+/// };
+/// const Dispatcher = hooks.HookDispatcher(MyHooks);
+/// var astar = AStarWithHooks(Dispatcher).init(allocator);
+/// ```
+pub fn AStarWithHooks(comptime Dispatcher: type) type {
+    return struct {
+        const Self = @This();
+
+        /// The underlying A* algorithm
+        base: AStar,
+
+        // Re-export types from base
+        pub const Edge = AStar.Edge;
+        pub const PQNode = AStar.PQNode;
+
+        pub fn init(allocator: std.mem.Allocator) Self {
+            return .{ .base = AStar.init(allocator) };
+        }
+
+        pub fn deinit(self: *Self) void {
+            self.base.deinit();
+        }
+
+        // ====================================================================
+        // Delegated methods (no hooks needed)
+        // ====================================================================
+
+        pub fn setHeuristic(self: *Self, heuristic_type: Heuristic) void {
+            self.base.setHeuristic(heuristic_type);
+        }
+
+        pub fn setCustomHeuristic(self: *Self, heuristic_fn: HeuristicFn) void {
+            self.base.setCustomHeuristic(heuristic_fn);
+        }
+
+        pub fn setNodePosition(self: *Self, node: u32, pos: Position) !void {
+            try self.base.setNodePosition(node, pos);
+        }
+
+        pub fn setNodePositionWithMapping(self: *Self, entity: u32, pos: Position) !void {
+            try self.base.setNodePositionWithMapping(entity, pos);
+        }
+
+        pub fn resize(self: *Self, size: u32) void {
+            self.base.resize(size);
+        }
+
+        pub fn clean(self: *Self) !void {
+            try self.base.clean();
+        }
+
+        pub fn addEdge(self: *Self, u: u32, v: u32, w: u64) void {
+            self.base.addEdge(u, v, w);
+        }
+
+        pub fn addEdgeWithMapping(self: *Self, u: u32, v: u32, w: u64) void {
+            self.base.addEdgeWithMapping(u, v, w);
+        }
+
+        pub fn generate(self: *Self) void {
+            self.base.generate();
+        }
+
+        // ====================================================================
+        // Methods with hook dispatching
+        // ====================================================================
+
+        /// Run A* algorithm with hook dispatching.
+        /// Emits path_requested, path_found/no_path_found, and search_complete hooks.
+        pub fn findPath(
+            self: *Self,
+            source: u32,
+            dest: u32,
+            path: *std.array_list.Managed(u32),
+        ) !?u64 {
+            // Emit path_requested hook
+            Dispatcher.emit(.{ .path_requested = .{
+                .source = source,
+                .dest = dest,
+            } });
+
+            var nodes_explored: u32 = 0;
+
+            // Run the algorithm with node tracking
+            if (source >= self.base.adjacency.items.len or dest >= self.base.adjacency.items.len) {
+                Dispatcher.emit(.{ .no_path_found = .{
+                    .source = source,
+                    .dest = dest,
+                    .nodes_explored = 0,
+                } });
+                Dispatcher.emit(.{ .search_complete = .{
+                    .source = source,
+                    .dest = dest,
+                    .success = false,
+                    .nodes_explored = 0,
+                    .path_length = 0,
+                    .cost = null,
+                } });
+                return null;
+            }
+
+            path.clearRetainingCapacity();
+
+            if (source == dest) {
+                try path.append(source);
+                Dispatcher.emit(.{ .path_found = .{
+                    .source = source,
+                    .dest = dest,
+                    .cost = 0,
+                    .path_length = 1,
+                } });
+                Dispatcher.emit(.{ .search_complete = .{
+                    .source = source,
+                    .dest = dest,
+                    .success = true,
+                    .nodes_explored = 1,
+                    .path_length = 1,
+                    .cost = 0,
+                } });
+                return 0;
+            }
+
+            var g_score = std.AutoHashMap(u32, u64).init(self.base.allocator);
+            defer g_score.deinit();
+
+            var came_from = std.AutoHashMap(u32, u32).init(self.base.allocator);
+            defer came_from.deinit();
+
+            var closed_set = std.AutoHashMap(u32, void).init(self.base.allocator);
+            defer closed_set.deinit();
+
+            var open_set = std.PriorityQueue(AStar.PQNode, void, AStar.PQNode.compare).init(self.base.allocator, {});
+            defer open_set.deinit();
+
+            // Initialize source
+            try g_score.put(source, 0);
+            const h = self.base.calculateHeuristic(source, dest);
+            try open_set.add(.{ .vertex = source, .f_score = h });
+
+            while (open_set.removeOrNull()) |current| {
+                nodes_explored += 1;
+
+                // Emit node_visited hook
+                const current_g = g_score.get(current.vertex) orelse INF;
+                Dispatcher.emit(.{ .node_visited = .{
+                    .node = current.vertex,
+                    .g_score = current_g,
+                    .f_score = current.f_score,
+                    .from_node = came_from.get(current.vertex),
+                } });
+
+                if (current.vertex == dest) {
+                    // Reconstruct path
+                    var node = dest;
+                    while (true) {
+                        try path.append(node);
+                        if (came_from.get(node)) |prev| {
+                            node = prev;
+                        } else {
+                            break;
+                        }
+                    }
+                    std.mem.reverse(u32, path.items);
+
+                    const cost = g_score.get(dest) orelse 0;
+                    Dispatcher.emit(.{ .path_found = .{
+                        .source = source,
+                        .dest = dest,
+                        .cost = cost,
+                        .path_length = path.items.len,
+                    } });
+                    Dispatcher.emit(.{ .search_complete = .{
+                        .source = source,
+                        .dest = dest,
+                        .success = true,
+                        .nodes_explored = nodes_explored,
+                        .path_length = path.items.len,
+                        .cost = cost,
+                    } });
+                    return cost;
+                }
+
+                if (closed_set.contains(current.vertex)) {
+                    continue;
+                }
+                try closed_set.put(current.vertex, {});
+
+                // Explore neighbors
+                for (self.base.adjacency.items[current.vertex].items) |edge| {
+                    if (closed_set.contains(edge.to)) {
+                        continue;
+                    }
+
+                    const tentative_g = current_g + edge.weight;
+                    const neighbor_g = g_score.get(edge.to) orelse INF;
+
+                    if (tentative_g < neighbor_g) {
+                        try came_from.put(edge.to, current.vertex);
+                        try g_score.put(edge.to, tentative_g);
+
+                        const f = @as(f32, @floatFromInt(tentative_g)) + self.base.calculateHeuristic(edge.to, dest);
+                        try open_set.add(.{ .vertex = edge.to, .f_score = f });
+                    }
+                }
+            }
+
+            // No path found
+            Dispatcher.emit(.{ .no_path_found = .{
+                .source = source,
+                .dest = dest,
+                .nodes_explored = nodes_explored,
+            } });
+            Dispatcher.emit(.{ .search_complete = .{
+                .source = source,
+                .dest = dest,
+                .success = false,
+                .nodes_explored = nodes_explored,
+                .path_length = 0,
+                .cost = null,
+            } });
+            return null;
+        }
+
+        /// Find path using entity ID mapping with hook dispatching
+        pub fn findPathWithMapping(
+            self: *Self,
+            source_entity: u32,
+            dest_entity: u32,
+            path: *std.array_list.Managed(u32),
+        ) !?u64 {
+            const source = self.base.ids.get(source_entity) orelse {
+                Dispatcher.emit(.{ .no_path_found = .{
+                    .source = source_entity,
+                    .dest = dest_entity,
+                    .nodes_explored = 0,
+                } });
+                return null;
+            };
+            const dest = self.base.ids.get(dest_entity) orelse {
+                Dispatcher.emit(.{ .no_path_found = .{
+                    .source = source_entity,
+                    .dest = dest_entity,
+                    .nodes_explored = 0,
+                } });
+                return null;
+            };
+
+            var internal_path = std.array_list.Managed(u32).init(self.base.allocator);
+            defer internal_path.deinit();
+
+            const cost = try self.findPath(source, dest, &internal_path);
+
+            if (cost != null) {
+                path.clearRetainingCapacity();
+                for (internal_path.items) |internal_id| {
+                    const entity = self.base.reverse_ids.get(internal_id) orelse continue;
+                    try path.append(entity);
+                }
+            }
+
+            return cost;
+        }
+
+        // ====================================================================
+        // DistanceGraph Interface Methods (delegated with hooks on findPath)
+        // ====================================================================
+
+        pub fn hasPath(self: *Self, u: usize, v: usize) bool {
+            var path = std.array_list.Managed(u32).init(self.base.allocator);
+            defer path.deinit();
+
+            const result = self.findPath(@intCast(u), @intCast(v), &path) catch return false;
+            return result != null;
+        }
+
+        pub fn hasPathWithMapping(self: *Self, u: u32, v: u32) bool {
+            var path = std.array_list.Managed(u32).init(self.base.allocator);
+            defer path.deinit();
+
+            const result = self.findPathWithMapping(u, v, &path) catch return false;
+            return result != null;
+        }
+
+        pub fn value(self: *Self, u: usize, v: usize) u64 {
+            var path = std.array_list.Managed(u32).init(self.base.allocator);
+            defer path.deinit();
+
+            const result = self.findPath(@intCast(u), @intCast(v), &path) catch return INF;
+            return result orelse INF;
+        }
+
+        pub fn valueWithMapping(self: *Self, u: u32, v: u32) u64 {
+            var path = std.array_list.Managed(u32).init(self.base.allocator);
+            defer path.deinit();
+
+            const result = self.findPathWithMapping(u, v, &path) catch return INF;
+            return result orelse INF;
+        }
+
+        pub fn setPathWithMapping(self: *Self, path_list: *std.array_list.Managed(u32), u: u32, v: u32) !void {
+            var path = std.array_list.Managed(u32).init(self.base.allocator);
+            defer path.deinit();
+
+            const result = try self.findPathWithMapping(u, v, &path);
+            if (result == null) {
+                return;
+            }
+
+            path_list.clearRetainingCapacity();
+            for (path.items) |node| {
+                try path_list.append(node);
+            }
+        }
+
+        pub fn nextWithMapping(self: *Self, u: u32, v: u32) u32 {
+            var path = std.array_list.Managed(u32).init(self.base.allocator);
+            defer path.deinit();
+
+            const result = self.findPathWithMapping(u, v, &path) catch return std.math.maxInt(u32);
+            if (result == null or path.items.len < 2) {
+                return std.math.maxInt(u32);
+            }
+            return path.items[1];
+        }
+
+        pub fn next(self: *Self, u: usize, v: usize) u32 {
+            var path = std.array_list.Managed(u32).init(self.base.allocator);
+            defer path.deinit();
+
+            const result = self.findPath(@intCast(u), @intCast(v), &path) catch return std.math.maxInt(u32);
+            if (result == null or path.items.len < 2) {
+                return std.math.maxInt(u32);
+            }
+            return path.items[1];
+        }
+    };
+}
+
+// ============================================================================
+// Tests for AStarWithHooks
+// ============================================================================
+
+test "AStarWithHooks emits path_found hook" {
+    const TestHooks = struct {
+        var path_found_called: bool = false;
+        var last_cost: u64 = 0;
+
+        pub fn path_found(payload: hooks.HookPayload) void {
+            const info = payload.path_found;
+            path_found_called = true;
+            last_cost = info.cost;
+        }
+    };
+
+    const Dispatcher = hooks.HookDispatcher(TestHooks);
+    var astar = AStarWithHooks(Dispatcher).init(std.testing.allocator);
+    defer astar.deinit();
+
+    astar.resize(3);
+    try astar.clean();
+
+    astar.addEdge(0, 1, 10);
+    astar.addEdge(1, 2, 5);
+
+    TestHooks.path_found_called = false;
+    TestHooks.last_cost = 0;
+
+    var path = std.array_list.Managed(u32).init(std.testing.allocator);
+    defer path.deinit();
+
+    const cost = try astar.findPath(0, 2, &path);
+
+    try std.testing.expect(TestHooks.path_found_called);
+    try std.testing.expectEqual(@as(u64, 15), TestHooks.last_cost);
+    try std.testing.expectEqual(@as(u64, 15), cost.?);
+}
+
+test "AStarWithHooks emits no_path_found hook" {
+    const TestHooks = struct {
+        var no_path_found_called: bool = false;
+
+        pub fn no_path_found(_: hooks.HookPayload) void {
+            no_path_found_called = true;
+        }
+    };
+
+    const Dispatcher = hooks.HookDispatcher(TestHooks);
+    var astar = AStarWithHooks(Dispatcher).init(std.testing.allocator);
+    defer astar.deinit();
+
+    astar.resize(3);
+    try astar.clean();
+
+    // No edges - no path possible
+    astar.addEdge(0, 1, 10);
+    // Node 2 is isolated
+
+    TestHooks.no_path_found_called = false;
+
+    var path = std.array_list.Managed(u32).init(std.testing.allocator);
+    defer path.deinit();
+
+    const cost = try astar.findPath(0, 2, &path);
+
+    try std.testing.expect(TestHooks.no_path_found_called);
+    try std.testing.expect(cost == null);
+}
+
+test "AStarWithHooks emits node_visited hooks" {
+    const TestHooks = struct {
+        var visit_count: u32 = 0;
+
+        pub fn node_visited(_: hooks.HookPayload) void {
+            visit_count += 1;
+        }
+    };
+
+    const Dispatcher = hooks.HookDispatcher(TestHooks);
+    var astar = AStarWithHooks(Dispatcher).init(std.testing.allocator);
+    defer astar.deinit();
+
+    astar.resize(3);
+    try astar.clean();
+
+    astar.addEdge(0, 1, 10);
+    astar.addEdge(1, 2, 5);
+
+    TestHooks.visit_count = 0;
+
+    var path = std.array_list.Managed(u32).init(std.testing.allocator);
+    defer path.deinit();
+
+    _ = try astar.findPath(0, 2, &path);
+
+    // Should visit at least source and destination
+    try std.testing.expect(TestHooks.visit_count >= 2);
+}

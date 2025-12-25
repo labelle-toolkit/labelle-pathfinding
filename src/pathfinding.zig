@@ -93,7 +93,12 @@ pub const Position = zig_utils.Vector2;
 
 // Algorithms
 pub const FloydWarshall = @import("floyd_warshall.zig").FloydWarshall;
+pub const FloydWarshallWithHooks = @import("floyd_warshall.zig").FloydWarshallWithHooks;
 pub const AStar = @import("a_star.zig").AStar;
+pub const AStarWithHooks = @import("a_star.zig").AStarWithHooks;
+
+// Hook system
+pub const hooks = @import("hooks.zig");
 
 // Heuristics
 pub const heuristics = @import("heuristics.zig");
@@ -128,6 +133,7 @@ test {
     _ = @import("floyd_warshall.zig");
     _ = @import("a_star.zig");
     _ = @import("heuristics.zig");
+    _ = @import("hooks.zig");
     _ = @import("components.zig");
     _ = @import("movement_node_controller.zig");
 }
