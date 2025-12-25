@@ -193,3 +193,176 @@ pub const FloydWarshall = struct {
         }
     }
 };
+
+// ============================================================================
+// Floyd-Warshall with Hooks
+// ============================================================================
+
+const hooks = @import("hooks.zig");
+
+/// Floyd-Warshall algorithm with hook dispatching.
+/// Wraps the base FloydWarshall and emits hooks at lifecycle points.
+///
+/// Example:
+/// ```zig
+/// const MyHooks = struct {
+///     pub fn search_complete(payload: hooks.HookPayload) void {
+///         std.log.info("All paths computed!", .{});
+///     }
+/// };
+/// const Dispatcher = hooks.HookDispatcher(MyHooks);
+/// var fw = FloydWarshallWithHooks(Dispatcher).init(allocator);
+/// ```
+pub fn FloydWarshallWithHooks(comptime Dispatcher: type) type {
+    return struct {
+        const Self = @This();
+
+        /// The underlying Floyd-Warshall algorithm
+        base: FloydWarshall,
+
+        pub fn init(allocator: std.mem.Allocator) Self {
+            return .{ .base = FloydWarshall.init(allocator) };
+        }
+
+        pub fn deinit(self: *Self) void {
+            self.base.deinit();
+        }
+
+        // ====================================================================
+        // Delegated methods (no hooks needed)
+        // ====================================================================
+
+        pub fn newKey(self: *Self) u32 {
+            return self.base.newKey();
+        }
+
+        pub fn addEdge(self: *Self, u: u32, v: u32, w: u64) void {
+            self.base.addEdge(u, v, w);
+        }
+
+        pub fn value(self: *Self, u: usize, v: usize) u64 {
+            return self.base.value(u, v);
+        }
+
+        pub fn hasPath(self: *Self, u: usize, v: usize) bool {
+            return self.base.hasPath(u, v);
+        }
+
+        pub fn next(self: *Self, u: usize, v: usize) u32 {
+            return self.base.next(u, v);
+        }
+
+        pub fn resize(self: *Self, size: u32) void {
+            self.base.resize(size);
+        }
+
+        pub fn addEdgeWithMapping(self: *Self, u: u32, v: u32, w: u64) void {
+            self.base.addEdgeWithMapping(u, v, w);
+        }
+
+        pub fn valueWithMapping(self: *Self, u: u32, v: u32) u64 {
+            return self.base.valueWithMapping(u, v);
+        }
+
+        pub fn nextWithMapping(self: *Self, u: u32, v: u32) u32 {
+            return self.base.nextWithMapping(u, v);
+        }
+
+        pub fn hasPathWithMapping(self: *Self, u: u32, v: u32) bool {
+            return self.base.hasPathWithMapping(u, v);
+        }
+
+        pub fn clean(self: *Self) !void {
+            try self.base.clean();
+        }
+
+        // ====================================================================
+        // Methods with hook dispatching
+        // ====================================================================
+
+        /// Run the Floyd-Warshall algorithm with hook dispatching.
+        /// Emits search_complete hook when done.
+        /// Note: Floyd-Warshall computes all-pairs shortest paths, so source/dest
+        /// in the hook are set to 0 and nodes_explored reflects the O(n³) iterations.
+        pub fn generate(self: *Self) void {
+            const size = self.base.size;
+
+            for (0..size) |k| {
+                for (0..size) |i| {
+                    for (0..size) |j| {
+                        if (self.base.graph.items[i].items[k] + self.base.graph.items[k].items[j] < self.base.graph.items[i].items[j]) {
+                            self.base.graph.items[i].items[j] = self.base.graph.items[i].items[k] + self.base.graph.items[k].items[j];
+                            self.base.path.items[i].items[j] = self.base.path.items[i].items[k];
+                        }
+                    }
+                }
+            }
+
+            // Emit search_complete hook
+            // Note: source=0, dest=0 are placeholders since Floyd-Warshall computes all pairs
+            Dispatcher.emit(.{ .search_complete = .{
+                .source = 0,
+                .dest = 0,
+                .success = true,
+                .nodes_explored = size * size * size,
+                .path_length = 0,
+                .cost = null,
+            } });
+        }
+
+        /// Build the path from u to v and store in the provided ArrayList with hook dispatching
+        pub fn setPathWithMapping(self: *Self, path_list: *std.array_list.Managed(u32), u: u32, v: u32) !void {
+            // Emit path_requested hook
+            Dispatcher.emit(.{ .path_requested = .{
+                .source = u,
+                .dest = v,
+            } });
+
+            var current = u;
+            var path_length: usize = 0;
+            while (current != v) {
+                try path_list.append(current);
+                path_length += 1;
+                current = self.base.nextWithMapping(current, v);
+                if (current == INF) {
+                    // No path exists - nodes_explored is 0 since Floyd-Warshall
+                    // precomputes all paths, no exploration happens during lookup
+                    Dispatcher.emit(.{ .no_path_found = .{
+                        .source = u,
+                        .dest = v,
+                        .nodes_explored = 0,
+                    } });
+                    Dispatcher.emit(.{ .search_complete = .{
+                        .source = u,
+                        .dest = v,
+                        .success = false,
+                        .nodes_explored = 0,
+                        .path_length = 0,
+                        .cost = null,
+                    } });
+                    return;
+                }
+            }
+            try path_list.append(v);
+            path_length += 1;
+
+            // Calculate total cost
+            const cost = self.base.valueWithMapping(u, v);
+
+            Dispatcher.emit(.{ .path_found = .{
+                .source = u,
+                .dest = v,
+                .cost = cost,
+                .path_length = path_length,
+            } });
+            Dispatcher.emit(.{ .search_complete = .{
+                .source = u,
+                .dest = v,
+                .success = true,
+                .nodes_explored = 0,
+                .path_length = path_length,
+                .cost = cost,
+            } });
+        }
+    };
+}

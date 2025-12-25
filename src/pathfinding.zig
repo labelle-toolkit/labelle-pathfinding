@@ -132,7 +132,12 @@ pub const Rectangle = quad_tree.Rectangle;
 
 // Algorithms
 pub const FloydWarshall = @import("floyd_warshall.zig").FloydWarshall;
+pub const FloydWarshallWithHooks = @import("floyd_warshall.zig").FloydWarshallWithHooks;
 pub const AStar = @import("a_star.zig").AStar;
+pub const AStarWithHooks = @import("a_star.zig").AStarWithHooks;
+
+// Hook system
+pub const hooks = @import("hooks.zig");
 
 // Optimized Floyd-Warshall variants
 pub const floyd_warshall_optimized = @import("floyd_warshall_optimized.zig");
@@ -159,4 +164,5 @@ test {
     _ = @import("floyd_warshall_optimized.zig");
     _ = @import("a_star.zig");
     _ = @import("heuristics.zig");
+    _ = @import("hooks.zig");
 }
