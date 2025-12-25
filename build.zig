@@ -8,27 +8,14 @@ pub fn build(b: *std.Build) void {
     const zig_utils_dep = b.dependency("zig_utils", .{});
     const zig_utils = zig_utils_dep.module("zig_utils");
 
-    // zig-ecs dependency
-    const zig_ecs_dep = b.dependency("zig_ecs", .{});
-    const zig_ecs = zig_ecs_dep.module("zig-ecs");
-
     // Main module
-    const pathfinding_module = b.addModule("pathfinding", .{
+    const pathfinding_module = b.addModule("labelle_pathfinding", .{
         .root_source_file = b.path("src/pathfinding.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{
             .{ .name = "zig_utils", .module = zig_utils },
-            .{ .name = "ecs", .module = zig_ecs },
         },
-    });
-
-    // Export ecs module for consumers who need direct ECS access
-    // This prevents module collisions when projects need both pathfinding and ecs
-    _ = b.addModule("ecs", .{
-        .root_source_file = zig_ecs.root_source_file,
-        .target = target,
-        .optimize = optimize,
     });
 
     // zspec dependency
@@ -45,7 +32,6 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "zig_utils", .module = zig_utils },
-                .{ .name = "ecs", .module = zig_ecs },
             },
         }),
     });
@@ -62,9 +48,8 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "zspec", .module = zspec.module("zspec") },
-                .{ .name = "pathfinding", .module = pathfinding_module },
+                .{ .name = "labelle_pathfinding", .module = pathfinding_module },
                 .{ .name = "zig_utils", .module = zig_utils },
-                .{ .name = "ecs", .module = zig_ecs },
             },
         }),
         .test_runner = .{ .path = zspec.path("src/runner.zig"), .mode = .simple },
@@ -76,83 +61,210 @@ pub fn build(b: *std.Build) void {
 
     // ===== Usage Examples =====
 
-    // Floyd-Warshall example
-    const floyd_example = b.addExecutable(.{
-        .name = "floyd_warshall_example",
+    // Basic example (recommended starting point)
+    const basic_example = b.addExecutable(.{
+        .name = "basic_example",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("usage/floyd_warshall_example.zig"),
+            .root_source_file = b.path("usage/basic_example.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "pathfinding", .module = pathfinding_module },
+                .{ .name = "labelle_pathfinding", .module = pathfinding_module },
             },
         }),
     });
-    b.installArtifact(floyd_example);
+    b.installArtifact(basic_example);
 
-    const run_floyd = b.addRunArtifact(floyd_example);
-    const floyd_step = b.step("run-floyd", "Run Floyd-Warshall example");
-    floyd_step.dependOn(&run_floyd.step);
+    const run_basic = b.addRunArtifact(basic_example);
+    const basic_step = b.step("run-basic", "Run basic example (start here!)");
+    basic_step.dependOn(&run_basic.step);
 
-    // A* example
-    const astar_example = b.addExecutable(.{
-        .name = "a_star_example",
+    // Game integration example
+    const game_example = b.addExecutable(.{
+        .name = "game_example",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("usage/a_star_example.zig"),
+            .root_source_file = b.path("usage/game_example.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "pathfinding", .module = pathfinding_module },
+                .{ .name = "labelle_pathfinding", .module = pathfinding_module },
             },
         }),
     });
-    b.installArtifact(astar_example);
+    b.installArtifact(game_example);
 
-    const run_astar = b.addRunArtifact(astar_example);
-    const astar_step = b.step("run-astar", "Run A* algorithm example");
-    astar_step.dependOn(&run_astar.step);
+    const run_game = b.addRunArtifact(game_example);
+    const game_step = b.step("run-game", "Run game integration example");
+    game_step.dependOn(&run_game.step);
 
-    // Comparison example
-    const compare_example = b.addExecutable(.{
-        .name = "comparison_example",
+    // Platformer example (directional connections)
+    const platformer_example = b.addExecutable(.{
+        .name = "platformer_example",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("usage/comparison_example.zig"),
+            .root_source_file = b.path("usage/platformer_example.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "pathfinding", .module = pathfinding_module },
+                .{ .name = "labelle_pathfinding", .module = pathfinding_module },
             },
         }),
     });
-    b.installArtifact(compare_example);
+    b.installArtifact(platformer_example);
 
-    const run_compare = b.addRunArtifact(compare_example);
-    const compare_step = b.step("run-compare", "Run algorithm comparison example");
-    compare_step.dependOn(&run_compare.step);
+    const run_platformer = b.addRunArtifact(platformer_example);
+    const platformer_step = b.step("run-platformer", "Run platformer example");
+    platformer_step.dependOn(&run_platformer.step);
 
-    // ECS integration example (demonstrates using both pathfinding and ecs modules)
-    const ecs_example = b.addExecutable(.{
-        .name = "ecs_integration_example",
+    // Full engine example (all features)
+    const engine_example = b.addExecutable(.{
+        .name = "engine_example",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("usage/ecs_integration_example.zig"),
+            .root_source_file = b.path("usage/engine_example.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "pathfinding", .module = pathfinding_module },
-                .{ .name = "ecs", .module = zig_ecs },
+                .{ .name = "labelle_pathfinding", .module = pathfinding_module },
             },
         }),
     });
-    b.installArtifact(ecs_example);
+    b.installArtifact(engine_example);
 
-    const run_ecs = b.addRunArtifact(ecs_example);
-    const ecs_step = b.step("run-ecs", "Run ECS integration example");
-    ecs_step.dependOn(&run_ecs.step);
+    const run_engine = b.addRunArtifact(engine_example);
+    const engine_step = b.step("run-engine", "Run full engine example");
+    engine_step.dependOn(&run_engine.step);
+
+    // Building example (multi-floor with stairs)
+    const building_example = b.addExecutable(.{
+        .name = "building_example",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("usage/building_example.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "labelle_pathfinding", .module = pathfinding_module },
+            },
+        }),
+    });
+    b.installArtifact(building_example);
+
+    const run_building = b.addRunArtifact(building_example);
+    const building_step = b.step("run-building", "Run building example (multi-floor with stairs)");
+    building_step.dependOn(&run_building.step);
+
+    // Single stair mode example
+    const single_stair_example = b.addExecutable(.{
+        .name = "single_stair_example",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("usage/single_stair_example.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "labelle_pathfinding", .module = pathfinding_module },
+            },
+        }),
+    });
+    b.installArtifact(single_stair_example);
+
+    const run_single_stair = b.addRunArtifact(single_stair_example);
+    const single_stair_step = b.step("run-single-stair", "Run single stair mode example");
+    single_stair_step.dependOn(&run_single_stair.step);
 
     // Run all examples
     const examples_step = b.step("run-examples", "Run all usage examples");
-    examples_step.dependOn(&run_floyd.step);
-    examples_step.dependOn(&run_astar.step);
-    examples_step.dependOn(&run_compare.step);
-    examples_step.dependOn(&run_ecs.step);
+    examples_step.dependOn(&run_basic.step);
+    examples_step.dependOn(&run_game.step);
+    examples_step.dependOn(&run_platformer.step);
+    examples_step.dependOn(&run_engine.step);
+    examples_step.dependOn(&run_building.step);
+    examples_step.dependOn(&run_single_stair.step);
+
+    // ===== Benchmark =====
+
+    const benchmark = b.addExecutable(.{
+        .name = "benchmark",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("usage/benchmark_floyd_warshall.zig"),
+            .target = target,
+            .optimize = .ReleaseFast, // Always optimize for benchmarks
+            .imports = &.{
+                .{ .name = "labelle_pathfinding", .module = pathfinding_module },
+            },
+        }),
+    });
+    b.installArtifact(benchmark);
+
+    const run_benchmark = b.addRunArtifact(benchmark);
+    const benchmark_step = b.step("run-benchmark", "Run Floyd-Warshall performance benchmark");
+    benchmark_step.dependOn(&run_benchmark.step);
+
+    // ===== Raylib Example =====
+
+    const raylib_dep = b.dependency("raylib_zig", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    const raylib = raylib_dep.module("raylib");
+    const raylib_artifact = raylib_dep.artifact("raylib");
+
+    const raylib_example = b.addExecutable(.{
+        .name = "raylib_example",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("usage/raylib_example.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "labelle_pathfinding", .module = pathfinding_module },
+                .{ .name = "raylib", .module = raylib },
+            },
+        }),
+    });
+    raylib_example.linkLibrary(raylib_artifact);
+    b.installArtifact(raylib_example);
+
+    const run_raylib = b.addRunArtifact(raylib_example);
+    const raylib_step = b.step("run-raylib", "Run raylib pathfinding visualization");
+    raylib_step.dependOn(&run_raylib.step);
+
+    // Raylib building example
+    const raylib_building = b.addExecutable(.{
+        .name = "raylib_building",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("usage/raylib_building_example.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "labelle_pathfinding", .module = pathfinding_module },
+                .{ .name = "raylib", .module = raylib },
+            },
+        }),
+    });
+    raylib_building.linkLibrary(raylib_artifact);
+    b.installArtifact(raylib_building);
+
+    const run_raylib_building = b.addRunArtifact(raylib_building);
+    const raylib_building_step = b.step("run-raylib-building", "Run raylib multi-floor building example");
+    raylib_building_step.dependOn(&run_raylib_building.step);
+
+    // ===== System Tests =====
+
+    const single_stair_test = b.addExecutable(.{
+        .name = "single_stair_test",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("system_tests/single_stair_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "labelle_pathfinding", .module = pathfinding_module },
+            },
+        }),
+    });
+    b.installArtifact(single_stair_test);
+
+    const run_single_stair_test = b.addRunArtifact(single_stair_test);
+    const single_stair_test_step = b.step("run-system-test-single-stair", "Run single stair system test");
+    single_stair_test_step.dependOn(&run_single_stair_test.step);
+
+    // Run all system tests
+    const system_tests_step = b.step("run-system-tests", "Run all system tests");
+    system_tests_step.dependOn(&run_single_stair_test.step);
 }

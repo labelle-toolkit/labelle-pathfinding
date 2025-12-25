@@ -4,11 +4,12 @@ const pathfinding = @import("labelle_pathfinding");
 
 const expect = zspec.expect;
 
-pub const FloydWarshallSpec = struct {
-    var fw: pathfinding.FloydWarshall = undefined;
+/// Test the SIMD-only optimized implementation
+pub const FloydWarshallOptimizedSpec = struct {
+    var fw: pathfinding.FloydWarshallSimd = undefined;
 
     test "tests:before" {
-        fw = pathfinding.FloydWarshall.init(std.testing.allocator);
+        fw = pathfinding.FloydWarshallSimd.init(std.testing.allocator);
     }
 
     test "tests:after" {
@@ -16,9 +17,9 @@ pub const FloydWarshallSpec = struct {
     }
 
     pub const @"initialization" = struct {
-        test "creates with default size" {
+        test "creates with zero size" {
             try expect.equal(fw.last_key, 0);
-            try expect.equal(fw.size, 100);
+            try expect.equal(fw.size, 0);
         }
     };
 
@@ -59,9 +60,9 @@ pub const FloydWarshallSpec = struct {
             fw.resize(4);
             try fw.clean();
             // Use entity IDs: 100 -> 200 -> 300 -> 400
-            fw.addEdgeWithMapping(100, 200, 1);
-            fw.addEdgeWithMapping(200, 300, 1);
-            fw.addEdgeWithMapping(300, 400, 1);
+            try fw.addEdgeWithMapping(100, 200, 1);
+            try fw.addEdgeWithMapping(200, 300, 1);
+            try fw.addEdgeWithMapping(300, 400, 1);
             fw.generate();
         }
 
@@ -91,10 +92,10 @@ pub const FloydWarshallSpec = struct {
         }
 
         test "reconstructs full path" {
-            var path_list = std.array_list.Managed(u32).init(std.testing.allocator);
-            defer path_list.deinit();
+            var path_list = std.ArrayListUnmanaged(u32){};
+            defer path_list.deinit(std.testing.allocator);
 
-            try fw.setPathWithMapping(&path_list, 100, 400);
+            try fw.setPathWithMappingUnmanaged(std.testing.allocator, &path_list, 100, 400);
 
             try expect.equal(path_list.items.len, 4);
             try expect.equal(path_list.items[0], 100);
@@ -125,7 +126,7 @@ pub const FloydWarshallSpec = struct {
 
         test "next hop follows shortest path" {
             // Should go through node 2, not node 1
-            try expect.equal(fw.next(0, 3), 2);
+            try expect.equal(fw.getNext(0, 3), 2);
         }
     };
 
@@ -133,7 +134,7 @@ pub const FloydWarshallSpec = struct {
         test "tests:before" {
             fw.resize(3);
             try fw.clean();
-            fw.addEdgeWithMapping(10, 20, 1);
+            try fw.addEdgeWithMapping(10, 20, 1);
             fw.generate();
         }
 
@@ -147,6 +148,94 @@ pub const FloydWarshallSpec = struct {
             try expect.toBeFalse(fw.ids.contains(10));
             try expect.toBeFalse(fw.ids.contains(20));
             try expect.equal(fw.last_key, 0);
+        }
+    };
+
+    pub const @"SIMD handles non-aligned sizes" = struct {
+        test "tests:before" {
+            // Use a size that's not a multiple of SIMD vector width (4)
+            fw.resize(7);
+            try fw.clean();
+            // Create a complete graph
+            var i: u32 = 0;
+            while (i < 7) : (i += 1) {
+                var j: u32 = 0;
+                while (j < 7) : (j += 1) {
+                    if (i != j) {
+                        fw.addEdge(i, j, 1);
+                    }
+                }
+            }
+            fw.generate();
+        }
+
+        test "correctly computes paths for non-aligned matrix size" {
+            // All nodes should be reachable from all other nodes
+            try expect.toBeTrue(fw.hasPath(0, 6));
+            try expect.toBeTrue(fw.hasPath(6, 0));
+            try expect.toBeTrue(fw.hasPath(3, 5));
+
+            // Direct connections should have distance 1
+            try expect.equal(fw.value(0, 1), 1);
+            try expect.equal(fw.value(5, 6), 1);
+        }
+    };
+};
+
+/// Test engine with optimized Floyd-Warshall
+pub const EngineOptimizedSpec = struct {
+    const TestConfig = struct {
+        pub const Entity = u32;
+        pub const Context = void;
+        pub const floyd_warshall_variant = pathfinding.FloydWarshallVariant.optimized_simd;
+    };
+
+    var engine: pathfinding.PathfindingEngine(TestConfig) = undefined;
+
+    test "tests:before" {
+        engine = try pathfinding.PathfindingEngine(TestConfig).init(std.testing.allocator);
+    }
+
+    test "tests:after" {
+        engine.deinit();
+    }
+
+    pub const @"engine with optimized FW" = struct {
+        test "tests:before" {
+            // Add nodes
+            try engine.addNode(0, 0, 0);
+            try engine.addNode(1, 100, 0);
+            try engine.addNode(2, 200, 0);
+            try engine.addNode(3, 200, 100);
+
+            // Connect nodes
+            try engine.connectNodes(.{ .omnidirectional = .{ .max_distance = 150, .max_connections = 4 } });
+
+            // Rebuild paths
+            try engine.rebuildPaths();
+        }
+
+        test "finds paths between nodes" {
+            try expect.toBeTrue(engine.hasPathBetween(0, 3));
+            try expect.toBeTrue(engine.hasPathBetween(0, 2));
+        }
+
+        test "calculates correct distances" {
+            // Distance from 0 to 1 should be ~100
+            const dist_0_1 = engine.getPathDistance(0, 1);
+            try expect.toBeTrue(dist_0_1 != null);
+            try expect.equal(dist_0_1.?, 100);
+        }
+
+        test "entity pathfinding works" {
+            try engine.registerEntity(1, 0, 0, 100);
+            try engine.requestPath(1, 3);
+
+            // Entity should exist and be at starting position
+            const pos = engine.getPosition(1);
+            try expect.toBeTrue(pos != null);
+            try expect.equal(pos.?.x, 0);
+            try expect.equal(pos.?.y, 0);
         }
     };
 };

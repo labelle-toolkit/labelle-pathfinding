@@ -94,17 +94,31 @@ pub const FloydWarshall = struct {
     }
 
     /// Build the path from u to v and store in the provided ArrayList
-    pub fn setPathWithMapping(self: *FloydWarshall, path_list: *std.array_list.Managed(u32), u: u32, v: u32) !void {
-        var current = u;
-        while (current != v) {
+    pub fn setPathWithMapping(self: *FloydWarshall, path_list: *std.array_list.Managed(u32), u_node: u32, v_node: u32) !void {
+        var current = u_node;
+        while (current != v_node) {
             try path_list.append(current);
-            current = self.nextWithMapping(current, v);
+            current = self.nextWithMapping(current, v_node);
             if (current == INF) {
-                std.log.err("No path found from {} to {}\n", .{ u, v });
+                std.log.err("No path found from {} to {}\n", .{ u_node, v_node });
                 return;
             }
         }
-        try path_list.append(v);
+        try path_list.append(v_node);
+    }
+
+    /// Build the path from u to v and store in the provided unmanaged ArrayList
+    pub fn setPathWithMappingUnmanaged(self: *FloydWarshall, allocator: std.mem.Allocator, path_list: *std.ArrayListUnmanaged(u32), u_node: u32, v_node: u32) !void {
+        var current = u_node;
+        while (current != v_node) {
+            try path_list.append(allocator, current);
+            current = self.nextWithMapping(current, v_node);
+            if (current == INF) {
+                std.log.err("No path found from {} to {}\n", .{ u_node, v_node });
+                return;
+            }
+        }
+        try path_list.append(allocator, v_node);
     }
 
     /// Get the next entity in the shortest path from u to v (using ID mapping)
