@@ -150,3 +150,71 @@ pub const FloydWarshallSpec = struct {
         }
     };
 };
+
+pub const FloydWarshallWithHooksSpec = struct {
+    const hooks = pathfinding.hooks;
+
+    pub const @"hook emission" = struct {
+        test "emits search_complete hook" {
+            const TestHooks = struct {
+                var search_complete_called: bool = false;
+
+                pub fn search_complete(_: hooks.HookPayload) void {
+                    search_complete_called = true;
+                }
+            };
+
+            const Dispatcher = hooks.HookDispatcher(TestHooks);
+            var fw_hooks = pathfinding.FloydWarshallWithHooks(Dispatcher).init(std.testing.allocator);
+            defer fw_hooks.deinit();
+
+            fw_hooks.resize(3);
+            try fw_hooks.clean();
+
+            fw_hooks.addEdge(0, 1, 10);
+            fw_hooks.addEdge(1, 2, 5);
+
+            TestHooks.search_complete_called = false;
+
+            fw_hooks.generate();
+
+            try expect.toBeTrue(TestHooks.search_complete_called);
+        }
+
+        test "emits path_found hook on setPathWithMapping" {
+            const TestHooks = struct {
+                var path_found_called: bool = false;
+                var last_cost: u64 = 0;
+
+                pub fn path_found(payload: hooks.HookPayload) void {
+                    const info = payload.path_found;
+                    path_found_called = true;
+                    last_cost = info.cost;
+                }
+            };
+
+            const Dispatcher = hooks.HookDispatcher(TestHooks);
+            var fw_hooks = pathfinding.FloydWarshallWithHooks(Dispatcher).init(std.testing.allocator);
+            defer fw_hooks.deinit();
+
+            fw_hooks.resize(3);
+            try fw_hooks.clean();
+
+            fw_hooks.addEdgeWithMapping(100, 200, 10);
+            fw_hooks.addEdgeWithMapping(200, 300, 5);
+
+            fw_hooks.generate();
+
+            TestHooks.path_found_called = false;
+            TestHooks.last_cost = 0;
+
+            var path = std.array_list.Managed(u32).init(std.testing.allocator);
+            defer path.deinit();
+
+            try fw_hooks.setPathWithMapping(&path, 100, 300);
+
+            try expect.toBeTrue(TestHooks.path_found_called);
+            try expect.equal(TestHooks.last_cost, 15);
+        }
+    };
+};
