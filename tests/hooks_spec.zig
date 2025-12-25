@@ -132,4 +132,94 @@ pub const HooksSpec = struct {
             try expect.toBeTrue(Hooks2.called);
         }
     };
+
+    pub const @"Stair hooks" = struct {
+        test "stair_enter hook has correct payload structure" {
+            const TestHooks = struct {
+                var called: bool = false;
+                var last_entity: u64 = 0;
+                var last_stair_node: u32 = 0;
+                var last_direction: hooks.VerticalDirection = .up;
+
+                pub fn stair_enter(payload: hooks.HookPayload) void {
+                    const info = payload.stair_enter;
+                    called = true;
+                    last_entity = info.entity;
+                    last_stair_node = info.stair_node;
+                    last_direction = info.direction;
+                }
+            };
+
+            const Dispatcher = hooks.HookDispatcher(TestHooks);
+
+            TestHooks.called = false;
+
+            Dispatcher.emit(.{ .stair_enter = .{
+                .entity = 42,
+                .stair_node = 5,
+                .direction = .down,
+                .from_node = 4,
+                .to_node = 6,
+            } });
+
+            try expect.toBeTrue(TestHooks.called);
+            try expect.equal(TestHooks.last_entity, 42);
+            try expect.equal(TestHooks.last_stair_node, 5);
+            try expect.equal(TestHooks.last_direction, .down);
+        }
+
+        test "stair_exit hook has correct payload structure" {
+            const TestHooks = struct {
+                var called: bool = false;
+                var last_arrived_at: u32 = 0;
+
+                pub fn stair_exit(payload: hooks.HookPayload) void {
+                    const info = payload.stair_exit;
+                    called = true;
+                    last_arrived_at = info.arrived_at;
+                }
+            };
+
+            const Dispatcher = hooks.HookDispatcher(TestHooks);
+
+            TestHooks.called = false;
+
+            Dispatcher.emit(.{ .stair_exit = .{
+                .entity = 42,
+                .stair_node = 5,
+                .arrived_at = 7,
+            } });
+
+            try expect.toBeTrue(TestHooks.called);
+            try expect.equal(TestHooks.last_arrived_at, 7);
+        }
+
+        test "stair_wait hook has correct payload structure" {
+            const TestHooks = struct {
+                var called: bool = false;
+                var last_current_users: u32 = 0;
+
+                pub fn stair_wait(payload: hooks.HookPayload) void {
+                    const info = payload.stair_wait;
+                    called = true;
+                    last_current_users = info.current_users;
+                }
+            };
+
+            const Dispatcher = hooks.HookDispatcher(TestHooks);
+
+            TestHooks.called = false;
+
+            Dispatcher.emit(.{ .stair_wait = .{
+                .entity = 42,
+                .stair_node = 5,
+                .direction = .up,
+                .waiting_at = 4,
+                .current_users = 3,
+            } });
+
+            try expect.toBeTrue(TestHooks.called);
+            try expect.equal(TestHooks.last_current_users, 3);
+        }
+    };
 };

@@ -20,6 +20,7 @@ const EntityPoint = quad_tree.EntityPoint;
 const Point2D = quad_tree.Point2D;
 const FloydWarshall = @import("floyd_warshall.zig").FloydWarshall;
 const floyd_warshall_optimized = @import("floyd_warshall_optimized.zig");
+const hooks = @import("hooks.zig");
 
 /// Vector2 type from zig-utils for position compatibility across labelle ecosystem
 pub const Vec2 = zig_utils.Vector2;
@@ -58,11 +59,8 @@ pub const StairMode = enum {
     single,
 };
 
-/// Vertical direction for stair traversal
-pub const VerticalDirection = enum {
-    up,
-    down,
-};
+/// Vertical direction for stair traversal (re-exported from hooks for compatibility)
+pub const VerticalDirection = hooks.VerticalDirection;
 
 /// Connection mode for automatic graph building
 pub const ConnectionMode = union(enum) {
@@ -220,6 +218,8 @@ pub fn PathfindingEngine(comptime Config: type) type {
         Config.floyd_warshall_variant
     else
         .legacy;
+    // Extract Dispatcher for hooks, defaulting to EmptyDispatcher (no-op)
+    const Dispatcher = if (@hasDecl(Config, "Dispatcher")) Config.Dispatcher else hooks.EmptyDispatcher;
 
     // Select the Floyd-Warshall implementation based on config
     const FloydWarshallImpl = switch (fw_variant) {
@@ -262,6 +262,22 @@ pub fn PathfindingEngine(comptime Config: type) type {
 
         fn logDebug(comptime fmt: []const u8, args: anytype) void {
             log(.debug, fmt, args);
+        }
+
+        // =======================================================
+        // Hook helpers
+        // =======================================================
+
+        /// Convert Entity to u64 for hook payloads.
+        /// Handles both enum and integer Entity types.
+        fn entityToU64(entity: Entity) u64 {
+            const T = @TypeOf(entity);
+            const info = @typeInfo(T);
+            return switch (info) {
+                .@"enum" => @intCast(@intFromEnum(entity)),
+                .int, .comptime_int => @intCast(entity),
+                else => @compileError("Entity type must be an enum or integer"),
+            };
         }
 
         /// Position data owned by pathfinding
@@ -1242,6 +1258,14 @@ pub fn PathfindingEngine(comptime Config: type) type {
                             const already_on_column = if (pos.using_stair) |us| self.areStairsInSameColumn(us, sn) else false;
                             if (!already_on_column and !self.canEnterStairColumn(sn, dir)) {
                                 logDebug("Entity waiting for stair {} (direction: {})", .{ sn, @intFromEnum(dir) });
+                                // Emit stair_wait hook
+                                Dispatcher.emit(.{ .stair_wait = .{
+                                    .entity = entityToU64(entity),
+                                    .stair_node = sn,
+                                    .direction = dir,
+                                    .waiting_at = pos.current_node,
+                                    .current_users = state.users_count,
+                                } });
                                 // Cannot enter stair - find waiting spot
                                 if (self.findAvailableWaitingSpot(sn)) |wait_spot| {
                                     const wait_node = self.nodes.get(wait_spot) orelse continue;
@@ -1284,22 +1308,50 @@ pub fn PathfindingEngine(comptime Config: type) type {
                                         if (pos.using_stair) |old_stair| {
                                             if (self.stair_states.getPtr(old_stair)) |old_state| {
                                                 old_state.exit();
+                                                // Emit stair_exit hook for old stair
+                                                Dispatcher.emit(.{ .stair_exit = .{
+                                                    .entity = entityToU64(entity),
+                                                    .stair_node = old_stair,
+                                                    .arrived_at = sn,
+                                                } });
                                             }
                                         }
                                         logDebug("Entity {} moving within column from {} to {}", .{ entity, pos.using_stair.?, sn });
                                         state.enter(dir);
                                         pos.using_stair = sn;
+                                        // Emit stair_enter hook
+                                        Dispatcher.emit(.{ .stair_enter = .{
+                                            .entity = entityToU64(entity),
+                                            .stair_node = sn,
+                                            .direction = dir,
+                                            .from_node = pos.current_node,
+                                            .to_node = next_node_id,
+                                        } });
                                     } else {
                                         // Entering a new stair column
                                         if (pos.using_stair) |old_stair| {
                                             if (self.stair_states.getPtr(old_stair)) |old_state| {
                                                 logDebug("Entity {} exiting stair {} before entering {}", .{ entity, old_stair, sn });
                                                 old_state.exit();
+                                                // Emit stair_exit hook for old stair
+                                                Dispatcher.emit(.{ .stair_exit = .{
+                                                    .entity = entityToU64(entity),
+                                                    .stair_node = old_stair,
+                                                    .arrived_at = pos.current_node,
+                                                } });
                                             }
                                         }
                                         logDebug("Entity {} entering stair {} (direction: {})", .{ entity, sn, @intFromEnum(dir) });
                                         state.enter(dir);
                                         pos.using_stair = sn;
+                                        // Emit stair_enter hook
+                                        Dispatcher.emit(.{ .stair_enter = .{
+                                            .entity = entityToU64(entity),
+                                            .stair_node = sn,
+                                            .direction = dir,
+                                            .from_node = pos.current_node,
+                                            .to_node = next_node_id,
+                                        } });
                                     }
                                 }
                             }
@@ -1321,6 +1373,12 @@ pub fn PathfindingEngine(comptime Config: type) type {
                             if (self.stair_states.getPtr(stair_node)) |state| {
                                 state.exit();
                             }
+                            // Emit stair_exit hook
+                            Dispatcher.emit(.{ .stair_exit = .{
+                                .entity = entityToU64(entity),
+                                .stair_node = stair_node,
+                                .arrived_at = next_node_id,
+                            } });
                             pos.using_stair = null;
                         }
                     }
@@ -1347,6 +1405,12 @@ pub fn PathfindingEngine(comptime Config: type) type {
                             if (self.stair_states.getPtr(stair_node)) |state| {
                                 state.exit();
                             }
+                            // Emit stair_exit hook
+                            Dispatcher.emit(.{ .stair_exit = .{
+                                .entity = entityToU64(entity),
+                                .stair_node = stair_node,
+                                .arrived_at = next_node_id,
+                            } });
                             pos.using_stair = null;
                         }
                         self.path_completed_events.append(self.allocator, .{ .entity = entity, .node = next_node_id }) catch |err| {
@@ -1414,6 +1478,16 @@ pub fn PathfindingEngine(comptime Config: type) type {
                         logDebug("Entity {} proceeding from stair {} queue (direction: {})", .{ entity, stair_node, @intFromEnum(dir) });
                         state.enter(dir);
                         pos.using_stair = stair_node;
+
+                        // Emit stair_enter hook (entity is entering from waiting queue)
+                        const next_node_in_path = if (pos.path_index < pos.path.items.len) pos.path.items[pos.path_index] else pos.current_node;
+                        Dispatcher.emit(.{ .stair_enter = .{
+                            .entity = entityToU64(entity),
+                            .stair_node = stair_node,
+                            .direction = dir,
+                            .from_node = pos.current_node,
+                            .to_node = next_node_in_path,
+                        } });
 
                         // Release the waiting spot
                         if (pos.waiting_at_node) |wait_spot| {

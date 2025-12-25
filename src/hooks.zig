@@ -36,17 +36,33 @@
 //!
 //! ## Available Hooks
 //!
+//! ### Algorithm Hooks (A*, Floyd-Warshall)
 //! - `path_requested` - When pathfinding is initiated
 //! - `path_found` - When a valid path is discovered
 //! - `no_path_found` - When no path exists between nodes
 //! - `node_visited` - When a node is visited during search (for debugging/visualization)
 //! - `search_complete` - When the search algorithm finishes (success or failure)
+//!
+//! ### Stair/Movement Hooks (PathfindingEngine)
+//! - `stair_enter` - When an entity enters a stair
+//! - `stair_exit` - When an entity exits a stair
+//! - `stair_wait` - When an entity starts waiting for a stair (blocked by traffic)
 
 const std = @import("std");
+
+/// Vertical direction for stair traversal (re-exported from engine)
+pub const VerticalDirection = enum {
+    up,
+    down,
+};
 
 /// Built-in hooks for pathfinding lifecycle events.
 /// Games can register handlers for any of these hooks.
 pub const PathfindingHook = enum {
+    // ========================================================================
+    // Algorithm hooks
+    // ========================================================================
+
     /// Fired when pathfinding is requested between two nodes
     path_requested,
 
@@ -61,6 +77,19 @@ pub const PathfindingHook = enum {
 
     /// Fired when the search algorithm completes (success or failure)
     search_complete,
+
+    // ========================================================================
+    // Stair/movement hooks (emitted by PathfindingEngine)
+    // ========================================================================
+
+    /// Fired when an entity enters a stair
+    stair_enter,
+
+    /// Fired when an entity exits a stair
+    stair_exit,
+
+    /// Fired when an entity starts waiting for a stair (blocked by traffic)
+    stair_wait,
 };
 
 /// Information about a path request
@@ -102,6 +131,44 @@ pub const SearchCompleteInfo = struct {
     cost: ?u64,
 };
 
+/// Information about a stair enter event
+pub const StairEnterInfo = struct {
+    /// The entity entering the stair
+    entity: u64,
+    /// The stair node being entered
+    stair_node: u32,
+    /// Direction of travel
+    direction: VerticalDirection,
+    /// The node the entity is coming from
+    from_node: u32,
+    /// The node the entity is going to
+    to_node: u32,
+};
+
+/// Information about a stair exit event
+pub const StairExitInfo = struct {
+    /// The entity exiting the stair
+    entity: u64,
+    /// The stair node being exited
+    stair_node: u32,
+    /// The node the entity arrived at
+    arrived_at: u32,
+};
+
+/// Information about a stair wait event (entity blocked by traffic)
+pub const StairWaitInfo = struct {
+    /// The entity waiting
+    entity: u64,
+    /// The stair node the entity is waiting for
+    stair_node: u32,
+    /// Direction the entity wants to travel
+    direction: VerticalDirection,
+    /// The node the entity is waiting at
+    waiting_at: u32,
+    /// Current number of users on the stair
+    current_users: u32,
+};
+
 /// Type-safe payload union for pathfinding hooks.
 /// Each hook type has its corresponding payload type.
 pub const HookPayload = union(PathfindingHook) {
@@ -110,6 +177,9 @@ pub const HookPayload = union(PathfindingHook) {
     no_path_found: NoPathFoundInfo,
     node_visited: NodeVisitedInfo,
     search_complete: SearchCompleteInfo,
+    stair_enter: StairEnterInfo,
+    stair_exit: StairExitInfo,
+    stair_wait: StairWaitInfo,
 };
 
 /// Creates a hook dispatcher from a comptime hook map.
