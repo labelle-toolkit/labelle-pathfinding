@@ -449,11 +449,108 @@ pub fn AStarWithHooks(comptime Dispatcher: type) type {
         }
 
         // ====================================================================
+        // Core algorithm (no hooks)
+        // ====================================================================
+
+        /// Internal result type for findPathCore
+        const FindPathResult = struct {
+            cost: ?u64,
+            nodes_explored: u32,
+        };
+
+        /// Core A* algorithm without hook dispatching.
+        /// Used internally by findPath and findPathWithMapping to avoid double hook emission.
+        fn findPathCore(
+            self: *Self,
+            source: u32,
+            dest: u32,
+            path: *std.array_list.Managed(u32),
+        ) !FindPathResult {
+            var nodes_explored: u32 = 0;
+
+            if (source >= self.base.adjacency.items.len or dest >= self.base.adjacency.items.len) {
+                return .{ .cost = null, .nodes_explored = 0 };
+            }
+
+            path.clearRetainingCapacity();
+
+            if (source == dest) {
+                try path.append(source);
+                return .{ .cost = 0, .nodes_explored = 1 };
+            }
+
+            var g_score = std.AutoHashMap(u32, u64).init(self.base.allocator);
+            defer g_score.deinit();
+
+            var came_from = std.AutoHashMap(u32, u32).init(self.base.allocator);
+            defer came_from.deinit();
+
+            var closed_set = std.AutoHashMap(u32, void).init(self.base.allocator);
+            defer closed_set.deinit();
+
+            var open_set = std.PriorityQueue(AStar.PQNode, void, AStar.PQNode.compare).init(self.base.allocator, {});
+            defer open_set.deinit();
+
+            // Initialize source
+            try g_score.put(source, 0);
+            const h = self.base.calculateHeuristic(source, dest);
+            try open_set.add(.{ .vertex = source, .f_score = h });
+
+            while (open_set.removeOrNull()) |current| {
+                nodes_explored += 1;
+
+                const current_g = g_score.get(current.vertex) orelse INF;
+
+                if (current.vertex == dest) {
+                    // Reconstruct path
+                    var node = dest;
+                    while (true) {
+                        try path.append(node);
+                        if (came_from.get(node)) |prev| {
+                            node = prev;
+                        } else {
+                            break;
+                        }
+                    }
+                    std.mem.reverse(u32, path.items);
+
+                    const cost = g_score.get(dest) orelse unreachable;
+                    return .{ .cost = cost, .nodes_explored = nodes_explored };
+                }
+
+                if (closed_set.contains(current.vertex)) {
+                    continue;
+                }
+                try closed_set.put(current.vertex, {});
+
+                // Explore neighbors
+                for (self.base.adjacency.items[current.vertex].items) |edge| {
+                    if (closed_set.contains(edge.to)) {
+                        continue;
+                    }
+
+                    const tentative_g = current_g + edge.weight;
+                    const neighbor_g = g_score.get(edge.to) orelse INF;
+
+                    if (tentative_g < neighbor_g) {
+                        try came_from.put(edge.to, current.vertex);
+                        try g_score.put(edge.to, tentative_g);
+
+                        const f = @as(f32, @floatFromInt(tentative_g)) + self.base.calculateHeuristic(edge.to, dest);
+                        try open_set.add(.{ .vertex = edge.to, .f_score = f });
+                    }
+                }
+            }
+
+            return .{ .cost = null, .nodes_explored = nodes_explored };
+        }
+
+        // ====================================================================
         // Methods with hook dispatching
         // ====================================================================
 
         /// Run A* algorithm with hook dispatching.
-        /// Emits path_requested, path_found/no_path_found, and search_complete hooks.
+        /// Emits path_requested, node_visited, path_found/no_path_found, and search_complete hooks.
         pub fn findPath(
             self: *Self,
             source: u32,
@@ -468,7 +565,6 @@ pub fn AStarWithHooks(comptime Dispatcher: type) type {
 
             var nodes_explored: u32 = 0;
 
-            // Run the algorithm with node tracking
             if (source >= self.base.adjacency.items.len or dest >= self.base.adjacency.items.len) {
                 Dispatcher.emit(.{ .no_path_found = .{
                     .source = source,
@@ -490,6 +586,12 @@ pub fn AStarWithHooks(comptime Dispatcher: type) type {
 
             if (source == dest) {
                 try path.append(source);
+                Dispatcher.emit(.{ .node_visited = .{
+                    .node = source,
+                    .g_score = 0,
+                    .f_score = 0,
+                    .from_node = null,
+                } });
                 Dispatcher.emit(.{ .path_found = .{
                     .source = source,
                     .dest = dest,
@@ -527,8 +629,9 @@ pub fn AStarWithHooks(comptime Dispatcher: type) type {
             while (open_set.removeOrNull()) |current| {
                 nodes_explored += 1;
 
-                // Emit node_visited hook
                 const current_g = g_score.get(current.vertex) orelse INF;
+
+                // Emit node_visited hook
                 Dispatcher.emit(.{ .node_visited = .{
                     .node = current.vertex,
                     .g_score = current_g,
@@ -608,18 +711,33 @@ pub fn AStarWithHooks(comptime Dispatcher: type) type {
             return null;
         }
 
-        /// Find path using entity ID mapping with hook dispatching
+        /// Find path using entity ID mapping with hook dispatching.
+        /// Hooks are emitted with entity IDs, not internal node indices.
         pub fn findPathWithMapping(
             self: *Self,
             source_entity: u32,
             dest_entity: u32,
             path: *std.array_list.Managed(u32),
         ) !?u64 {
+            // Emit path_requested with entity IDs
+            Dispatcher.emit(.{ .path_requested = .{
+                .source = source_entity,
+                .dest = dest_entity,
+            } });
+
             const source = self.base.ids.get(source_entity) orelse {
                 Dispatcher.emit(.{ .no_path_found = .{
                     .source = source_entity,
                     .dest = dest_entity,
                     .nodes_explored = 0,
+                } });
+                Dispatcher.emit(.{ .search_complete = .{
+                    .source = source_entity,
+                    .dest = dest_entity,
+                    .success = false,
+                    .nodes_explored = 0,
+                    .path_length = 0,
+                    .cost = null,
                 } });
                 return null;
             };
@@ -629,23 +747,62 @@ pub fn AStarWithHooks(comptime Dispatcher: type) type {
                     .dest = dest_entity,
                     .nodes_explored = 0,
                 } });
+                Dispatcher.emit(.{ .search_complete = .{
+                    .source = source_entity,
+                    .dest = dest_entity,
+                    .success = false,
+                    .nodes_explored = 0,
+                    .path_length = 0,
+                    .cost = null,
+                } });
                 return null;
             };
 
             var internal_path = std.array_list.Managed(u32).init(self.base.allocator);
             defer internal_path.deinit();
 
-            const cost = try self.findPath(source, dest, &internal_path);
+            // Use core algorithm without hooks to avoid double emission
+            const result = try self.findPathCore(source, dest, &internal_path);
 
-            if (cost != null) {
+            if (result.cost) |cost| {
                 path.clearRetainingCapacity();
                 for (internal_path.items) |internal_id| {
                     const entity = self.base.reverse_ids.get(internal_id) orelse continue;
                     try path.append(entity);
                 }
-            }
 
-            return cost;
+                // Emit hooks with entity IDs
+                Dispatcher.emit(.{ .path_found = .{
+                    .source = source_entity,
+                    .dest = dest_entity,
+                    .cost = cost,
+                    .path_length = path.items.len,
+                } });
+                Dispatcher.emit(.{ .search_complete = .{
+                    .source = source_entity,
+                    .dest = dest_entity,
+                    .success = true,
+                    .nodes_explored = result.nodes_explored,
+                    .path_length = path.items.len,
+                    .cost = cost,
+                } });
+                return cost;
+            } else {
+                Dispatcher.emit(.{ .no_path_found = .{
+                    .source = source_entity,
+                    .dest = dest_entity,
+                    .nodes_explored = result.nodes_explored,
+                } });
+                Dispatcher.emit(.{ .search_complete = .{
+                    .source = source_entity,
+                    .dest = dest_entity,
+                    .success = false,
+                    .nodes_explored = result.nodes_explored,
+                    .path_length = 0,
+                    .cost = null,
+                } });
+                return null;
+            }
         }
 
         // ====================================================================

@@ -282,9 +282,10 @@ pub fn FloydWarshallWithHooks(comptime Dispatcher: type) type {
 
         /// Run the Floyd-Warshall algorithm with hook dispatching.
         /// Emits search_complete hook when done.
+        /// Note: Floyd-Warshall computes all-pairs shortest paths, so source/dest
+        /// in the hook are set to 0 and nodes_explored reflects the O(n³) iterations.
         pub fn generate(self: *Self) void {
             const size = self.base.size;
-            var paths_found: u32 = 0;
 
             for (0..size) |k| {
                 for (0..size) |i| {
@@ -292,13 +293,13 @@ pub fn FloydWarshallWithHooks(comptime Dispatcher: type) type {
                         if (self.base.graph.items[i].items[k] + self.base.graph.items[k].items[j] < self.base.graph.items[i].items[j]) {
                             self.base.graph.items[i].items[j] = self.base.graph.items[i].items[k] + self.base.graph.items[k].items[j];
                             self.base.path.items[i].items[j] = self.base.path.items[i].items[k];
-                            paths_found += 1;
                         }
                     }
                 }
             }
 
             // Emit search_complete hook
+            // Note: source=0, dest=0 are placeholders since Floyd-Warshall computes all pairs
             Dispatcher.emit(.{ .search_complete = .{
                 .source = 0,
                 .dest = 0,
@@ -324,10 +325,20 @@ pub fn FloydWarshallWithHooks(comptime Dispatcher: type) type {
                 path_length += 1;
                 current = self.base.nextWithMapping(current, v);
                 if (current == INF) {
+                    // No path exists - nodes_explored is 0 since Floyd-Warshall
+                    // precomputes all paths, no exploration happens during lookup
                     Dispatcher.emit(.{ .no_path_found = .{
                         .source = u,
                         .dest = v,
-                        .nodes_explored = @intCast(path_length),
+                        .nodes_explored = 0,
+                    } });
+                    Dispatcher.emit(.{ .search_complete = .{
+                        .source = u,
+                        .dest = v,
+                        .success = false,
+                        .nodes_explored = 0,
+                        .path_length = 0,
+                        .cost = null,
                     } });
                     return;
                 }
@@ -343,6 +354,14 @@ pub fn FloydWarshallWithHooks(comptime Dispatcher: type) type {
                 .dest = v,
                 .cost = cost,
                 .path_length = path_length,
+            } });
+            Dispatcher.emit(.{ .search_complete = .{
+                .source = u,
+                .dest = v,
+                .success = true,
+                .nodes_explored = 0,
+                .path_length = path_length,
+                .cost = cost,
             } });
         }
     };
