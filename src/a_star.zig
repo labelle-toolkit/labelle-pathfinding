@@ -549,7 +549,7 @@ pub fn AStarWithHooks(comptime Dispatcher: type) type {
                     }
                     std.mem.reverse(u32, path.items);
 
-                    const cost = g_score.get(dest) orelse 0;
+                    const cost = g_score.get(dest) orelse unreachable;
                     Dispatcher.emit(.{ .path_found = .{
                         .source = source,
                         .dest = dest,
