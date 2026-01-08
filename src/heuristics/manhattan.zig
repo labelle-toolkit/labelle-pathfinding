@@ -15,6 +15,5 @@ const zig_utils = @import("zig_utils");
 pub const Position = zig_utils.Vector2;
 
 /// Calculate Manhattan (taxicab) distance between two positions.
-pub fn calculate(a: Position, b: Position) f32 {
-    return @abs(b.x - a.x) + @abs(b.y - a.y);
-}
+/// Delegates to zig-utils heuristics implementation.
+pub const calculate = zig_utils.heuristics.manhattan;

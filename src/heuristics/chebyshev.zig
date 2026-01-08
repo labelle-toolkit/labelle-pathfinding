@@ -16,6 +16,5 @@ const zig_utils = @import("zig_utils");
 pub const Position = zig_utils.Vector2;
 
 /// Calculate Chebyshev (chessboard) distance between two positions.
-pub fn calculate(a: Position, b: Position) f32 {
-    return @max(@abs(b.x - a.x), @abs(b.y - a.y));
-}
+/// Delegates to zig-utils heuristics implementation.
+pub const calculate = zig_utils.heuristics.chebyshev;

@@ -13,17 +13,13 @@
 //!
 //! This is equivalent to: `diagonal_moves * sqrt(2) + straight_moves * 1`
 
-const std = @import("std");
 const zig_utils = @import("zig_utils");
 
 pub const Position = zig_utils.Vector2;
 
 /// sqrt(2) - 1, precomputed for efficiency
-pub const SQRT2_MINUS_1: f32 = std.math.sqrt2 - 1.0;
+pub const SQRT2_MINUS_1 = zig_utils.heuristics.SQRT2_MINUS_1;
 
 /// Calculate Octile distance between two positions.
-pub fn calculate(a: Position, b: Position) f32 {
-    const dx = @abs(b.x - a.x);
-    const dy = @abs(b.y - a.y);
-    return @max(dx, dy) + SQRT2_MINUS_1 * @min(dx, dy);
-}
+/// Delegates to zig-utils heuristics implementation.
+pub const calculate = zig_utils.heuristics.octile;
