@@ -215,7 +215,7 @@ fn rebuildBuilding(game: *Game) !void {
         y: f32,
         speed: f32,
     };
-    var saved_entities = std.ArrayList(EntityState).init(game.allocator);
+    var saved_entities = std.array_list.Managed(EntityState).init(game.allocator);
     defer saved_entities.deinit();
 
     for (0..game.next_entity_id) |i| {

@@ -19,6 +19,7 @@ const zig_utils = @import("zig_utils");
 pub const Position = zig_utils.Vector2;
 
 /// Always returns zero (Dijkstra's algorithm behavior).
+/// Delegates to zig-utils heuristics implementation.
 pub fn calculate(a: Position, b: Position) f32 {
     _ = a;
     _ = b;

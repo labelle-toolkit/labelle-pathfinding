@@ -21,9 +21,10 @@
 
 const zig_utils = @import("zig_utils");
 
+/// Position type from zig-utils for ecosystem compatibility
 pub const Position = zig_utils.Vector2;
 
-// Individual heuristic modules
+// Individual heuristic modules (for backwards compatibility with module.calculate() API)
 pub const euclidean = @import("heuristics/euclidean.zig");
 pub const manhattan = @import("heuristics/manhattan.zig");
 pub const chebyshev = @import("heuristics/chebyshev.zig");
@@ -31,45 +32,17 @@ pub const octile = @import("heuristics/octile.zig");
 pub const zero = @import("heuristics/zero.zig");
 
 /// Built-in heuristic types for A* pathfinding
-pub const Heuristic = enum {
-    /// Straight-line distance: sqrt((x2-x1)^2 + (y2-y1)^2)
-    /// Best for: Any-angle movement, open spaces
-    /// Admissible: Always
-    euclidean,
-
-    /// Grid distance: |x2-x1| + |y2-y1|
-    /// Best for: 4-directional grid movement
-    /// Admissible: For 4-directional movement only
-    manhattan,
-
-    /// Chessboard distance: max(|x2-x1|, |y2-y1|)
-    /// Best for: 8-directional movement with equal diagonal cost
-    /// Admissible: For 8-directional with uniform cost
-    chebyshev,
-
-    /// Optimal 8-directional: max(dx,dy) + (sqrt(2)-1) * min(dx,dy)
-    /// Best for: 8-directional movement where diagonal costs sqrt(2)
-    /// Admissible: For 8-directional with sqrt(2) diagonal cost
-    octile,
-
-    /// No heuristic (always returns 0)
-    /// Effect: Degrades A* to Dijkstra's algorithm
-    /// Use when: You need guaranteed shortest path without heuristic assumptions
-    zero,
-};
+/// Re-exported from zig-utils for consistency
+pub const Heuristic = zig_utils.heuristics.Heuristic;
 
 /// Custom heuristic function type for user-defined heuristics.
 /// Must return an estimated cost from position `a` to position `b`.
 /// For admissibility, the estimate must never exceed the actual cost.
-pub const HeuristicFn = *const fn (a: Position, b: Position) f32;
+pub const HeuristicFn = zig_utils.heuristics.HeuristicFn;
+
+/// sqrt(2) - 1, precomputed for octile heuristic
+pub const SQRT2_MINUS_1 = zig_utils.heuristics.SQRT2_MINUS_1;
 
 /// Calculate heuristic distance between two positions using the specified heuristic type.
-pub fn calculate(heuristic: Heuristic, a: Position, b: Position) f32 {
-    return switch (heuristic) {
-        .euclidean => euclidean.calculate(a, b),
-        .manhattan => manhattan.calculate(a, b),
-        .chebyshev => chebyshev.calculate(a, b),
-        .octile => octile.calculate(a, b),
-        .zero => zero.calculate(a, b),
-    };
-}
+/// Delegates to zig-utils heuristics implementation.
+pub const calculate = zig_utils.heuristics.calculate;

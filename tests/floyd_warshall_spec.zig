@@ -17,8 +17,8 @@ pub const FloydWarshallSpec = struct {
 
     pub const @"initialization" = struct {
         test "creates with default size" {
-            try expect.equal(fw.last_key, 0);
-            try expect.equal(fw.size, 100);
+            try expect.equal(fw.base.last_key, 0);
+            try expect.equal(fw.base.size, 100);
         }
     };
 
@@ -66,10 +66,10 @@ pub const FloydWarshallSpec = struct {
         }
 
         test "maps entity IDs to internal indices" {
-            try expect.toBeTrue(fw.ids.contains(100));
-            try expect.toBeTrue(fw.ids.contains(200));
-            try expect.toBeTrue(fw.ids.contains(300));
-            try expect.toBeTrue(fw.ids.contains(400));
+            try expect.toBeTrue(fw.base.ids.contains(100));
+            try expect.toBeTrue(fw.base.ids.contains(200));
+            try expect.toBeTrue(fw.base.ids.contains(300));
+            try expect.toBeTrue(fw.base.ids.contains(400));
         }
 
         test "finds paths using entity IDs" {
@@ -144,9 +144,9 @@ pub const FloydWarshallSpec = struct {
             try fw.clean();
 
             // Old mappings should be gone
-            try expect.toBeFalse(fw.ids.contains(10));
-            try expect.toBeFalse(fw.ids.contains(20));
-            try expect.equal(fw.last_key, 0);
+            try expect.toBeFalse(fw.base.ids.contains(10));
+            try expect.toBeFalse(fw.base.ids.contains(20));
+            try expect.equal(fw.base.last_key, 0);
         }
     };
 };
