@@ -98,31 +98,45 @@
 
 const std = @import("std");
 
+// Shared types (extracted from engine.zig)
+pub const types = @import("types.zig");
+pub const Position = types.Position;
+pub const Vec2 = types.Vec2;
+pub const ConnectionMode = types.ConnectionMode;
+pub const NodeId = types.NodeId;
+pub const NodeData = types.NodeData;
+pub const NodePoint = types.NodePoint;
+pub const StairMode = types.StairMode;
+pub const VerticalDirection = types.VerticalDirection;
+pub const LogLevel = types.LogLevel;
+pub const FloydWarshallVariant = types.FloydWarshallVariant;
+pub const Grid = types.Grid;
+pub const GridConfig = types.GridConfig;
+pub const GridConnection = types.GridConnection;
+
 // Engine (self-contained pathfinding)
 pub const engine = @import("engine.zig");
 pub const PathfindingEngine = engine.PathfindingEngine;
 pub const PathfindingEngineSimple = engine.PathfindingEngineSimple;
 pub const SimpleConfig = engine.SimpleConfig;
-pub const ConnectionMode = engine.ConnectionMode;
-pub const NodeId = engine.NodeId;
-pub const NodeData = engine.NodeData;
-pub const NodePoint = engine.NodePoint;
-pub const StairMode = engine.StairMode;
-pub const VerticalDirection = engine.VerticalDirection;
-pub const LogLevel = engine.LogLevel;
-pub const FloydWarshallVariant = engine.FloydWarshallVariant;
-pub const Grid = engine.Grid;
-pub const GridConfig = engine.GridConfig;
-pub const GridConnection = engine.GridConnection;
-pub const Vec2 = engine.Vec2;
 
 /// Components exported for ECS integration.
 /// When labelle-pathfinding is added as a plugin, these types become available
 /// in the component registry for use in .zon entity definitions.
 pub const Components = struct {
-    pub const Vec2 = engine.Vec2;
-    pub const NodeId = engine.NodeId;
-    pub const NodePoint = engine.NodePoint;
+    pub const Position = types.Position;
+    pub const NodeId = types.NodeId;
+    pub const NodePoint = types.NodePoint;
+    /// A marker component for entities that are movement nodes in the pathfinding graph.
+    pub const MovementNode = struct {
+        node_id: u32 = 0,
+    };
+    /// Tracks the closest movement node to an entity, updated by pathfinding queries.
+    pub const ClosestMovementNode = struct {
+        node_entity: u64 = 0,
+        node_id: u32 = 0,
+        distance: f32 = 0.0,
+    };
 };
 
 // Spatial indexing
@@ -158,6 +172,7 @@ pub const validateDistanceGraph = @import("distance_graph.zig").validateDistance
 test {
     // Run all tests from submodules
     std.testing.refAllDecls(@This());
+    _ = @import("types.zig");
     _ = @import("engine.zig");
     _ = @import("quad_tree.zig");
     _ = @import("floyd_warshall.zig");
