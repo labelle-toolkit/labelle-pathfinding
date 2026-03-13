@@ -35,7 +35,7 @@ This is a Zig pathfinding library for games. It requires Zig 0.15.2+.
 
 - **Grid Helper**: `createGrid(config)` creates a grid of nodes with automatic connections. Returns a `Grid` struct with coordinate conversion utilities (`toScreen`, `toNodeId`, `fromNodeId`, `nodePosition`).
 
-- **Vec2 Positions**: Position queries (`getPosition`, `getNodePosition`) return `Vec2` from zig-utils for ecosystem compatibility.
+- **Position Type**: Position queries (`getPosition`, `getNodePosition`) return `Position` from labelle-core. Convenience methods like `addNodePos`, `registerEntityPos` accept `Position` directly.
 
 - **Floyd-Warshall** (`src/floyd_warshall.zig`): Precomputes all-pairs shortest paths. Used internally by PathfindingEngine. Best for dense graphs with frequent queries between many node pairs. An optimized SIMD version is available in `src/floyd_warshall_optimized.zig` (5-8x faster).
 
