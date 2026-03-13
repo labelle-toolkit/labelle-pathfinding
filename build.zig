@@ -8,6 +8,13 @@ pub fn build(b: *std.Build) void {
     const zig_utils_dep = b.dependency("zig_utils", .{});
     const zig_utils = zig_utils_dep.module("zig_utils");
 
+    // labelle-core dependency
+    const core_dep = b.dependency("labelle_core", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    const core_mod = core_dep.module("labelle-core");
+
     // Main module
     const pathfinding_module = b.addModule("labelle_pathfinding", .{
         .root_source_file = b.path("src/pathfinding.zig"),
@@ -15,6 +22,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{
             .{ .name = "zig_utils", .module = zig_utils },
+            .{ .name = "labelle-core", .module = core_mod },
         },
     });
 
@@ -32,6 +40,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "zig_utils", .module = zig_utils },
+                .{ .name = "labelle-core", .module = core_mod },
             },
         }),
     });

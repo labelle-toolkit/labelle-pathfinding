@@ -7,7 +7,7 @@ A pathfinding library for Zig game development. Part of the [labelle-toolkit](ht
 - **PathfindingEngine** - Self-contained engine that owns entity positions, with callbacks and spatial queries
 - **Simplified Config** - Use `PathfindingEngineSimple(Entity, Context)` for quick setup
 - **Grid Helper** - `createGrid()` for easy grid-based pathfinding with coordinate utilities
-- **Vec2 Positions** - Returns `Vec2` from zig-utils for ecosystem compatibility
+- **Position Type** - Uses `Position` from labelle-core for consistency across the labelle ecosystem
 - **QuadTree** - Spatial partitioning for O(log n) entity and node lookups
 - **Floyd-Warshall Algorithm** - All-pairs shortest path computation with SIMD and parallel optimizations (5-16x faster)
 - **A\* Algorithm** - Single-source shortest path with multiple heuristics
@@ -129,10 +129,10 @@ const grid = try engine.createGrid(.{
 try engine.rebuildPaths();
 
 // Use grid helpers for coordinate conversion
-const pos = grid.toScreen(3, 4);      // grid coords -> Vec2 screen position
+const pos = grid.toScreen(3, 4);      // grid coords -> Position
 const node_id = grid.toNodeId(3, 4);  // grid coords -> node ID
 const coords = grid.fromNodeId(42);   // node ID -> {col, row}
-const node_pos = grid.nodePosition(42); // node ID -> Vec2 position
+const node_pos = grid.nodePosition(42); // node ID -> Position
 ```
 
 ### Connection Convenience Functions
@@ -148,20 +148,20 @@ try engine.connectAsGrid4(cell_size);  // 4-directional (up/down/left/right)
 try engine.connectAsGrid8(cell_size);  // 8-directional (including diagonals)
 ```
 
-### Vec2 Position Type
+### Position Type
 
-Position queries return `Vec2` from zig-utils for ecosystem compatibility:
+Position queries return `Position` from labelle-core:
 
 ```zig
 if (engine.getPosition(entity)) |pos| {
-    // pos is Vec2 with useful methods
+    // pos is Position with useful methods
     const dist = pos.distance(target);
     const normalized = pos.normalize();
 }
 
-// Vec2 convenience methods for adding nodes
-try engine.addNodeVec2(id, Vec2{ .x = 100, .y = 200 });
-try engine.registerEntityVec2(entity, pos, speed);
+// Position convenience methods for adding nodes
+try engine.addNodePos(id, Position{ .x = 100, .y = 200 });
+try engine.registerEntityPos(entity, pos, speed);
 ```
 
 ### Log Levels
@@ -391,7 +391,7 @@ if (try astar.findPathWithMapping(100, 200, &path)) |cost| {
 | `init(allocator)` | Create engine instance |
 | `deinit()` | Free resources |
 | `addNode(id, x, y)` | Add a waypoint node |
-| `addNodeVec2(id, pos)` | Add node with Vec2 position |
+| `addNodePos(id, pos)` | Add node with Position |
 | `addNodeAuto(x, y)` | Add node with auto-generated ID |
 | `removeNode(id)` | Remove a node |
 | `createGrid(config)` | Create grid of nodes with connections |
@@ -401,13 +401,13 @@ if (try astar.findPathWithMapping(100, 200, &path)) |cost| {
 | `addEdge(from, to, bidirectional)` | Manually add edge |
 | `rebuildPaths()` | Recompute Floyd-Warshall paths |
 | `registerEntity(id, x, y, speed)` | Register entity at position |
-| `registerEntityVec2(id, pos, speed)` | Register entity with Vec2 |
+| `registerEntityPos(id, pos, speed)` | Register entity with Position |
 | `unregisterEntity(id)` | Remove entity |
 | `requestPath(entity, target_node)` | Start pathfinding |
 | `cancelPath(entity)` | Stop movement |
 | `tick(ctx, delta)` | Update all entities |
-| `getPosition(entity)` | Get entity position (returns Vec2) |
-| `getNodePosition(node)` | Get node position (returns Vec2) |
+| `getPosition(entity)` | Get entity position (returns Position) |
+| `getNodePosition(node)` | Get node position (returns Position) |
 | `getSpeed(entity)` | Get entity speed |
 | `setSpeed(entity, speed)` | Set entity speed |
 | `isMoving(entity)` | Check if entity is moving |
@@ -424,10 +424,10 @@ if (try astar.findPathWithMapping(100, 200, &path)) |cost| {
 
 | Method | Description |
 |--------|-------------|
-| `toScreen(col, row)` | Convert grid coords to Vec2 position |
+| `toScreen(col, row)` | Convert grid coords to Position |
 | `toNodeId(col, row)` | Convert grid coords to node ID |
 | `fromNodeId(node_id)` | Convert node ID to {col, row} |
-| `nodePosition(node_id)` | Get Vec2 position for node ID |
+| `nodePosition(node_id)` | Get Position for node ID |
 | `isValid(col, row)` | Check if grid coords are in bounds |
 | `nodeCount()` | Get total number of nodes in grid |
 

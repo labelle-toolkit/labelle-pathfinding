@@ -12,7 +12,6 @@
 //! - Callbacks for path events (node reached, path completed, path blocked)
 
 const std = @import("std");
-const zig_utils = @import("zig_utils");
 const quad_tree = @import("quad_tree.zig");
 const QuadTree = quad_tree.QuadTree;
 const Rectangle = quad_tree.Rectangle;
@@ -21,157 +20,21 @@ const Point2D = quad_tree.Point2D;
 const FloydWarshall = @import("floyd_warshall.zig").FloydWarshall;
 const floyd_warshall_optimized = @import("floyd_warshall_optimized.zig");
 const hooks = @import("hooks.zig");
+const types = @import("types.zig");
 
-/// Vector2 type from zig-utils for position compatibility across labelle ecosystem
-pub const Vec2 = zig_utils.Vector2;
-
-/// Log level for controlling pathfinding engine verbosity
-pub const LogLevel = enum {
-    /// Disable all logging
-    none,
-    /// Critical failures only
-    err,
-    /// Recoverable errors and warnings
-    warning,
-    /// Path requests, entity registration, graph rebuilds
-    info,
-    /// Detailed operational logs: path steps, stair queues, spatial updates
-    debug,
-
-    /// Check if this log level allows messages at the given level
-    pub fn allows(self: LogLevel, level: LogLevel) bool {
-        return @intFromEnum(self) >= @intFromEnum(level);
-    }
-};
-
-/// Node identifier type
-pub const NodeId = u32;
-
-/// Stair mode for vertical connection traffic control
-pub const StairMode = enum {
-    /// Not a stair - no vertical connections (default)
-    none,
-    /// Multi-lane stair - unlimited concurrent usage in any direction
-    all,
-    /// Directional stair - entities can only use if another is going same direction (or empty)
-    direction,
-    /// Single-file stair - only one entity can use at a time
-    single,
-};
-
-/// Vertical direction for stair traversal (re-exported from hooks for compatibility)
-pub const VerticalDirection = hooks.VerticalDirection;
-
-/// Connection mode for automatic graph building
-pub const ConnectionMode = union(enum) {
-    /// Top-down games: connect to N closest neighbors in any direction
-    omnidirectional: struct {
-        max_distance: f32,
-        max_connections: u8,
-    },
-    /// Platformers: connect in 4 cardinal directions
-    directional: struct {
-        horizontal_range: f32,
-        vertical_range: f32,
-    },
-    /// Building games: horizontal connections + stair-based vertical connections
-    building: struct {
-        horizontal_range: f32,
-        floor_height: f32,
-    },
-};
-
-/// Node data stored in the graph
-pub const NodeData = struct {
-    x: f32,
-    y: f32,
-    stair_mode: StairMode = .none,
-};
-
-/// Point with ID for bulk node creation
-pub const NodePoint = struct {
-    id: NodeId,
-    x: f32,
-    y: f32,
-};
-
-/// Grid connection type for createGrid
-pub const GridConnection = enum {
-    /// 4-directional movement (up/down/left/right)
-    four_way,
-    /// 8-directional movement (including diagonals)
-    eight_way,
-};
-
-/// Configuration for creating a grid of nodes
-pub const GridConfig = struct {
-    rows: u32,
-    cols: u32,
-    cell_size: f32,
-    offset_x: f32 = 0,
-    offset_y: f32 = 0,
-    connection: GridConnection = .four_way,
-};
-
-/// Helper struct for working with grid-based nodes.
-/// Provides conversion utilities between grid coordinates and node IDs/positions.
-pub const Grid = struct {
-    rows: u32,
-    cols: u32,
-    cell_size: f32,
-    offset_x: f32,
-    offset_y: f32,
-    start_node_id: NodeId,
-
-    /// Convert grid coordinates to screen/world position
-    pub fn toScreen(self: Grid, col: u32, row: u32) Vec2 {
-        return Vec2{
-            .x = @as(f32, @floatFromInt(col)) * self.cell_size + self.offset_x,
-            .y = @as(f32, @floatFromInt(row)) * self.cell_size + self.offset_y,
-        };
-    }
-
-    /// Convert grid coordinates to node ID
-    pub fn toNodeId(self: Grid, col: u32, row: u32) NodeId {
-        return self.start_node_id + row * self.cols + col;
-    }
-
-    /// Convert node ID to grid coordinates (col, row)
-    pub fn fromNodeId(self: Grid, node_id: NodeId) struct { col: u32, row: u32 } {
-        const local_id = node_id - self.start_node_id;
-        return .{
-            .col = local_id % self.cols,
-            .row = local_id / self.cols,
-        };
-    }
-
-    /// Get the position of a node by its ID
-    pub fn nodePosition(self: Grid, node_id: NodeId) Vec2 {
-        const coords = self.fromNodeId(node_id);
-        return self.toScreen(coords.col, coords.row);
-    }
-
-    /// Check if grid coordinates are valid
-    pub fn isValid(self: Grid, col: u32, row: u32) bool {
-        return col < self.cols and row < self.rows;
-    }
-
-    /// Get total number of nodes in the grid
-    pub fn nodeCount(self: Grid) u32 {
-        return self.rows * self.cols;
-    }
-};
-
-/// Pathfinding engine with comptime configuration
-/// Floyd-Warshall algorithm variant selection
-pub const FloydWarshallVariant = enum {
-    /// Original implementation (ArrayList-based, compatible with older code)
-    legacy,
-    /// Optimized with flat memory layout and SIMD (recommended for large graphs)
-    optimized_simd,
-    /// Optimized with SIMD and multi-threading (best for very large graphs, 100+ nodes)
-    optimized_parallel,
-};
+// Re-export all shared types from types.zig
+pub const Position = types.Position;
+pub const LogLevel = types.LogLevel;
+pub const NodeId = types.NodeId;
+pub const StairMode = types.StairMode;
+pub const VerticalDirection = types.VerticalDirection;
+pub const ConnectionMode = types.ConnectionMode;
+pub const NodeData = types.NodeData;
+pub const NodePoint = types.NodePoint;
+pub const GridConnection = types.GridConnection;
+pub const GridConfig = types.GridConfig;
+pub const Grid = types.Grid;
+pub const FloydWarshallVariant = types.FloydWarshallVariant;
 
 /// Helper to create a simple config struct from Entity and Context types.
 /// Use this for the common case where you don't need advanced options.
@@ -544,28 +407,29 @@ pub fn PathfindingEngine(comptime Config: type) type {
         }
 
         // =======================================================
-        // Vec2 Convenience Methods
+        // Position Convenience Methods
         // =======================================================
 
-        /// Add a node at the given Vec2 position
-        pub fn addNodeVec2(self: *Self, id: NodeId, pos: Vec2) !void {
+        /// Add a node at the given Position
+        pub fn addNodePos(self: *Self, id: NodeId, pos: Position) !void {
             try self.addNode(id, pos.x, pos.y);
         }
 
-        /// Add a node at Vec2 position with stair mode
-        pub fn addNodeVec2WithStairMode(self: *Self, id: NodeId, pos: Vec2, stair_mode: StairMode) !void {
+        /// Add a node at Position with stair mode
+        pub fn addNodePosWithStairMode(self: *Self, id: NodeId, pos: Position, stair_mode: StairMode) !void {
             try self.addNodeWithStairMode(id, pos.x, pos.y, stair_mode);
         }
 
-        /// Add a node at Vec2 position and return auto-generated ID
-        pub fn addNodeAutoVec2(self: *Self, pos: Vec2) !NodeId {
+        /// Add a node at Position and return auto-generated ID
+        pub fn addNodeAutoPos(self: *Self, pos: Position) !NodeId {
             return self.addNodeAuto(pos.x, pos.y);
         }
 
-        /// Add a node at Vec2 position with stair mode and return auto-generated ID
-        pub fn addNodeAutoVec2WithStairMode(self: *Self, pos: Vec2, stair_mode: StairMode) !NodeId {
+        /// Add a node at Position with stair mode and return auto-generated ID
+        pub fn addNodeAutoPosWithStairMode(self: *Self, pos: Position, stair_mode: StairMode) !NodeId {
             return self.addNodeAutoWithStairMode(pos.x, pos.y, stair_mode);
         }
+
 
         /// Clear all nodes and edges
         pub fn clearGraph(self: *Self) void {
@@ -1017,10 +881,11 @@ pub fn PathfindingEngine(comptime Config: type) type {
             _ = self.entity_spatial.insert(.{ .id = entity, .x = x, .y = y });
         }
 
-        /// Register an entity at a Vec2 position (snaps to nearest node)
-        pub fn registerEntityVec2(self: *Self, entity: Entity, pos: Vec2, speed: f32) !void {
+        /// Register an entity at a Position (snaps to nearest node)
+        pub fn registerEntityPos(self: *Self, entity: Entity, pos: Position, speed: f32) !void {
             try self.registerEntity(entity, pos.x, pos.y, speed);
         }
+
 
         /// Unregister an entity
         pub fn unregisterEntity(self: *Self, entity: Entity) void {
@@ -1138,10 +1003,10 @@ pub fn PathfindingEngine(comptime Config: type) type {
         // Position Queries
         // =======================================================
 
-        /// Get entity position as Vec2
-        pub fn getPosition(self: *Self, entity: Entity) ?Vec2 {
+        /// Get entity position as Position
+        pub fn getPosition(self: *Self, entity: Entity) ?Position {
             if (self.entities.get(entity)) |pos| {
-                return Vec2{ .x = pos.x, .y = pos.y };
+                return Position{ .x = pos.x, .y = pos.y };
             }
             return null;
         }
@@ -1524,7 +1389,18 @@ pub fn PathfindingEngine(comptime Config: type) type {
         // Helpers
         // =======================================================
 
-        fn findNearestNode(self: *Self, x: f32, y: f32) !NodeId {
+        /// Options for filtering nearest node queries
+        pub const NearestNodeOptions = struct {
+            /// If set, skip nodes where node.y > query.y + max_y_delta.
+            /// Useful for floor-aware lookups in multi-story buildings where
+            /// entities should connect to nodes on their floor or above only.
+            max_y_delta: ?f32 = null,
+        };
+
+        /// Find the nearest node to a position, with optional filtering.
+        /// For floor-aware lookups, set `opts.max_y_delta` to constrain
+        /// which nodes are considered (e.g. only same floor or above).
+        pub fn findNearestNodeFiltered(self: *Self, x: f32, y: f32, opts: NearestNodeOptions) !NodeId {
             var buffer: std.ArrayListUnmanaged(EntityPoint(NodeId)) = .{};
             defer buffer.deinit(self.allocator);
 
@@ -1535,11 +1411,16 @@ pub fn PathfindingEngine(comptime Config: type) type {
                 try self.node_spatial.queryRadius(x, y, radius, &buffer);
 
                 if (buffer.items.len > 0) {
-                    // Find closest
+                    // Find closest with optional Y-delta filtering
                     var closest: ?NodeId = null;
                     var closest_dist: f32 = std.math.inf(f32);
 
                     for (buffer.items) |node| {
+                        // Y-delta filter: skip nodes below the query position
+                        if (opts.max_y_delta) |max_dy| {
+                            if (node.y > y + max_dy) continue;
+                        }
+
                         const ndx = node.x - x;
                         const ndy = node.y - y;
                         const ndist = ndx * ndx + ndy * ndy;
@@ -1558,10 +1439,14 @@ pub fn PathfindingEngine(comptime Config: type) type {
             return error.NoNodesFound;
         }
 
-        /// Get node position as Vec2
-        pub fn getNodePosition(self: *Self, node: NodeId) ?Vec2 {
+        fn findNearestNode(self: *Self, x: f32, y: f32) !NodeId {
+            return self.findNearestNodeFiltered(x, y, .{});
+        }
+
+        /// Get node position as Position
+        pub fn getNodePosition(self: *Self, node: NodeId) ?Position {
             if (self.nodes.get(node)) |data| {
-                return Vec2{ .x = data.x, .y = data.y };
+                return Position{ .x = data.x, .y = data.y };
             }
             return null;
         }

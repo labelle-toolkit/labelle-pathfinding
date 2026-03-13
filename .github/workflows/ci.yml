@@ -14,6 +14,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Checkout labelle-core
+        run: git clone --depth 1 https://github.com/labelle-toolkit/labelle-core.git ../labelle-core
+
       - name: Setup Zig
         uses: mlugg/setup-zig@v2
         with:
