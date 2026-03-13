@@ -3,7 +3,6 @@
 //! Contains node data, connection modes, grid helpers, and other types
 //! used across the pathfinding engine and its submodules.
 
-const std = @import("std");
 const core = @import("labelle-core");
 
 /// Position type from labelle-core for consistency across the labelle ecosystem
@@ -155,4 +154,7 @@ pub const FloydWarshallVariant = enum {
 };
 
 /// Vertical direction for stair traversal
-pub const VerticalDirection = @import("hooks.zig").VerticalDirection;
+pub const VerticalDirection = enum {
+    up,
+    down,
+};

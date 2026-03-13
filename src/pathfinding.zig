@@ -128,12 +128,12 @@ pub const Components = struct {
     pub const NodePoint = types.NodePoint;
     /// A marker component for entities that are movement nodes in the pathfinding graph.
     pub const MovementNode = struct {
-        node_id: u32 = 0,
+        node_id: types.NodeId = 0,
     };
     /// Tracks the closest movement node to an entity, updated by pathfinding queries.
     pub const ClosestMovementNode = struct {
         node_entity: u64 = 0,
-        node_id: u32 = 0,
+        node_id: types.NodeId = 0,
         distance: f32 = 0.0,
     };
 };

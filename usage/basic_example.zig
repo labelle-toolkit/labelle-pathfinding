@@ -90,7 +90,7 @@ pub fn main() !void {
     // ===== Step 6: Query final position =====
     print("\n6. Final state:\n", .{});
 
-    // getPosition returns Position from zig-utils for ecosystem compatibility
+    // getPosition returns Position from labelle-core for ecosystem compatibility
     const final_pos: Position = engine.getPosition(player).?;
     const current_node = engine.getCurrentNode(player).?;
 

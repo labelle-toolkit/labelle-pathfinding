@@ -50,11 +50,8 @@
 
 const std = @import("std");
 
-/// Vertical direction for stair traversal (re-exported from engine)
-pub const VerticalDirection = enum {
-    up,
-    down,
-};
+/// Vertical direction for stair traversal
+pub const VerticalDirection = @import("types.zig").VerticalDirection;
 
 /// Built-in hooks for pathfinding lifecycle events.
 /// Games can register handlers for any of these hooks.

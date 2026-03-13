@@ -12,7 +12,6 @@
 //! - Callbacks for path events (node reached, path completed, path blocked)
 
 const std = @import("std");
-const zig_utils = @import("zig_utils");
 const quad_tree = @import("quad_tree.zig");
 const QuadTree = quad_tree.QuadTree;
 const Rectangle = quad_tree.Rectangle;
