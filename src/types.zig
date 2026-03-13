@@ -9,8 +9,6 @@ const core = @import("labelle-core");
 /// Position type from labelle-core for consistency across the labelle ecosystem
 pub const Position = core.Position;
 
-/// Backwards compatibility alias (deprecated: use Position instead)
-pub const Vec2 = Position;
 
 /// Node identifier type
 pub const NodeId = u32;

@@ -5,7 +5,7 @@
 //! .zon entity definitions.
 //!
 //! When labelle-pathfinding is added as a plugin to a labelle-engine project,
-//! its exported Components (Vec2, NodeId, NodePoint) become available in the
+//! its exported Components (Position, NodeId, NodePoint, MovementNode, ClosestMovementNode) become available in the
 //! component registry automatically.
 
 const std = @import("std");
@@ -43,23 +43,22 @@ pub fn main() !void {
 
     // Demonstrate that pathfinding components are accessible through the registry
     print("1. Checking component availability in registry:\n", .{});
-    print("   - Vec2: {}\n", .{Components.has("Vec2")});
+    print("   - Position: {}\n", .{Components.has("Position")});
     print("   - NodeId: {}\n", .{Components.has("NodeId")});
     print("   - NodePoint: {}\n", .{Components.has("NodePoint")});
-    print("   - Position (engine): {}\n", .{Components.has("Position")});
     print("   - Sprite (engine): {}\n", .{Components.has("Sprite")});
 
     // Show the types
     print("\n2. Component type information:\n", .{});
-    print("   - Vec2 type: {s}\n", .{@typeName(Components.getType("Vec2"))});
+    print("   - Position type: {s}\n", .{@typeName(Components.getType("Position"))});
     print("   - NodeId type: {s}\n", .{@typeName(Components.getType("NodeId"))});
     print("   - NodePoint type: {s}\n", .{@typeName(Components.getType("NodePoint"))});
 
     // Create instances of pathfinding components
     print("\n3. Creating component instances:\n", .{});
 
-    const vec2: pathfinding.Components.Vec2 = .{ .x = 100.0, .y = 200.0 };
-    print("   - Vec2: ({d:.1}, {d:.1})\n", .{ vec2.x, vec2.y });
+    const pos: pathfinding.Components.Position = .{ .x = 100.0, .y = 200.0 };
+    print("   - Position: ({d:.1}, {d:.1})\n", .{ pos.x, pos.y });
 
     const node_id: pathfinding.Components.NodeId = 42;
     print("   - NodeId: {d}\n", .{node_id});
@@ -71,7 +70,7 @@ pub fn main() !void {
     print("\n4. Example .zon entity definition:\n", .{});
     print(
         \\   .components = .{{
-        \\       .Vec2 = .{{ .x = 10.0, .y = 20.0 }},
+        \\       .Position = .{{ .x = 10.0, .y = 20.0 }},
         \\       .NodePoint = .{{ .id = 5, .x = 100, .y = 200 }},
         \\   }}
         \\

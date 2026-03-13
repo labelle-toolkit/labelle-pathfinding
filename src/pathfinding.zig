@@ -101,7 +101,6 @@ const std = @import("std");
 // Shared types (extracted from engine.zig)
 pub const types = @import("types.zig");
 pub const Position = types.Position;
-pub const Vec2 = types.Vec2;
 pub const ConnectionMode = types.ConnectionMode;
 pub const NodeId = types.NodeId;
 pub const NodeData = types.NodeData;
@@ -125,8 +124,6 @@ pub const SimpleConfig = engine.SimpleConfig;
 /// in the component registry for use in .zon entity definitions.
 pub const Components = struct {
     pub const Position = types.Position;
-    /// Backwards compatibility alias (deprecated: use Position instead)
-    pub const Vec2 = types.Position;
     pub const NodeId = types.NodeId;
     pub const NodePoint = types.NodePoint;
     /// A marker component for entities that are movement nodes in the pathfinding graph.

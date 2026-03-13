@@ -25,7 +25,6 @@ const types = @import("types.zig");
 
 // Re-export all shared types from types.zig
 pub const Position = types.Position;
-pub const Vec2 = types.Vec2;
 pub const LogLevel = types.LogLevel;
 pub const NodeId = types.NodeId;
 pub const StairMode = types.StairMode;
@@ -432,11 +431,6 @@ pub fn PathfindingEngine(comptime Config: type) type {
             return self.addNodeAutoWithStairMode(pos.x, pos.y, stair_mode);
         }
 
-        // Backwards compatibility aliases (deprecated: use Pos variants)
-        pub const addNodeVec2 = addNodePos;
-        pub const addNodeVec2WithStairMode = addNodePosWithStairMode;
-        pub const addNodeAutoVec2 = addNodeAutoPos;
-        pub const addNodeAutoVec2WithStairMode = addNodeAutoPosWithStairMode;
 
         /// Clear all nodes and edges
         pub fn clearGraph(self: *Self) void {
@@ -893,8 +887,6 @@ pub fn PathfindingEngine(comptime Config: type) type {
             try self.registerEntity(entity, pos.x, pos.y, speed);
         }
 
-        /// Backwards compatibility alias (deprecated: use registerEntityPos)
-        pub const registerEntityVec2 = registerEntityPos;
 
         /// Unregister an entity
         pub fn unregisterEntity(self: *Self, entity: Entity) void {
