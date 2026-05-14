@@ -27,7 +27,7 @@ const GameState = struct {
     fn init(allocator: std.mem.Allocator) GameState {
         return .{
             .entities = std.AutoHashMap(EntityId, EntityType).init(allocator),
-            .events = .{},
+            .events = .empty,
             .allocator = allocator,
         };
     }
@@ -93,7 +93,7 @@ fn onPathBlocked(game: *GameState, entity: EntityId, node: pathfinding.NodeId) v
 }
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}).init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 

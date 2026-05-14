@@ -20,7 +20,7 @@ pub const QuadTreeSpec = struct {
             try expect.toBeTrue(qt.insert(.{ .id = 3, .x = 80, .y = 80 }));
 
             // Query rectangle
-            var buffer: std.ArrayListUnmanaged(quad_tree.EntityPoint(u32)) = .{};
+            var buffer: std.ArrayListUnmanaged(quad_tree.EntityPoint(u32)) = .empty;
             defer buffer.deinit(allocator);
 
             try qt.queryRect(.{ .x = 0, .y = 0, .width = 50, .height = 50 }, &buffer);
@@ -37,7 +37,7 @@ pub const QuadTreeSpec = struct {
             _ = qt.insert(.{ .id = 2, .x = 20, .y = 20 });
             _ = qt.insert(.{ .id = 3, .x = 80, .y = 80 });
 
-            var buffer: std.ArrayListUnmanaged(quad_tree.EntityPoint(u32)) = .{};
+            var buffer: std.ArrayListUnmanaged(quad_tree.EntityPoint(u32)) = .empty;
             defer buffer.deinit(allocator);
 
             try qt.queryRadius(10, 10, 15, &buffer);
@@ -55,7 +55,7 @@ pub const QuadTreeSpec = struct {
 
             try expect.toBeTrue(qt.remove(1));
 
-            var buffer: std.ArrayListUnmanaged(quad_tree.EntityPoint(u32)) = .{};
+            var buffer: std.ArrayListUnmanaged(quad_tree.EntityPoint(u32)) = .empty;
             defer buffer.deinit(allocator);
 
             try qt.queryRect(.{ .x = 0, .y = 0, .width = 50, .height = 50 }, &buffer);
@@ -75,7 +75,7 @@ pub const QuadTreeSpec = struct {
                 _ = qt.insert(.{ .id = @intCast(i), .x = @floatFromInt(i * 10), .y = @floatFromInt(i * 10) });
             }
 
-            var buffer: std.ArrayListUnmanaged(quad_tree.EntityPoint(u32)) = .{};
+            var buffer: std.ArrayListUnmanaged(quad_tree.EntityPoint(u32)) = .empty;
             defer buffer.deinit(allocator);
 
             try qt.queryRect(.{ .x = 0, .y = 0, .width = 100, .height = 100 }, &buffer);

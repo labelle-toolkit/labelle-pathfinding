@@ -176,7 +176,7 @@ pub fn PathfindingEngine(comptime Config: type) type {
             mode: StairMode,
             current_direction: ?VerticalDirection = null,
             users_count: u32 = 0,
-            waiting_queue: std.ArrayListUnmanaged(Entity) = .{},
+            waiting_queue: std.ArrayListUnmanaged(Entity) = .empty,
 
             pub fn canEnter(self: *const StairState, dir: VerticalDirection) bool {
                 return switch (self.mode) {
@@ -211,7 +211,7 @@ pub fn PathfindingEngine(comptime Config: type) type {
         /// Waiting area for entities queued at a stair
         pub const WaitingArea = struct {
             stair_node: NodeId,
-            waiting_spots: std.ArrayListUnmanaged(NodeId) = .{},
+            waiting_spots: std.ArrayListUnmanaged(NodeId) = .empty,
             /// Tracks which spots are occupied (spot NodeId -> occupying Entity)
             occupied_spots: std.AutoHashMap(NodeId, Entity) = undefined,
 
@@ -296,11 +296,11 @@ pub fn PathfindingEngine(comptime Config: type) type {
                 .entity_spatial = try QuadTree(Entity).init(allocator, .{ .x = -50000, .y = -50000, .width = 100000, .height = 100000 }),
                 .stair_states = std.AutoHashMap(NodeId, StairState).init(allocator),
                 .waiting_areas = std.AutoHashMap(NodeId, WaitingArea).init(allocator),
-                .node_reached_events = .{},
-                .path_completed_events = .{},
-                .path_blocked_events = .{},
-                .waiting_started_events = .{},
-                .waiting_ended_events = .{},
+                .node_reached_events = .empty,
+                .path_completed_events = .empty,
+                .path_blocked_events = .empty,
+                .waiting_started_events = .empty,
+                .waiting_ended_events = .empty,
             };
         }
 
@@ -469,7 +469,7 @@ pub fn PathfindingEngine(comptime Config: type) type {
             self.directional_edges.clearRetainingCapacity();
 
             // Rebuild node spatial index
-            var points: std.ArrayListUnmanaged(Point2D) = .{};
+            var points: std.ArrayListUnmanaged(Point2D) = .empty;
             defer points.deinit(self.allocator);
 
             var node_iter = self.nodes.iterator();
@@ -574,7 +574,7 @@ pub fn PathfindingEngine(comptime Config: type) type {
         }
 
         fn connectOmnidirectional(self: *Self, max_distance: f32, max_connections: u8) !void {
-            var buffer: std.ArrayListUnmanaged(EntityPoint(NodeId)) = .{};
+            var buffer: std.ArrayListUnmanaged(EntityPoint(NodeId)) = .empty;
             defer buffer.deinit(self.allocator);
 
             var node_iter = self.nodes.iterator();
@@ -612,7 +612,7 @@ pub fn PathfindingEngine(comptime Config: type) type {
         }
 
         fn connectDirectional(self: *Self, horizontal_range: f32, vertical_range: f32) !void {
-            var buffer: std.ArrayListUnmanaged(EntityPoint(NodeId)) = .{};
+            var buffer: std.ArrayListUnmanaged(EntityPoint(NodeId)) = .empty;
             defer buffer.deinit(self.allocator);
 
             var node_iter = self.nodes.iterator();
@@ -675,7 +675,7 @@ pub fn PathfindingEngine(comptime Config: type) type {
         /// Building mode: horizontal connections + stair-based vertical connections
         /// Vertical connections only occur between stair nodes
         fn connectBuilding(self: *Self, horizontal_range: f32, floor_height: f32) !void {
-            var buffer: std.ArrayListUnmanaged(EntityPoint(NodeId)) = .{};
+            var buffer: std.ArrayListUnmanaged(EntityPoint(NodeId)) = .empty;
             defer buffer.deinit(self.allocator);
 
             var node_iter = self.nodes.iterator();
@@ -787,7 +787,7 @@ pub fn PathfindingEngine(comptime Config: type) type {
         fn addEdgeInternal(self: *Self, from: NodeId, to: NodeId) !void {
             const entry = try self.edges.getOrPut(from);
             if (!entry.found_existing) {
-                entry.value_ptr.* = .{};
+                entry.value_ptr.* = .empty;
             }
             // Check if edge already exists
             for (entry.value_ptr.items) |existing| {
@@ -873,7 +873,7 @@ pub fn PathfindingEngine(comptime Config: type) type {
                 .edge_progress = 0,
                 .target_node = null,
                 .speed = speed,
-                .path = .{},
+                .path = .empty,
                 .path_index = 0,
             };
 
@@ -970,7 +970,7 @@ pub fn PathfindingEngine(comptime Config: type) type {
                 return error.NoPathExists;
             }
 
-            var path_list: std.ArrayListUnmanaged(u32) = .{};
+            var path_list: std.ArrayListUnmanaged(u32) = .empty;
             defer path_list.deinit(self.allocator);
             try self.floyd_warshall.setPathWithMappingUnmanaged(self.allocator, &path_list, pos.current_node, target);
 
@@ -1038,7 +1038,7 @@ pub fn PathfindingEngine(comptime Config: type) type {
 
         /// Get all entities within a radius
         pub fn getEntitiesInRadius(self: *Self, x: f32, y: f32, radius: f32, buffer: []Entity) []Entity {
-            var result_buffer: std.ArrayListUnmanaged(EntityPoint(Entity)) = .{};
+            var result_buffer: std.ArrayListUnmanaged(EntityPoint(Entity)) = .empty;
             defer result_buffer.deinit(self.allocator);
 
             self.entity_spatial.queryRadius(x, y, radius, &result_buffer) catch return buffer[0..0];
@@ -1060,7 +1060,7 @@ pub fn PathfindingEngine(comptime Config: type) type {
 
         /// Get all entities within a rectangle
         pub fn getEntitiesInRect(self: *Self, x: f32, y: f32, w: f32, h: f32, buffer: []Entity) []Entity {
-            var result_buffer: std.ArrayListUnmanaged(EntityPoint(Entity)) = .{};
+            var result_buffer: std.ArrayListUnmanaged(EntityPoint(Entity)) = .empty;
             defer result_buffer.deinit(self.allocator);
 
             self.entity_spatial.queryRect(.{ .x = x, .y = y, .width = w, .height = h }, &result_buffer) catch return buffer[0..0];
@@ -1401,7 +1401,7 @@ pub fn PathfindingEngine(comptime Config: type) type {
         /// For floor-aware lookups, set `opts.max_y_delta` to constrain
         /// which nodes are considered (e.g. only same floor or above).
         pub fn findNearestNodeFiltered(self: *Self, x: f32, y: f32, opts: NearestNodeOptions) !NodeId {
-            var buffer: std.ArrayListUnmanaged(EntityPoint(NodeId)) = .{};
+            var buffer: std.ArrayListUnmanaged(EntityPoint(NodeId)) = .empty;
             defer buffer.deinit(self.allocator);
 
             // Start with a small radius and expand
@@ -1654,7 +1654,7 @@ pub fn PathfindingEngine(comptime Config: type) type {
         /// The returned struct contains all node connections with their distances.
         /// Caller must call deinit() on the returned struct to free memory.
         pub fn getDebugConnectionMatrix(self: *Self) !DebugConnectionMatrix {
-            var entries: std.ArrayListUnmanaged(ConnectionEntry) = .{};
+            var entries: std.ArrayListUnmanaged(ConnectionEntry) = .empty;
             defer entries.deinit(self.allocator);
 
             // Iterate through all edges and get distances from Floyd-Warshall

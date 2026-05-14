@@ -2,22 +2,22 @@
     .name = .labelle_pathfinding,
     .version = "2.7.0",
     .fingerprint = 0x15f62ccc39d14685,
-    .minimum_zig_version = "0.15.2",
+    .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .zig_utils = .{
-            .url = "git+https://github.com/labelle-toolkit/zig-utils#0eb76432845d30a8744d0f1e7b2f184bde30ef25",
-            .hash = "zig_utils-0.1.0-dUo89-MYAABNGtQuVNvsszZwByyjALW-LLaqVZYTkI_I",
+            .url = "git+https://github.com/labelle-toolkit/zig-utils.git?ref=feat/zig-0.16-migration#fa5758304d113679d9bd82187b2bad5fde95554e",
+            .hash = "zig_utils-0.6.1-dUo895zOAQAfpupehxPVlrar8v-EktyljpxzVal5jeJ4",
         },
         .labelle_core = .{
             .path = "../labelle-core",
         },
         .zspec = .{
-            .url = "https://github.com/apotema/zspec/archive/refs/heads/main.tar.gz",
-            .hash = "zspec-0.7.0-jaKLbVqmAwDxLB7GYHuw354BQp7_uBSN9rSBUIfAx5xy",
+            .url = "git+https://github.com/apotema/zspec.git?ref=feat/zig-0.16-migration#42e1e69e31a6971c93e6807d29eabe30d9f46bd6",
+            .hash = "zspec-0.8.0-jaKLbe3SAwDRIFxFJbSQvz_lr9Xn-trRT9KR16I8C5_P",
         },
         .raylib_zig = .{
-            .url = "git+https://github.com/raylib-zig/raylib-zig#a4d18b2d1cf8fdddec68b5b084535fca0475f466",
-            .hash = "raylib_zig-5.6.0-dev-KE8REL5MBQAf3p497t52Xw9P7ojndIkVOWPXnLiLLw2P",
+            .url = "git+https://github.com/raylib-zig/raylib-zig?ref=devel#f25c5173b4c40ef53c7ccf6d8d51ead0892f9f22",
+            .hash = "raylib_zig-6.0.0-KE8REDJ4BQBu7lKwYNt6R4j5ywPeS37zqW6zrtjCcRwH",
         },
     },
     .paths = .{
