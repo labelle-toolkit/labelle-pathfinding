@@ -18,8 +18,15 @@ const FloydWarshallParallel = pathfinding.FloydWarshallParallel;
 
 const print = std.debug.print;
 
+/// Returns a monotonic nanosecond timestamp.
+fn nowNs() i128 {
+    var ts: std.c.timespec = undefined;
+    _ = std.c.clock_gettime(std.c.CLOCK.MONOTONIC, &ts);
+    return @as(i128, ts.sec) * std.time.ns_per_s + @as(i128, ts.nsec);
+}
+
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}).init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -83,11 +90,11 @@ fn benchmarkLegacy(allocator: std.mem.Allocator, size: u32) !f64 {
     createDenseGraph(&fw, size);
 
     // Measure generation time
-    var timer = try std.time.Timer.start();
+    const start_ns = nowNs();
 
     fw.generate();
 
-    const elapsed = timer.read();
+    const elapsed = nowNs() - start_ns;
     return @as(f64, @floatFromInt(elapsed)) / std.time.ns_per_ms;
 }
 
@@ -102,11 +109,11 @@ fn benchmarkSimd(allocator: std.mem.Allocator, size: u32) !f64 {
     createDenseGraph(&fw, size);
 
     // Measure generation time
-    var timer = try std.time.Timer.start();
+    const start_ns = nowNs();
 
     fw.generate();
 
-    const elapsed = timer.read();
+    const elapsed = nowNs() - start_ns;
     return @as(f64, @floatFromInt(elapsed)) / std.time.ns_per_ms;
 }
 
@@ -121,11 +128,11 @@ fn benchmarkParallel(allocator: std.mem.Allocator, size: u32) !f64 {
     createDenseGraph(&fw, size);
 
     // Measure generation time
-    var timer = try std.time.Timer.start();
+    const start_ns = nowNs();
 
     fw.generate();
 
-    const elapsed = timer.read();
+    const elapsed = nowNs() - start_ns;
     return @as(f64, @floatFromInt(elapsed)) / std.time.ns_per_ms;
 }
 

@@ -92,7 +92,7 @@ pub const FloydWarshallOptimizedSpec = struct {
         }
 
         test "reconstructs full path" {
-            var path_list = std.ArrayListUnmanaged(u32){};
+            var path_list = std.ArrayListUnmanaged(u32).empty;
             defer path_list.deinit(std.testing.allocator);
 
             try fw.setPathWithMappingUnmanaged(std.testing.allocator, &path_list, 100, 400);

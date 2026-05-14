@@ -86,7 +86,7 @@ const COLORS = struct {
 };
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}).init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -215,13 +215,13 @@ fn rebuildBuilding(game: *Game) !void {
         y: f32,
         speed: f32,
     };
-    var saved_entities = std.ArrayList(EntityState).init(game.allocator);
-    defer saved_entities.deinit();
+    var saved_entities: std.ArrayList(EntityState) = .empty;
+    defer saved_entities.deinit(game.allocator);
 
     for (0..game.next_entity_id) |i| {
         const entity: u32 = @intCast(i);
         if (game.engine.getPosition(entity)) |pos| {
-            saved_entities.append(.{
+            saved_entities.append(game.allocator, .{
                 .x = pos.x,
                 .y = pos.y,
                 .speed = game.engine.getSpeed(entity) orelse 80.0,

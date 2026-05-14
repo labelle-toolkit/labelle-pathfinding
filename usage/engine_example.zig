@@ -41,7 +41,7 @@ fn onPathCompleted(game: *Game, entity: GameEntity, node: pathfinding.NodeId) vo
 }
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}).init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 

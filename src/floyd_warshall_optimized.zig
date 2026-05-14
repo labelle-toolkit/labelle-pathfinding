@@ -596,7 +596,7 @@ test "FloydWarshallOptimized path reconstruction" {
 
     fw.generate();
 
-    var path = std.ArrayListUnmanaged(u32){};
+    var path = std.ArrayListUnmanaged(u32).empty;
     defer path.deinit(allocator);
 
     try fw.setPathWithMappingUnmanaged(allocator, &path, 10, 40);

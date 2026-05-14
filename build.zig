@@ -227,7 +227,7 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    raylib_example.linkLibrary(raylib_artifact);
+    raylib_example.root_module.linkLibrary(raylib_artifact);
     b.installArtifact(raylib_example);
 
     const run_raylib = b.addRunArtifact(raylib_example);
@@ -247,7 +247,7 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    raylib_building.linkLibrary(raylib_artifact);
+    raylib_building.root_module.linkLibrary(raylib_artifact);
     b.installArtifact(raylib_building);
 
     const run_raylib_building = b.addRunArtifact(raylib_building);

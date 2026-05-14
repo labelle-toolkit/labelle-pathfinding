@@ -201,15 +201,15 @@ pub const AStar = struct {
         var closed_set = std.AutoHashMap(u32, void).init(self.allocator);
         defer closed_set.deinit();
 
-        var open_set = std.PriorityQueue(PQNode, void, PQNode.compare).init(self.allocator, {});
-        defer open_set.deinit();
+        var open_set = std.PriorityQueue(PQNode, void, PQNode.compare).initContext({});
+        defer open_set.deinit(self.allocator);
 
         // Initialize source
         try g_score.put(source, 0);
         const h = self.calculateHeuristic(source, dest);
-        try open_set.add(.{ .vertex = source, .f_score = h });
+        try open_set.push(self.allocator, .{ .vertex = source, .f_score = h });
 
-        while (open_set.removeOrNull()) |current| {
+        while (open_set.pop()) |current| {
             if (current.vertex == dest) {
                 // Reconstruct path
                 var node = dest;
@@ -247,7 +247,7 @@ pub const AStar = struct {
                     try g_score.put(edge.to, tentative_g);
 
                     const f = @as(f32, @floatFromInt(tentative_g)) + self.calculateHeuristic(edge.to, dest);
-                    try open_set.add(.{ .vertex = edge.to, .f_score = f });
+                    try open_set.push(self.allocator, .{ .vertex = edge.to, .f_score = f });
                 }
             }
         }
@@ -488,15 +488,15 @@ pub fn AStarWithHooks(comptime Dispatcher: type) type {
             var closed_set = std.AutoHashMap(u32, void).init(self.base.allocator);
             defer closed_set.deinit();
 
-            var open_set = std.PriorityQueue(AStar.PQNode, void, AStar.PQNode.compare).init(self.base.allocator, {});
-            defer open_set.deinit();
+            var open_set = std.PriorityQueue(AStar.PQNode, void, AStar.PQNode.compare).initContext({});
+            defer open_set.deinit(self.base.allocator);
 
             // Initialize source
             try g_score.put(source, 0);
             const h = self.base.calculateHeuristic(source, dest);
-            try open_set.add(.{ .vertex = source, .f_score = h });
+            try open_set.push(self.base.allocator, .{ .vertex = source, .f_score = h });
 
-            while (open_set.removeOrNull()) |current| {
+            while (open_set.pop()) |current| {
                 nodes_explored += 1;
 
                 const current_g = g_score.get(current.vertex) orelse INF;
@@ -537,7 +537,7 @@ pub fn AStarWithHooks(comptime Dispatcher: type) type {
                         try g_score.put(edge.to, tentative_g);
 
                         const f = @as(f32, @floatFromInt(tentative_g)) + self.base.calculateHeuristic(edge.to, dest);
-                        try open_set.add(.{ .vertex = edge.to, .f_score = f });
+                        try open_set.push(self.base.allocator, .{ .vertex = edge.to, .f_score = f });
                     }
                 }
             }
@@ -618,15 +618,15 @@ pub fn AStarWithHooks(comptime Dispatcher: type) type {
             var closed_set = std.AutoHashMap(u32, void).init(self.base.allocator);
             defer closed_set.deinit();
 
-            var open_set = std.PriorityQueue(AStar.PQNode, void, AStar.PQNode.compare).init(self.base.allocator, {});
-            defer open_set.deinit();
+            var open_set = std.PriorityQueue(AStar.PQNode, void, AStar.PQNode.compare).initContext({});
+            defer open_set.deinit(self.base.allocator);
 
             // Initialize source
             try g_score.put(source, 0);
             const h = self.base.calculateHeuristic(source, dest);
-            try open_set.add(.{ .vertex = source, .f_score = h });
+            try open_set.push(self.base.allocator, .{ .vertex = source, .f_score = h });
 
-            while (open_set.removeOrNull()) |current| {
+            while (open_set.pop()) |current| {
                 nodes_explored += 1;
 
                 const current_g = g_score.get(current.vertex) orelse INF;
@@ -689,7 +689,7 @@ pub fn AStarWithHooks(comptime Dispatcher: type) type {
                         try g_score.put(edge.to, tentative_g);
 
                         const f = @as(f32, @floatFromInt(tentative_g)) + self.base.calculateHeuristic(edge.to, dest);
-                        try open_set.add(.{ .vertex = edge.to, .f_score = f });
+                        try open_set.push(self.base.allocator, .{ .vertex = edge.to, .f_score = f });
                     }
                 }
             }

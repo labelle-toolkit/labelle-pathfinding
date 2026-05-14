@@ -77,7 +77,7 @@ pub fn QuadTree(comptime T: type) type {
 
         pub fn init(allocator: std.mem.Allocator, boundary: Rectangle) !Self {
             var qt = Self{
-                .nodes = .{},
+                .nodes = .empty,
                 .allocator = allocator,
             };
             try qt.nodes.append(allocator, .{ .boundary = boundary });
