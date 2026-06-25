@@ -14,29 +14,24 @@ pub fn build(b: *std.Build) void {
 
     // Main module — navigation layer (Controller + pure engine) at the top level,
     // standalone algorithm core under `.algo`.
-    const module_imports = [_]std.Build.Module.Import{
-        .{ .name = "zig_utils", .module = zig_utils },
-        .{ .name = "labelle-core", .module = core_mod },
-    };
     const pathfinding_module = b.addModule("labelle_pathfinding", .{
         .root_source_file = b.path("src/pathfinding.zig"),
         .target = target,
         .optimize = optimize,
-        .imports = &module_imports,
+        .imports = &.{
+            .{ .name = "zig_utils", .module = zig_utils },
+            .{ .name = "labelle-core", .module = core_mod },
+        },
     });
 
     // The labelle assembler consumes this package as the `pathfinder` plugin and
     // requests the module by the convention name `labelle_<pluginname>` =
-    // `labelle_pathfinder` (build_files.zig). Expose that spelling as an alias of
-    // the same source, so both the plugin path (`labelle_pathfinder`) and the
-    // package-name spelling (`labelle_pathfinding`, used by standalone consumers
-    // + the README) resolve.
-    _ = b.addModule("labelle_pathfinder", .{
-        .root_source_file = b.path("src/pathfinding.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &module_imports,
-    });
+    // `labelle_pathfinder` (build_files.zig). Register the SAME module instance
+    // under that spelling — not a second addModule, which would be a distinct
+    // module (breaking type identity if a consumer mixed the two names, and
+    // compiling the source twice). Both `labelle_pathfinder` and the package-name
+    // spelling `labelle_pathfinding` now resolve to one module.
+    b.modules.put(b.allocator, "labelle_pathfinder", pathfinding_module) catch @panic("OOM");
 
     // Unit tests (refAllDecls over the nav layer + algorithm core).
     const unit_tests = b.addTest(.{
