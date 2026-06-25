@@ -179,6 +179,12 @@ pub const Graph = struct {
 
     fn addBidirectionalEdge(self: *Graph, a: NodeId, b: NodeId, cost: f32) !void {
         try self.edges.items[a].append(self.allocator, .{ .to = b, .cost = cost });
+        // If the second append OOMs, roll back the first so the graph is never
+        // left half-connected (a→b without b→a). `pop` drops exactly the edge we
+        // just appended.
+        errdefer {
+            _ = self.edges.items[a].pop();
+        }
         try self.edges.items[b].append(self.allocator, .{ .to = a, .cost = cost });
     }
 

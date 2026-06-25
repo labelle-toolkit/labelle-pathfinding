@@ -116,10 +116,14 @@ pub fn PathfinderWith(
                 positions[i] = self.graph.getPosition(node_id);
             }
 
-            // Cancel any existing navigation for this entity
-            if (self.active.getPtr(entity)) |existing| {
-                self.allocator.free(existing.path.positions);
-                self.allocator.free(existing.path.node_path);
+            // Secure the map slot *before* freeing the old buffers: `getOrPut`
+            // can OOM, and if it did so after we'd already freed the previous
+            // path, the surviving entry would point at freed memory
+            // (use-after-free / double-free on the next access or cleanup).
+            const gop = try self.active.getOrPut(self.allocator, entity);
+            if (gop.found_existing) {
+                self.allocator.free(gop.value_ptr.path.positions);
+                self.allocator.free(gop.value_ptr.path.node_path);
             }
 
             // Start at index 0 always. Index 0 is the snapped `from_node`
@@ -139,7 +143,7 @@ pub fn PathfinderWith(
             // Including `wp[0]` keeps every leg axis-aligned with the graph.
             const start_idx: u32 = 0;
 
-            const entry = NavigationEntry{
+            gop.value_ptr.* = NavigationEntry{
                 .path = .{
                     .positions = positions,
                     .node_path = node_path,
@@ -149,9 +153,7 @@ pub fn PathfinderWith(
                     .goal_node = to_node,
                 },
             };
-
-            try self.active.put(self.allocator, entity, entry);
-            return &self.active.getPtr(entity).?.path;
+            return &gop.value_ptr.path;
         }
 
         /// Cancel navigation for an entity.
