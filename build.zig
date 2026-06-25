@@ -45,6 +45,9 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("tests/nav/root.zig"),
             .target = target,
             .optimize = optimize,
+            // The zspec runner's JUnit writer uses libc (std.c). macOS links it by
+            // default; on Linux CI it must be explicit, or the test fails to compile.
+            .link_libc = true,
             .imports = &.{
                 .{ .name = "pathfinder", .module = pathfinding_module },
                 .{ .name = "labelle-core", .module = core_mod },
