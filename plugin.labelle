@@ -1,0 +1,16 @@
+// Pathfinder plugin manifest.
+//
+// This package provides the labelle-engine **navigation plugin** named
+// `pathfinder` (matching the consuming game's `.plugins` entry and its
+// `@import("pathfinder")` call sites). The plugin's Controller is discovered by
+// the assembler via a comptime `@hasDecl(mod, "Controller")` scan of the root
+// module (`src/pathfinding.zig` re-exports `Controller`), not by this manifest.
+//
+// No convention dirs: the per-frame `advance` is driven by a game-side dispatch
+// script, so this plugin ships no scripts of its own. The manifest's presence
+// opts into the `manifest_version` handshake (RFC-plugin-controllers §2).
+.{
+    .name = "pathfinder",
+    .manifest_version = 1,
+    .convention_dirs = .{},
+}

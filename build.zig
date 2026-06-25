@@ -24,6 +24,15 @@ pub fn build(b: *std.Build) void {
         },
     });
 
+    // The labelle assembler consumes this package as the `pathfinder` plugin and
+    // requests the module by the convention name `labelle_<pluginname>` =
+    // `labelle_pathfinder` (build_files.zig). Register the SAME module instance
+    // under that spelling — not a second addModule, which would be a distinct
+    // module (breaking type identity if a consumer mixed the two names, and
+    // compiling the source twice). Both `labelle_pathfinder` and the package-name
+    // spelling `labelle_pathfinding` now resolve to one module.
+    b.modules.put(b.allocator, "labelle_pathfinder", pathfinding_module) catch @panic("OOM");
+
     // Unit tests (refAllDecls over the nav layer + algorithm core).
     const unit_tests = b.addTest(.{
         .root_module = b.createModule(.{
