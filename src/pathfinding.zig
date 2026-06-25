@@ -66,6 +66,10 @@ pub const MovementStair = nav.MovementStair;
 pub const ClosestMovementNode = nav.ClosestMovementNode;
 pub const MovementTargetWith = nav.MovementTargetWith;
 pub const NavigationIntentWith = nav.NavigationIntentWith;
+// The `Components` aggregator the assembler scans to register the plugin's
+// components (MovementNode / MovementStair / ClosestMovementNode /
+// ControllerState) into the ComponentRegistry.
+pub const Components = nav.Components;
 
 // Paths, hooks, gizmos, scalar types.
 pub const MovementPath = nav.MovementPath;
