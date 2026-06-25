@@ -58,7 +58,11 @@ pub fn build(b: *std.Build) void {
     });
     const run_nav_tests = b.addRunArtifact(nav_tests);
 
-    const test_step = b.step("test", "Run unit + navigation tests");
+    // `test` = built-in unit tests; `spec` = the zspec-based navigation tests.
+    // (CI runs both steps; keep them split so each maps to a CI job.)
+    const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_unit_tests.step);
-    test_step.dependOn(&run_nav_tests.step);
+
+    const spec_step = b.step("spec", "Run zspec navigation tests");
+    spec_step.dependOn(&run_nav_tests.step);
 }
