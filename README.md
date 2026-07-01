@@ -370,6 +370,64 @@ if (try astar.findPathWithMapping(100, 200, &path)) |cost| {
 }
 ```
 
+## Querying the graph (navigation Controller)
+
+When you use this package as the `pathfinder` plugin in a labelle-engine
+game, the ECS-integrated `Controller` exposes a clean **query** surface,
+split from its navigation **commands**. This is the agent-facing contract
+other packs consume — the pathfinder is the canonical published
+*query-pack* under the Packs model. Ask it three things: *how far is A
+from B?*, *is there a path?*, and *what's the nearest node?*
+
+**Queries** (read-only — safe to call from scoring / planning loops):
+
+| Query | Returns | Meaning |
+|-------|---------|---------|
+| `distance(game, a, b)` | `?f32` | Graph path length between two entities. `null` = no path. |
+| `reachable(game, a, b)` | `bool` | Is there *any* path between two entities? |
+| `reachableNode(game, entity, node)` | `bool` | Is a specific node id reachable from `entity`? |
+| `reachablePosition(game, entity, pos)` | `bool` | Is the node nearest `pos` reachable from `entity`? |
+| `nearestNode(game, pos)` | `?NodeId` | Nearest movement node to a world point (alias of `findClosestNode`). |
+| `nodeCount(game)` | `u32` | Number of registered graph nodes (0 = pre-graph). |
+| `graphEpoch(game)` | `u64` | Bumps every rebuild — use to invalidate cached node lookups. |
+
+**Commands** (mutate state / start work): `navigate`, `cancel`,
+`removeNode`, `rebuildGraph`, `advance` (the per-frame plugin tick).
+
+### What `null` / `false` mean
+
+Both the "no path" and "pre-graph" cases collapse to the same negative
+answer on purpose:
+
+- **No path** — the graph is built but no route connects the two nodes.
+- **Pre-graph** — the graph has no nodes yet (controller setup pending,
+  or between scenes). `nodeCount(game) == 0`.
+
+A caller asking *"can I get there?"* gets `false`/`null` either way. If
+you need to distinguish, check `nodeCount(game)` (or watch `graphEpoch`
+and retry once it advances). A positive answer always means a real route
+exists in the current graph.
+
+```zig
+const pf = @import("labelle_pathfinding");
+
+// Distance query — null when unreachable.
+if (pf.Controller.distance(game, worker, workstation)) |d| {
+    // ... score by d ...
+}
+
+// Reachability query — the first-class replacement for `distance(...) != null`.
+if (pf.Controller.reachable(game, worker, workstation)) {
+    // ... assign the job ...
+}
+
+// "Filter reachable nodes, then score by Euclidean to a target."
+for (candidate_nodes) |node| {
+    if (!pf.Controller.reachableNode(game, guard, node)) continue;
+    // ... keep the reachable candidate, score it ...
+}
+```
+
 ## Algorithm Selection Guide
 
 | Use Case | Recommended |

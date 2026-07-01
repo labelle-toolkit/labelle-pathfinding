@@ -378,6 +378,40 @@ pub const Controller = struct {
     // ------------------------------------------------------------------
     // Public API (re-exported to game scripts as `pathfinder.Controller.*`)
     // ------------------------------------------------------------------
+    //
+    // The surface splits cleanly into two halves — this is the
+    // agent-facing contract other packs consume (the pathfinder is the
+    // canonical published *query-pack* under the Packs model; see
+    // labelle-engine#651 / FP RFC-packs.md):
+    //
+    //   QUERIES (read-only, no side effects) — safe to call from
+    //   scoring/planning loops:
+    //     * distance(a, b)          → `?f32`  path length, null = no path
+    //     * reachable(a, b)         → `bool`  is there any path A→B?
+    //     * reachableNode(e, node)  → `bool`  path from e to a node id?
+    //     * reachablePosition(e, p) → `bool`  path from e to a world point?
+    //     * nearestNode(pos)        → `?NodeId` (alias of findClosestNode)
+    //     * findClosestNode(pos)    → `?NodeId`
+    //     * nodeCount()             → `u32`
+    //     * graphEpoch()            → `u64`
+    //     * isNavigating(e)         → `bool`
+    //
+    //   COMMANDS (mutate state / start work):
+    //     * navigate(e, target, src)
+    //     * cancel(e)
+    //     * removeNode(node)
+    //     * rebuildGraph()
+    //     * advance(dt)             (plugin tick — not called by games)
+    //
+    // Return-value contract for the reachability/distance queries:
+    //   * `null` / `false` == "no path" when the graph is built but no
+    //     route connects the two nodes, OR "pre-graph" when the graph
+    //     has no nodes yet (setup pending / between scenes). Both cases
+    //     collapse to the same negative answer on purpose — a caller
+    //     asking "can I get there?" gets `false` either way and should
+    //     retry once `graphEpoch()` advances if it needs to distinguish.
+    //   * A positive answer (`Some`/`true`) always means a real route
+    //     exists in the current graph.
 
     /// Request navigation for `entity` towards `target` (world position).
     ///
@@ -576,6 +610,64 @@ pub const Controller = struct {
         const d = st.pf.distance(from_node, to_node);
         if (d == types.INF) return null;
         return d;
+    }
+
+    /// QUERY. Is there any graph path between two game entities, via
+    /// each entity's nearest movement node? First-class replacement for
+    /// the `distance(a, b) != null` idiom callers used to sprinkle at
+    /// every reachability check (FP `entityDistance`, the guard-system
+    /// reachability filter — see FP `movement.md`).
+    ///
+    /// Same O(1) Floyd-Warshall matrix cost as `distance`; this
+    /// single-sources the semantics through that one function so
+    /// `reachable(a, b)` and `distance(a, b) != null` can never drift.
+    ///
+    /// Returns `false` when the controller isn't set up, the graph has
+    /// no nodes yet (pre-graph), either entity has no nearby node
+    /// (Y-filtered / beyond `MAX_NODE_SNAP_DISTANCE`), or no path
+    /// connects them. See the query-contract note above for what
+    /// `false` means.
+    pub fn reachable(game: anytype, from_entity: anytype, to_entity: anytype) bool {
+        return distance(game, from_entity, to_entity) != null;
+    }
+
+    /// QUERY. Is a specific `node_id` reachable from `entity`'s nearest
+    /// movement node? The "filter reachable nodes, then score by
+    /// Euclidean to a target" pattern (FP `14_guard_system`) iterates
+    /// candidate nodes and keeps the reachable ones with this.
+    ///
+    /// Returns `false` pre-graph, when the controller isn't set up,
+    /// when `entity` has no nearby node, when `node_id` is out of range
+    /// or tombstoned, or when no path connects them.
+    pub fn reachableNode(game: anytype, entity: anytype, node_id: NodeId) bool {
+        const st = findState(game) orelse return false;
+        const pos = game.getWorldPosition(entity);
+        const entity_id: u64 = @intCast(entity);
+        const from_node = findNearestNodeForEntity(st, entity_id, pos.x, pos.y) orelse return false;
+        return nodesReachable(st, from_node, node_id);
+    }
+
+    /// QUERY. Is the movement node nearest to a world `position`
+    /// reachable from `entity`? Convenience wrapper over `reachableNode`
+    /// for callers holding a target `Position` rather than a node id.
+    ///
+    /// Returns `false` pre-graph, when the controller isn't set up, when
+    /// either side has no nearby node, or when no path connects them.
+    pub fn reachablePosition(game: anytype, entity: anytype, position: Position) bool {
+        const st = findState(game) orelse return false;
+        const to_node = findNearestNodeInState(st, position.x, position.y) orelse return false;
+        const pos = game.getWorldPosition(entity);
+        const entity_id: u64 = @intCast(entity);
+        const from_node = findNearestNodeForEntity(st, entity_id, pos.x, pos.y) orelse return false;
+        return nodesReachable(st, from_node, to_node);
+    }
+
+    /// QUERY. Alias of `findClosestNode` — the movement node nearest to
+    /// (and at or below) `position`, or `null` if none qualifies. Named
+    /// to match the query-surface vocabulary (`nearestNode`) other packs
+    /// address the pathfinder with.
+    pub fn nearestNode(game: anytype, position: Position) ?NodeId {
+        return findClosestNode(game, position);
     }
 
     /// Resolve the world-space position to use as a `NavigationIntent`'s
@@ -1017,6 +1109,31 @@ pub fn findNearestNodeInState(st: *State, x: f32, y: f32) ?NodeId {
     // can't silently route through a far-away node.
     if (best_dist > MAX_NODE_SNAP_DISTANCE) return null;
     return best;
+}
+
+/// Node → node graph reachability with removed / out-of-range guards.
+/// Single-sources the reachability semantics shared by
+/// `Controller.reachable*`: bottoms out in the same Floyd-Warshall
+/// matrix lookup as `distance` (`isReachable == distance != INF`), so
+/// the two can never disagree.
+///
+/// Returns `false` pre-graph (no node slots), for a tombstoned or
+/// out-of-range `from`/`to`, and when no route connects the pair.
+/// Guards the removed/OOB cases up front because the underlying
+/// `pf.isReachable` assumes both ids map to live matrix entries —
+/// `Controller.distance` only ever feeds it ids resolved by
+/// `findNearestNode*` (never removed), but the node-id–taking
+/// `reachableNode` accepts caller-supplied ids that may be stale.
+///
+/// Exposed `pub` so the reachability tests can exercise it against a
+/// synthetic `State` without a live game/ECS backend, mirroring how
+/// `findNearestNodeInState` is tested in `controller_snap_test.zig`.
+pub fn nodesReachable(st: *State, from: NodeId, to: NodeId) bool {
+    const slots = st.pf.graph.totalSlots();
+    if (slots == 0) return false;
+    if (from >= slots or to >= slots) return false;
+    if (st.pf.graph.isRemoved(from) or st.pf.graph.isRemoved(to)) return false;
+    return st.pf.isReachable(from, to);
 }
 
 /// Thin bridge exposing `getEntityPosition` / `moveEntity` to the
