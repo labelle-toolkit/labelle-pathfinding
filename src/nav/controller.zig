@@ -459,7 +459,22 @@ pub const Controller = struct {
         // orphaned entry. Making `navigate` idempotent here keeps the
         // controller the single source of truth regardless of the
         // caller's discipline.
+        //
+        // The same idempotency covers the OTHER walk mode and the
+        // persisted order (v4, codex review on #50): a retarget that
+        // then fails (`.rejected`) must not leave a stale `moveTo`
+        // walking to the old target, and must not leave the old
+        // `Navigating` order behind — the rehydration sweep would
+        // resurrect the replaced walk next tick. The pre-v4 dispatch
+        // dropped rejected intents for the same reason.
         st.pf.cancel(entity_id);
+        _ = st.direct_moves.swapRemove(entity_id);
+        {
+            const Entity = @TypeOf(game.*).EntityType;
+            const e: Entity = @intCast(entity_id);
+            const ecs = &game.active_world.ecs_backend;
+            if (ecs.entityExists(e)) ecs.removeComponent(e, Navigating);
+        }
         var i: usize = 0;
         while (i < st.pending_entities.items.len) {
             if (st.pending_entities.items[i] == entity_id) {
@@ -492,10 +507,6 @@ pub const Controller = struct {
         const to_node = findNearestNodeInState(st, target.x, target.y) orelse {
             return .{ .rejected = .no_nearby_node };
         };
-
-        // One mover per entity: a graph walk replaces any in-flight
-        // straight-line order.
-        _ = st.direct_moves.swapRemove(entity_id);
 
         if (from_node == to_node) {
             // Worker and target resolve to the same node. The worker
@@ -561,8 +572,20 @@ pub const Controller = struct {
         const st = findState(game) orelse return .{ .rejected = .controller_not_setup };
         const entity_id: u64 = @intCast(entity);
 
-        // One mover per entity: a direct order replaces any graph walk.
+        // One mover per entity, idempotently (mirrors `navigate`): a new
+        // direct order replaces any graph walk AND any prior direct
+        // order + persisted `Navigating` — without this, a `moveTo`
+        // that settles `.redundant` (already within arrival radius)
+        // would leave the previous direct walk running to the OLD
+        // target (codex/CodeRabbit review on #50).
         st.pf.cancel(entity_id);
+        _ = st.direct_moves.swapRemove(entity_id);
+        {
+            const Entity = @TypeOf(game.*).EntityType;
+            const e: Entity = @intCast(entity_id);
+            const ecs = &game.active_world.ecs_backend;
+            if (ecs.entityExists(e)) ecs.removeComponent(e, Navigating);
+        }
         var i: usize = 0;
         while (i < st.pending_entities.items.len) {
             if (st.pending_entities.items[i] == entity_id) {
@@ -1384,17 +1407,27 @@ fn settleArrival(game: anytype, st: *State, entity_id: u64, goal_node: ?NodeId) 
     // marker → next-tick resolve round-trip: the plugin owns the CMN
     // component, so resolve it here and now.
     var node_entity: u64 = 0;
-    const resolved: ?NodeId = goal_node orelse blk: {
-        const pos = game.getWorldPosition(entity);
-        break :blk findNearestNodeForEntity(st, entity_id, pos.x, pos.y);
-    };
+    const pos = game.getWorldPosition(entity);
+    const resolved: ?NodeId = goal_node orelse
+        findNearestNodeForEntity(st, entity_id, pos.x, pos.y);
     if (resolved) |nid| {
         node_entity = st.node_entities.get(nid) orelse 0;
+        const node_pos = st.pf.graph.getPosition(nid);
+        const dx = node_pos.x - pos.x;
+        const dy = node_pos.y - pos.y;
         ecs.addComponent(entity, ClosestMovementNode{
             .node_entity = node_entity,
             .node_id = nid,
-            .distance = 0,
+            // Real distance, not an assumed 0 — a direct (off-graph)
+            // arrival can settle up to MAX_NODE_SNAP_DISTANCE from its
+            // nearest node (Copilot review on #50).
+            .distance = @sqrt(dx * dx + dy * dy),
         });
+    } else {
+        // Off-graph arrival with no node in snap range: a stale CMN
+        // from wherever the entity USED to stand would misdirect
+        // targetPosition/finders — drop it (codex review on #50).
+        ecs.removeComponent(entity, ClosestMovementNode);
     }
 
     game.emit(.{ .pathfinder__arrived = .{

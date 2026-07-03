@@ -53,11 +53,13 @@ const CallbackCtx = struct {
     }
 
     pub fn onArrived(self: *CallbackCtx, entity: u64, goal_node: u32) void {
-        self.arrived.append(self.allocator, .{ .entity = entity, .goal_node = goal_node }) catch {};
+        // Test recorder: OOM must fail the test loudly, not silently
+        // drop a settle record.
+        self.arrived.append(self.allocator, .{ .entity = entity, .goal_node = goal_node }) catch unreachable;
     }
 
     pub fn onPathInvalidated(self: *CallbackCtx, entity: u64, goal_node: u32) void {
-        self.invalidated.append(self.allocator, .{ .entity = entity, .goal_node = goal_node }) catch {};
+        self.invalidated.append(self.allocator, .{ .entity = entity, .goal_node = goal_node }) catch unreachable;
     }
 };
 

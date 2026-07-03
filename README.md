@@ -84,7 +84,8 @@ pathfinder.Controller.reachable(game, a, b);     // bool — is there ANY route 
 pathfinder.Controller.walkDistance(game, a, b);  // f32 — path cost; inf when disconnected;
                                                  //       Euclidean before the graph exists
                                                  //       (the "nearest X" selector metric)
-pathfinder.Controller.distance(game, a, b);      // ?f32 — path cost or null
+pathfinder.Controller.distance(game, a, b);      // ?f32 — lower-level primitive behind the
+                                                 //        two above; prefer reachable/walkDistance
 pathfinder.Controller.isNavigating(game, e);     // walking? (graph OR direct)
 pathfinder.Controller.nodeCount(game);
 pathfinder.Controller.graphEpoch(game);          // bumps on every rebuild (poll twin of graph_rebuilt)
