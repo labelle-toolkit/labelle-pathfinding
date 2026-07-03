@@ -825,8 +825,11 @@ pub const Controller = struct {
 
     /// Resolve the world-space position to use as a `NavigationIntent`'s
     /// target for `target_entity`. Reads the entity's `ClosestMovementNode`
-    /// cache (preferred — already on-graph) and falls back to the entity's
-    /// own world position when the cache hasn't been populated yet.
+    /// cache (preferred — already on-graph); on a cache miss it resolves
+    /// and caches the nearest graph node on demand (so destination entities
+    /// that never navigate themselves still route to a reachable node —
+    /// see the miss path below), falling back to the entity's own world
+    /// position only when it is genuinely off-graph.
     ///
     /// Two pitfalls handled here that every call site has to get right
     /// (#310):
@@ -848,12 +851,49 @@ pub const Controller = struct {
     /// `behavior_tree`, and `16_hunger_manager`.
     pub fn targetPosition(game: anytype, target_entity: anytype) Position {
         const Entity = @TypeOf(game.*).EntityType;
-        if (game.active_world.ecs_backend.getComponent(target_entity, components.ClosestMovementNode)) |cmn| {
+        const ecs = &game.active_world.ecs_backend;
+        // Fast path: a populated CMN (set by a prior nav, or by the
+        // lazy resolve below on an earlier call).
+        if (ecs.getComponent(target_entity, components.ClosestMovementNode)) |cmn| {
             if (cmn.node_entity != 0) {
                 const node_entity: Entity = @intCast(cmn.node_entity);
                 return game.getWorldPosition(node_entity);
             }
         }
+        // No cached node — resolve the destination's nearest graph node
+        // on demand and cache it. The CMN sweep (`sweepCmnOnEpochChange`)
+        // only maintains CMNs for *navigating* entities (movers, via
+        // `navigate`/`requestRepath`); a *destination* entity — a storage
+        // or facility that is a nav target but never itself walks — would
+        // otherwise keep the empty CMN a prefab declares (`"ClosestMovementNode": {}`)
+        // and fall back to its raw, off-graph position (a storage at y=20
+        // inside a room, not the y=93 walkway node), which the mover can
+        // never reach ("no path to dest"). Lazy-resolving here means every
+        // caller gets a reachable node with no game-side `requestRepath`.
+        // Memoized: the per-frame arrival-check re-call hits the fast path
+        // above after the first resolve, and the sweep re-invalidates on a
+        // graph rebuild so a stale node can't survive a topology change.
+        const st = findState(game) orelse return game.getWorldPosition(target_entity);
+        const entity_id: u64 = @intCast(target_entity);
+        const pos = game.getWorldPosition(target_entity);
+        if (findNearestNodeForEntity(st, entity_id, pos.x, pos.y)) |nid| {
+            const node_pos = st.pf.graph.getPosition(nid);
+            const dx = node_pos.x - pos.x;
+            const dy = node_pos.y - pos.y;
+            const ne = st.node_entities.get(nid) orelse 0;
+            ecs.addComponent(target_entity, components.ClosestMovementNode{
+                .node_entity = ne,
+                .node_id = nid,
+                .distance = @sqrt(dx * dx + dy * dy),
+            });
+            if (ne != 0) {
+                const node_entity: Entity = @intCast(ne);
+                return game.getWorldPosition(node_entity);
+            }
+            return node_pos;
+        }
+        // Truly off-graph (no node within snap distance) — raw fallback,
+        // unchanged v4 behavior.
         return game.getWorldPosition(target_entity);
     }
 
