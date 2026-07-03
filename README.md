@@ -1,606 +1,141 @@
 # Labelle Pathfinding
 
-A pathfinding library for Zig game development. Part of the [labelle-toolkit](https://github.com/labelle-toolkit), it provides a self-contained pathfinding engine, spatial indexing, and shortest path algorithms.
+Navigation for [labelle-toolkit](https://github.com/labelle-toolkit) games — and a standalone
+pathfinding algorithm core. Since **v4**, the plugin owns *everything movement*: the node
+graph, route computation (Floyd-Warshall), **both walkers** (graph navigation and
+straight-line `moveTo`), arrival handling, and the persisted walk order. Entity positions
+stay in **your ECS** — the walkers mutate them through the game API; the package never
+owns coordinates.
 
-## Features
+Two layers, one package — each usable without the other:
 
-- **PathfindingEngine** - Self-contained engine that owns entity positions, with callbacks and spatial queries
-- **Simplified Config** - Use `PathfindingEngineSimple(Entity, Context)` for quick setup
-- **Grid Helper** - `createGrid()` for easy grid-based pathfinding with coordinate utilities
-- **Position Type** - Uses `Position` from labelle-core for consistency across the labelle ecosystem
-- **QuadTree** - Spatial partitioning for O(log n) entity and node lookups
-- **Floyd-Warshall Algorithm** - All-pairs shortest path computation with SIMD and parallel optimizations (5-16x faster)
-- **A\* Algorithm** - Single-source shortest path with multiple heuristics
-- **Connection Modes** - Omnidirectional (top-down), directional (platformer), and building (vertical via stairs) graph building
-- **Stair Traffic Control** - Multi-lane, directional, or single-file stair usage with waiting areas
+1. **Navigation Controller** (the headline) — an ECS-integrated, duck-typed
+   (`game: anytype`) controller for labelle-engine games. Never imports the engine.
+2. **Algorithm core** (`pathfinding.algo.*`) — A*, Floyd-Warshall (incl. SIMD/parallel
+   variants), QuadTree spatial indexing, heuristics, grid types. No ECS, no game.
 
 ## Requirements
 
-- Zig 0.15.2 or later
+- Zig 0.16.0+
 
 ## Installation
 
-Add to your `build.zig.zon`:
+**labelle-engine games** — declare the plugin in `project.labelle` (the name **must** be
+`pathfinder`; both `@import("pathfinder")` call sites and the `pathfinder__*` event tags
+depend on it):
 
 ```zig
-.dependencies = .{
-    .labelle_pathfinding = .{
-        .url = "https://github.com/labelle-toolkit/labelle-pathfinding/archive/refs/tags/v2.6.0.tar.gz",
-        .hash = "...",
-    },
+.plugins = .{
+    .{ .name = "pathfinder", .repo = "github.com/labelle-toolkit/labelle-pathfinding", .version = "4.0.0" },
 },
 ```
 
-Or use `zig fetch`:
+**Standalone** (algorithm core / pure engine):
 
 ```bash
-zig fetch --save https://github.com/labelle-toolkit/labelle-pathfinding/archive/refs/tags/v2.6.0.tar.gz
+zig fetch --save https://github.com/labelle-toolkit/labelle-pathfinding/archive/refs/tags/v4.0.0.tar.gz
 ```
 
-Then in your `build.zig`:
+## Usage — Navigation Controller (labelle-engine games)
 
-```zig
-const pathfinding_dep = b.dependency("labelle_pathfinding", .{
-    .target = target,
-    .optimize = optimize,
-});
+Communication follows the three-channel model: **commands down, queries down, events up.**
 
-exe.root_module.addImport("labelle_pathfinding", pathfinding_dep.module("labelle_pathfinding"));
-```
-
-## Usage
-
-### Navigation Controller — labelle-engine games (the headline, v4)
-
-The plugin owns **everything movement**: the node graph (`MovementNode` /
-`MovementStair` entities), route computation (Floyd-Warshall), **both
-walkers** (graph navigation and straight-line `moveTo`), arrival
-handling, and the persisted walk order (`Navigating`, saveable — mid-walk
-saves resume on load). Entity positions stay in **your ECS** (single
-source of truth); the walkers mutate them through the game API.
-
-Communication follows the three-channel model (events up, commands and
-queries down):
-
-**Commands** (plain fns; acceptance via `Result`, effects via events):
+### Commands (plain fns; acceptance via `Result`, effects via events)
 
 ```zig
 const pathfinder = @import("pathfinder");
 
 _ = pathfinder.Controller.navigate(game, entity, target_pos, @src()); // graph walk
-_ = pathfinder.Controller.moveTo(game, entity, target_pos);           // straight-line (off-graph)
-pathfinder.Controller.cancel(game, entity);       // stop walking (also: your "can't move" rule —
-                                                  // a fight/stun marker site MUST cancel; the
-                                                  // walker is domain-blind by design)
+_ = pathfinder.Controller.moveTo(game, entity, target_pos);           // straight-line (off-graph:
+                                                                      // ship hops, wander steps)
+pathfinder.Controller.cancel(game, entity);        // stop walking — a site that marks an entity
+                                                   // "can't move" (fight, stun, death) MUST cancel;
+                                                   // the walker is domain-blind by design
 pathfinder.Controller.requestRepath(game, entity); // re-resolve the entity's ClosestMovementNode now
 pathfinder.Controller.removeNode(game, node_id);   // tombstone a node (deconstruction drains)
-pathfinder.Controller.rebuildGraph(game);          // full rebuild from current node entities
+pathfinder.Controller.rebuildGraph(game);          // explicit full rebuild
 ```
 
-**Queries** (reads; never mutate):
+Retargets are **idempotent**: `navigate`/`moveTo` clear any prior walk (either mode), the
+pending ring, and the persisted order before starting the new one.
+
+### Queries (reads; never mutate)
 
 ```zig
-pathfinder.Controller.reachable(game, a, b);     // bool — is there ANY route between them?
-pathfinder.Controller.walkDistance(game, a, b);  // f32 — path cost; inf when disconnected;
-                                                 //       Euclidean before the graph exists
-                                                 //       (the "nearest X" selector metric)
-pathfinder.Controller.distance(game, a, b);      // ?f32 — lower-level primitive behind the
-                                                 //        two above; prefer reachable/walkDistance
-pathfinder.Controller.isNavigating(game, e);     // walking? (graph OR direct)
+pathfinder.Controller.reachable(game, a, b);          // bool — any route between their nearest nodes?
+pathfinder.Controller.reachableNode(game, e, node);   // bool — entity → specific node
+pathfinder.Controller.reachablePosition(game, e, pos);// bool — entity → world position
+pathfinder.Controller.walkDistance(game, a, b);       // f32 — path cost; inf when disconnected;
+                                                      //       Euclidean before the graph exists.
+                                                      //       THE "nearest X" selector metric.
+pathfinder.Controller.distance(game, a, b);           // ?f32 — lower-level primitive behind the above
+pathfinder.Controller.isNavigating(game, e);          // walking? (graph OR direct)
 pathfinder.Controller.nodeCount(game);
-pathfinder.Controller.graphEpoch(game);          // bumps on every rebuild (poll twin of graph_rebuilt)
+pathfinder.Controller.graphEpoch(game);               // bumps every rebuild (poll twin of graph_rebuilt)
 pathfinder.Controller.findClosestNode(game, pos);
-pathfinder.Controller.targetPosition(game, entity);
+pathfinder.Controller.targetPosition(game, entity);   // CMN-preferred nav target for an entity
 ```
 
-**Events** (the only outbound channel — subscribe from game hooks; tags
-are `pathfinder__<name>`, which requires the plugin to be registered as
-`.name = "pathfinder"`):
+### Events (the only outbound channel — subscribe from game hooks)
 
 | Event | Payload | Fires when |
 |---|---|---|
 | `pathfinder__arrived` | `{ entity, node_entity }` | any walk settles at its destination (incl. `.redundant` already-there calls) |
 | `pathfinder__navigation_failed` | `{ entity, reason }` | graph changed mid-walk with no reroute, or a loaded order can't re-issue |
-| `pathfinder__graph_rebuilt` | `{ epoch }` | the node graph was (re)built |
+| `pathfinder__graph_rebuilt` | `{ epoch }` | the node graph was (re)built — invalidate node-derived caches |
 | `pathfinder__node_removed` | `{ node_id }` | a node was tombstoned |
 
-**Components** you attach from game prefabs: `MovementSpeed { speed }`
-(per-entity walk speed; plugin default when absent). The plugin manages
-the rest (`MovementNode`, `MovementStair`, `ClosestMovementNode`,
-`Navigating`, `ControllerState`).
-
-**The one thing the game still drives**: a thin pause-gated script that
-calls `pathfinder.Controller.advance(game, dt)` each frame — the plugin
-can't see your pause state across the module boundary.
-
----
-
-> **Note:** the sections below document the **standalone algorithm
-> core** (`pathfinding.algo.*` — A*, Floyd-Warshall variants, QuadTree,
-> grids) usable with no ECS and no game. Some prose still describes the
-> pre-v3 position-owning engine and is pending a rewrite.
-
-### PathfindingEngine (standalone core)
-
-The PathfindingEngine is a complete solution that manages entity positions internally. The game queries the engine for positions rather than owning them.
-
-```zig
-const std = @import("std");
-const pathfinding = @import("labelle_pathfinding");
-
-// Simple configuration with direct types
-const Engine = pathfinding.PathfindingEngineSimple(u64, *Game);
-
-// Or use full config for advanced options
-const Config = struct {
-    pub const Entity = u64;
-    pub const Context = *Game;
-    // Optional: configure log verbosity (defaults to .none)
-    pub const log_level: pathfinding.LogLevel = .info;
-};
-const EngineWithLogging = pathfinding.PathfindingEngine(Config);
-
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-
-    var game = Game{};
-    var engine = try Engine.init(allocator);
-    defer engine.deinit();
-
-    // Build the node graph
-    try engine.addNode(0, 0, 0);      // node 0 at (0, 0)
-    try engine.addNode(1, 100, 0);    // node 1 at (100, 0)
-    try engine.addNode(2, 200, 0);    // node 2 at (200, 0)
-
-    // Auto-connect nodes within distance
-    try engine.connectNodes(.{
-        .omnidirectional = .{ .max_distance = 150, .max_connections = 4 },
-    });
-    try engine.rebuildPaths();
-
-    // Register entity (engine owns position)
-    try engine.registerEntity(player_id, 0, 0, 100.0);  // at (0,0), speed 100
-
-    // Request path
-    try engine.requestPath(player_id, 2);  // move to node 2
-
-    // Game loop
-    while (engine.isMoving(player_id)) {
-        engine.tick(&game, delta_time);
-
-        // Query position for rendering
-        if (engine.getPosition(player_id)) |pos| {
-            draw(pos.x, pos.y);
-        }
-    }
-
-    // Spatial queries for combat/AI
-    var nearby: [10]u64 = undefined;
-    const enemies = engine.getEntitiesInRadius(x, y, attack_range, &nearby);
-}
-```
-
-### Grid Helper
-
-For grid-based games, use `createGrid` to set up nodes and connections in one call:
-
-```zig
-// Create an 8x8 grid with 4-directional movement
-const grid = try engine.createGrid(.{
-    .rows = 8,
-    .cols = 8,
-    .cell_size = 60.0,
-    .offset_x = 100,
-    .offset_y = 60,
-    .connection = .four_way,  // or .eight_way for diagonals
-});
-try engine.rebuildPaths();
-
-// Use grid helpers for coordinate conversion
-const pos = grid.toScreen(3, 4);      // grid coords -> Position
-const node_id = grid.toNodeId(3, 4);  // grid coords -> node ID
-const coords = grid.fromNodeId(42);   // node ID -> {col, row}
-const node_pos = grid.nodePosition(42); // node ID -> Position
-```
-
-### Connection Convenience Functions
-
-Simplified grid connection setup:
-
-```zig
-// Instead of:
-try engine.connectNodes(.{ .omnidirectional = .{ .max_distance = cell_size * 1.1, .max_connections = 4 } });
-
-// Use:
-try engine.connectAsGrid4(cell_size);  // 4-directional (up/down/left/right)
-try engine.connectAsGrid8(cell_size);  // 8-directional (including diagonals)
-```
-
-### Position Type
-
-Position queries return `Position` from labelle-core:
-
-```zig
-if (engine.getPosition(entity)) |pos| {
-    // pos is Position with useful methods
-    const dist = pos.distance(target);
-    const normalized = pos.normalize();
-}
-
-// Position convenience methods for adding nodes
-try engine.addNodePos(id, Position{ .x = 100, .y = 200 });
-try engine.registerEntityPos(entity, pos, speed);
-```
-
-### Log Levels
-
-Control logging verbosity via the Config struct:
-
-```zig
-const Config = struct {
-    pub const Entity = u64;
-    pub const Context = *Game;
-    pub const log_level: pathfinding.LogLevel = .debug;  // verbose logging
-};
-```
-
-| Level | Description |
-|-------|-------------|
-| `.none` | Disable all logging (default) |
-| `.err` | Critical failures only |
-| `.warning` | Recoverable errors (e.g., entity not found, no path exists) |
-| `.info` | Path requests, entity registration/unregistration, graph rebuilds |
-| `.debug` | Detailed: path steps, stair queue operations, spatial updates |
-
-Logs use Zig's `std.log` scoped to `.pathfinding`, so they integrate with your application's log configuration.
-
-### Callbacks
-
-```zig
-fn onNodeReached(game: *Game, entity: u64, node: u32) void {
-    // Entity reached a waypoint
-}
-
-fn onPathCompleted(game: *Game, entity: u64, node: u32) void {
-    // Entity finished its path
-}
-
-fn onPathBlocked(game: *Game, entity: u64, node: u32) void {
-    // No path available to target node
-}
-
-// Set callbacks
-engine.on_node_reached = onNodeReached;
-engine.on_path_completed = onPathCompleted;
-engine.on_path_blocked = onPathBlocked;
-```
-
-### Directional Connections (Platformers)
-
-```zig
-// For platformer-style movement (left/right/up/down only)
-try engine.connectNodes(.{
-    .directional = .{
-        .horizontal_range = 60,  // connect horizontally within 60 units
-        .vertical_range = 60,    // connect vertically within 60 units (ladders)
-    },
-});
-
-// Query directional edges
-if (engine.getDirectionalEdges(node_id)) |edges| {
-    if (edges.left) |left_node| { /* can go left */ }
-    if (edges.right) |right_node| { /* can go right */ }
-    if (edges.up) |up_node| { /* can climb up */ }
-    if (edges.down) |down_node| { /* can go down */ }
-}
-
-// Add one-way edges (e.g., drop-downs)
-try engine.addEdge(top_node, bottom_node, false);  // one-way
-```
-
-### Building Mode with Stairs
-
-For 2D building games where vertical movement is only allowed via stair nodes:
-
-```zig
-// Add nodes with stair modes
-try engine.addNode(0, 0, 0);    // regular floor node
-try engine.addNode(1, 100, 0);  // regular floor node
-try engine.addNode(2, 100, 100);  // regular upper floor node
-
-// Mark nodes as stairs with traffic control
-try engine.setStairMode(1, .single);     // single-file stair at ground
-try engine.setStairMode(2, .single);     // single-file stair at upper floor
-
-// Connect with building mode (horizontal + vertical via stairs only)
-try engine.connectNodes(.{
-    .building = .{
-        .horizontal_range = 60,
-        .vertical_range = 120,
-    },
-});
-try engine.rebuildPaths();
-```
-
-#### Stair Modes
-
-| Mode | Description |
-|------|-------------|
-| `.none` | Not a stair - no vertical connections (default) |
-| `.all` | Multi-lane stair - unlimited concurrent usage |
-| `.direction` | Directional stair - multiple entities same direction only |
-| `.single` | Single-file stair - only one entity at a time |
-
-#### Waiting Areas
-
-When stairs are busy, entities wait at designated spots instead of stacking:
-
-```zig
-// Define waiting area for a stair
-try engine.setWaitingArea(stair_node_id, &[_]pathfinding.Position{
-    .{ .x = 80, .y = 0 },   // waiting spot 1
-    .{ .x = 60, .y = 0 },   // waiting spot 2
-    .{ .x = 40, .y = 0 },   // waiting spot 3
-});
-
-// Check if entity is waiting
-if (engine.getPosition(entity)) |pos| {
-    if (pos.waiting_for_stair) |stair_id| {
-        // Entity is waiting to use this stair
-    }
-}
-```
-
-### Floyd-Warshall (Direct Usage)
-
-Best for dense graphs or when you need paths between many node pairs.
-
-```zig
-var fw = pathfinding.FloydWarshall.init(allocator);
-defer fw.deinit();
-
-fw.resize(10);
-try fw.clean();
-
-// Add edges between entities (using entity IDs)
-fw.addEdgeWithMapping(100, 200, 1);
-fw.addEdgeWithMapping(200, 300, 1);
-
-// Compute all shortest paths
-fw.generate();
-
-// Query paths
-const dist = fw.valueWithMapping(100, 300);  // Returns 2
-const next = fw.nextWithMapping(100, 300);   // Returns 200
-```
-
-#### Optimized Variants
-
-For performance-critical applications, use the optimized implementations:
-
-```zig
-// SIMD-optimized (5-8x faster, single-threaded)
-var fw = pathfinding.FloydWarshallSimd.init(allocator);
-
-// Parallel + SIMD (up to 16x faster, multi-threaded)
-var fw = pathfinding.FloydWarshallParallel.init(allocator);
-```
-
-The optimized variants have the same API as the legacy implementation. Use `FloydWarshallParallel` for graphs with 256+ nodes where multi-threading provides the most benefit.
-
-You can also configure PathfindingEngine to use an optimized variant:
-
-```zig
-const Config = struct {
-    pub const Entity = u64;
-    pub const Context = *Game;
-    pub const floyd_warshall_variant: pathfinding.FloydWarshallVariant = .optimized_parallel;
-};
-```
-
-| Variant | Description | Best For |
-|---------|-------------|----------|
-| `.legacy` | Original ArrayList-based (default) | Backward compatibility |
-| `.optimized_simd` | Flat memory + SIMD vectorization | Small-medium graphs, single-threaded |
-| `.optimized_parallel` | SIMD + multi-threading | Large graphs (256+ nodes) |
-
-Run the benchmark to see performance on your hardware:
-
-```bash
-zig build run-benchmark
-```
-
-### A* Algorithm (Direct Usage)
-
-Best for single-source queries in large sparse graphs.
-
-```zig
-var astar = pathfinding.AStar.init(allocator);
-defer astar.deinit();
-
-astar.resize(10);
-try astar.clean();
-astar.setHeuristic(.manhattan);
-
-// Set node positions for heuristic
-try astar.setNodePositionWithMapping(100, .{ .x = 0, .y = 0 });
-try astar.setNodePositionWithMapping(200, .{ .x = 10, .y = 0 });
-
-// Add edges
-astar.addEdgeWithMapping(100, 200, 1);
-
-// Find path
-var path = std.ArrayList(u32).init(allocator);
-defer path.deinit();
-
-if (try astar.findPathWithMapping(100, 200, &path)) |cost| {
-    // path.items contains the route
-}
-```
-
-## Querying the graph (navigation Controller)
-
-When you use this package as the `pathfinder` plugin in a labelle-engine
-game, the ECS-integrated `Controller` exposes a clean **query** surface,
-split from its navigation **commands**. This is the agent-facing contract
-other packs consume — the pathfinder is the canonical published
-*query-pack* under the Packs model. Ask it three things: *how far is A
-from B?*, *is there a path?*, and *what's the nearest node?*
-
-**Queries** (read-only — safe to call from scoring / planning loops):
-
-| Query | Returns | Meaning |
-|-------|---------|---------|
-| `distance(game, a, b)` | `?f32` | Graph path length between two entities. `null` = no path. |
-| `reachable(game, a, b)` | `bool` | Is there *any* path between two entities? |
-| `reachableNode(game, entity, node)` | `bool` | Is a specific node id reachable from `entity`? |
-| `reachablePosition(game, entity, pos)` | `bool` | Is the node nearest `pos` reachable from `entity`? |
-| `nearestNode(game, pos)` | `?NodeId` | Nearest movement node to a world point (alias of `findClosestNode`). |
-| `nodeCount(game)` | `u32` | Number of registered graph nodes (0 = pre-graph). |
-| `graphEpoch(game)` | `u64` | Bumps every rebuild — use to invalidate cached node lookups. |
-
-**Commands** (mutate state / start work): `navigate`, `cancel`,
-`removeNode`, `rebuildGraph`, `advance` (the per-frame plugin tick).
-
-### What `null` / `false` mean
-
-Both the "no path" and "pre-graph" cases collapse to the same negative
-answer on purpose:
-
-- **No path** — the graph is built but no route connects the two nodes.
-- **Pre-graph** — the graph has no nodes yet (controller setup pending,
-  or between scenes). `nodeCount(game) == 0`.
-
-A caller asking *"can I get there?"* gets `false`/`null` either way. If
-you need to distinguish, check `nodeCount(game)` (or watch `graphEpoch`
-and retry once it advances). A positive answer always means a real route
-exists in the current graph.
+### Components
+
+| Component | Who writes it | Save |
+|---|---|---|
+| `MovementNode` / `MovementStair` | your scenes/prefabs (the graph) | saveable / marker |
+| `MovementSpeed { speed }` | your prefabs (px/s; plugin default 200 when absent) | saveable |
+| `Navigating` | the plugin — the persisted walk order; mid-walk saves resume on load via the advance rehydration sweep | saveable |
+| `ClosestMovementNode` | the plugin (arrivals, `requestRepath`, epoch sweeps) | transient |
+| `ControllerState` | the plugin (singleton runtime state) | transient |
+
+### What your game still does
+
+One thin, pause-gated driver script calling `pathfinder.Controller.advance(game, dt)`
+each frame — the plugin can't read your pause component across the module boundary.
+Graph rebuilds are automatic (node-count change detection, one rebuild per advance);
+no markers, no debounce scripts.
+
+## Usage — pure engine (no ECS, no game)
 
 ```zig
 const pf = @import("labelle_pathfinding");
 
-// Distance query — null when unreachable.
-if (pf.Controller.distance(game, worker, workstation)) |d| {
-    // ... score by d ...
-}
+var engine = pf.PathfinderWith(u64, struct {}).init(allocator, .{
+    .max_vertical_distance = 200.0,
+    .max_horizontal_distance = 78.0,
+});
+defer engine.deinit();
 
-// Reachability query — the first-class replacement for `distance(...) != null`.
-if (pf.Controller.reachable(game, worker, workstation)) {
-    // ... assign the job ...
-}
+const a = try engine.addNode(.{ .x = 0, .y = 0 }, false);
+const b = try engine.addNode(.{ .x = 50, .y = 0 }, false);
+_ = try engine.navigate(7, a, b, 200.0); // entity 7, speed px/s
 
-// "Filter reachable nodes, then score by Euclidean to a target."
-for (candidate_nodes) |node| {
-    if (!pf.Controller.reachableNode(game, guard, node)) continue;
-    // ... keep the reachable candidate, score it ...
-}
+// Your tick ctx provides positions and applies movement — and may
+// observe settles via optional callbacks:
+//   getEntityPosition(id) ?Position   moveEntity(id, dx, dy)
+//   onArrived(id, goal_node)          onPathInvalidated(id, goal_node)
+engine.tick(&ctx, dt);
 ```
 
-## Algorithm Selection Guide
+## Usage — algorithm core
 
-| Use Case | Recommended |
-|----------|-------------|
-| Game with entities moving on waypoints | **PathfindingEngine** |
-| Need spatial queries (radius, rectangle) | **PathfindingEngine** |
-| Many queries between different node pairs | Floyd-Warshall |
-| Dense graphs (many edges) | Floyd-Warshall |
-| Single source-destination queries | A* |
-| Large sparse graphs | A* |
-| Dynamic graphs that change frequently | A* |
+```zig
+const pf = @import("labelle_pathfinding");
+var astar = pf.algo.AStar.init(allocator);
+var fw = pf.algo.FloydWarshallOptimized(.{}).init(allocator); // SIMD; .Parallel for large graphs
+var qt = pf.algo.QuadTree.init(allocator, bounds);
+```
 
-## API Reference
-
-### PathfindingEngine
-
-| Method | Description |
-|--------|-------------|
-| `init(allocator)` | Create engine instance |
-| `deinit()` | Free resources |
-| `addNode(id, x, y)` | Add a waypoint node |
-| `addNodePos(id, pos)` | Add node with Position |
-| `addNodeAuto(x, y)` | Add node with auto-generated ID |
-| `removeNode(id)` | Remove a node |
-| `createGrid(config)` | Create grid of nodes with connections |
-| `connectNodes(mode)` | Auto-connect nodes |
-| `connectAsGrid4(cell_size)` | Connect as 4-directional grid |
-| `connectAsGrid8(cell_size)` | Connect as 8-directional grid |
-| `addEdge(from, to, bidirectional)` | Manually add edge |
-| `rebuildPaths()` | Recompute Floyd-Warshall paths |
-| `registerEntity(id, x, y, speed)` | Register entity at position |
-| `registerEntityPos(id, pos, speed)` | Register entity with Position |
-| `unregisterEntity(id)` | Remove entity |
-| `requestPath(entity, target_node)` | Start pathfinding |
-| `cancelPath(entity)` | Stop movement |
-| `tick(ctx, delta)` | Update all entities |
-| `getPosition(entity)` | Get entity position (returns Position) |
-| `getNodePosition(node)` | Get node position (returns Position) |
-| `getSpeed(entity)` | Get entity speed |
-| `setSpeed(entity, speed)` | Set entity speed |
-| `isMoving(entity)` | Check if entity is moving |
-| `getCurrentNode(entity)` | Get entity's current node |
-| `getEntitiesInRadius(x, y, r, buf)` | Spatial query |
-| `getEntitiesInRect(x, y, w, h, buf)` | Rectangle query |
-| `getNodesInRadius(x, y, r, buf)` | Find nearby nodes |
-| `setStairMode(node, mode)` | Set stair traffic mode |
-| `getStairMode(node)` | Get stair traffic mode |
-| `setWaitingArea(node, spots)` | Define waiting area for stair |
-| `getStairState(node)` | Get runtime stair traffic state |
-
-### Grid Helper
-
-| Method | Description |
-|--------|-------------|
-| `toScreen(col, row)` | Convert grid coords to Position |
-| `toNodeId(col, row)` | Convert grid coords to node ID |
-| `fromNodeId(node_id)` | Convert node ID to {col, row} |
-| `nodePosition(node_id)` | Get Position for node ID |
-| `isValid(col, row)` | Check if grid coords are in bounds |
-| `nodeCount()` | Get total number of nodes in grid |
-
-### Heuristics
-
-| Heuristic | Best For |
-|-----------|----------|
-| `euclidean` | Any-angle movement (default) |
-| `manhattan` | 4-directional grid movement |
-| `chebyshev` | 8-directional with equal diagonal cost |
-| `octile` | 8-directional with sqrt(2) diagonal cost |
-| `zero` | Dijkstra's algorithm (no heuristic) |
-
-## Running Examples
+## Development
 
 ```bash
-# Basic example (start here)
-zig build run-basic
-
-# Game integration with callbacks
-zig build run-game
-
-# Platformer with directional connections
-zig build run-platformer
-
-# Full engine features
-zig build run-engine
-
-# Building with multi-floor stairs
-zig build run-building
-
-# Run all examples
-zig build run-examples
+zig build test   # unit tests
+zig build spec   # zspec navigation tests
 ```
-
-## Running Tests
-
-```bash
-# Run built-in unit tests
-zig build test
-
-# Run zspec tests
-zig build spec
-```
-
-## License
-
-MIT

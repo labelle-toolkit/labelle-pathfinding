@@ -5,72 +5,78 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Build Commands
 
 ```bash
-# Run unit tests (built-in Zig tests)
-zig build test
-
-# Run zspec behavior tests
-zig build spec
-
-# Run examples
-zig build run-basic      # Basic pathfinding example (start here)
-zig build run-game       # Game integration with callbacks
-zig build run-platformer # Platformer with directional connections
-zig build run-engine     # Full engine features demo
-zig build run-building   # Multi-floor building with stairs
-zig build run-raylib     # Interactive raylib visualization
-zig build run-raylib-building  # Interactive multi-floor building
-zig build run-examples   # Run all examples
-
-# Run benchmark
-zig build run-benchmark  # Floyd-Warshall performance comparison
+zig build test   # unit tests (tests/nav/*)
+zig build spec   # zspec navigation behavior tests
 ```
 
-## Architecture
+There are no example or benchmark targets — those were v2-era and removed
+with the v3 repurpose.
 
-This is a Zig pathfinding library for games. It requires Zig 0.15.2+.
+## Requirements
 
-### Core Components
+Zig 0.16.0+ (`minimum_zig_version` in build.zig.zon).
 
-- **PathfindingEngine** (`src/engine.zig`): Self-contained engine that owns entity positions. Games query the engine for positions rather than managing them directly. Configured via comptime Config struct with `Entity` and `Context` types. Use `PathfindingEngineSimple(Entity, Context)` for quick setup.
+## Architecture (v4)
 
-- **Grid Helper**: `createGrid(config)` creates a grid of nodes with automatic connections. Returns a `Grid` struct with coordinate conversion utilities (`toScreen`, `toNodeId`, `fromNodeId`, `nodePosition`).
+The package is the labelle-engine **navigation plugin** (`.name = "pathfinder"`
+in a game's project.labelle — the name is load-bearing: `@import("pathfinder")`
+call sites and the `pathfinder__*` event tags both depend on it). Since v4 it
+owns everything movement; the consuming game keeps ONE pause-gated driver
+script calling `Controller.advance(game, dt)`.
 
-- **Position Type**: Position queries (`getPosition`, `getNodePosition`) return `Position` from labelle-core. Convenience methods like `addNodePos`, `registerEntityPos` accept `Position` directly.
+### Layers
 
-- **Floyd-Warshall** (`src/floyd_warshall.zig`): Precomputes all-pairs shortest paths. Used internally by PathfindingEngine. Best for dense graphs with frequent queries between many node pairs. An optimized SIMD version is available in `src/floyd_warshall_optimized.zig` (5-8x faster).
+- **`src/root.zig`** — module root. Declares the plugin `Events`
+  (`arrived`, `navigation_failed`, `graph_rebuilt`, `node_removed`) **inline** —
+  the assembler AST-walks this exact file; a re-export alias would be silently
+  invisible. Re-exports the full surface from `pathfinding.zig`.
+- **`src/pathfinding.zig`** — the surface aggregator: nav layer at top level,
+  algorithm core under `algo.*`.
+- **`src/nav/`** — the navigation layer:
+  - `controller.zig` — the plugin `Controller` (RFC-plugin-controllers):
+    commands (`navigate`, `moveTo`, `cancel`, `requestRepath`, `removeNode`,
+    `rebuildGraph`), queries (`reachable*`, `walkDistance`, `distance`,
+    `isNavigating`, `graphEpoch`, `targetPosition`, …), the settle path
+    (CMN refresh + `Navigating` removal + event emission), the `moveTo`
+    direct-walk tick, the `Navigating` rehydration sweep (mid-walk saves
+    resume on load), count-based graph-rebuild detection, and the CMN
+    epoch sweep. State lives behind the `ControllerState` singleton
+    (type-erased pointer; transient).
+  - `engine.zig` — pure `PathfinderWith(GameId, Hooks)`: graph + FW matrix +
+    the graph walker. `tick(ctx, dt)` calls `ctx.getEntityPosition`/`moveEntity`
+    and, when declared (`@hasDecl`-gated), `ctx.onArrived`/`onPathInvalidated`.
+  - `components.zig` — `MovementNode` (saveable), `MovementStair` (marker),
+    `ClosestMovementNode` (transient), `Navigating` (saveable walk order),
+    `MovementSpeed` (saveable, per-entity px/s).
+  - `graph.zig` / `floyd_warshall.zig` / `movement_path.zig` — graph storage,
+    axis-aligned auto-connection (horizontal cap 78 px, vertical via stairs,
+    cap 200 px), FW matrix, per-entity path state.
+- **`src/` (algo core)** — standalone: `a_star.zig`, `floyd_warshall_optimized.zig`
+  (SIMD/parallel variants), `quad_tree.zig`, `heuristics.zig`, `distance_graph.zig`,
+  `types.zig`. Namespaced as `pathfinding.algo.*`.
 
-- **A*** (`src/a_star.zig`): Single-source shortest path with pluggable heuristics. Better for large sparse graphs or dynamic scenarios.
+### Key invariants
 
-- **QuadTree** (`src/quad_tree.zig`): Spatial indexing for O(log n) entity and node lookups. Used for `getEntitiesInRadius`, `getEntitiesInRect`, etc.
-
-### Connection Modes
-
-The engine supports three graph connection strategies:
-- `omnidirectional`: Top-down games (connect to N closest neighbors)
-- `directional`: Platformers (4-direction: left/right/up/down)
-- `building`: Multi-floor buildings (horizontal + stair-based vertical only)
-
-Convenience functions for grid-based games:
-- `connectAsGrid4(cell_size)`: 4-directional movement
-- `connectAsGrid8(cell_size)`: 8-directional with diagonals
-
-### Stair Traffic Control
-
-For building mode, stairs can have traffic modes:
-- `.none`: Not a stair
-- `.all`: Multi-lane, unlimited concurrent usage
-- `.direction`: Multiple entities allowed if same direction
-- `.single`: Single-file, one entity at a time
-
-Waiting areas can be defined for entities queuing at busy stairs.
-
-### Floyd-Warshall Variants
-
-The engine supports different Floyd-Warshall implementations via `Config.floyd_warshall_variant`:
-- `.legacy`: Original ArrayList-based (default, backward compatible)
-- `.optimized_simd`: Flat memory + SIMD vectorization (5-8x faster)
-- `.optimized_parallel`: SIMD + multi-threading (best for large graphs 256+ nodes, up to 16x faster)
+- **Positions live in the consumer's ECS** — the walkers mutate through the
+  game API (`getPosition`/`setPosition`); the package never owns coordinates
+  (the v2 position-owning engine was deleted for exactly this).
+- **The walker is domain-blind** — any game-side "can't move" marker site
+  (fight, stun, death) must call `Controller.cancel`. Documented contract
+  since v3 (`GameCtx.moveEntity`), unchanged in v4.
+- **Retargets are idempotent** — `navigate`/`moveTo` clear the prior route,
+  ring entry, direct-move entry, AND the persisted `Navigating` before
+  starting anew, so failed retargets can't be resurrected by the rehydration
+  sweep.
+- **Events are sparse** (settles, rebuilds, tombstones) — continuous state is
+  behind the queries. The plugin never subscribes to game events.
+- **World positions** (`getWorldPosition`) everywhere positions are compared —
+  parented entities (storages under rooms) are meaningless in local coords.
 
 ## Testing
 
-Tests are in `tests/` using zspec. Each `*_spec.zig` file tests a specific module. The `tests/spec_tests.zig` aggregates all specs.
+`tests/nav/*_test.zig`, aggregated by `tests/nav/root.zig`. Controller logic
+that needs a full game (settle flows, rehydration, CMN sweeps) is
+integration-covered by the consuming game (flying-platform-labelle's bandit /
+transport / save-load scenes) — this repo deliberately has no mock game.
+Engine-level behavior (walking, invalidation, settle callbacks) and pure
+helpers (`directStep`, `nodesReachable`, cache validity) are unit-tested here.
