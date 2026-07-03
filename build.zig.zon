@@ -3,7 +3,7 @@
     // v3.0.0 — repurposed: the ECS navigation Controller (promoted from
     // flying-platform) is now the headline API; the standalone algorithm core
     // moves under `.algo`; the old position-owning engine is dropped.
-    .version = "3.0.0",
+    .version = "4.0.0",
     .fingerprint = 0x15f62ccc39d14685,
     .minimum_zig_version = "0.16.0",
     .dependencies = .{

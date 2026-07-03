@@ -15,7 +15,7 @@ pub fn build(b: *std.Build) void {
     // Main module — navigation layer (Controller + pure engine) at the top level,
     // standalone algorithm core under `.algo`.
     const pathfinding_module = b.addModule("labelle_pathfinding", .{
-        .root_source_file = b.path("src/pathfinding.zig"),
+        .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{
@@ -36,7 +36,7 @@ pub fn build(b: *std.Build) void {
     // Unit tests (refAllDecls over the nav layer + algorithm core).
     const unit_tests = b.addTest(.{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/pathfinding.zig"),
+            .root_source_file = b.path("src/root.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{

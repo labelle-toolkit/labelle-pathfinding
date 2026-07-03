@@ -42,8 +42,8 @@ pub const components = @import("components.zig");
 pub const MovementNode = components.MovementNode;
 pub const MovementStair = components.MovementStair;
 pub const ClosestMovementNode = components.ClosestMovementNode;
-pub const MovementTargetWith = components.MovementTargetWith;
-pub const NavigationIntentWith = components.NavigationIntentWith;
+pub const Navigating = components.Navigating;
+pub const MovementSpeed = components.MovementSpeed;
 
 // (The legacy `PathfinderContext` ECS adapter was dropped during the move into
 // labelle-pathfinding — use `Controller` exclusively.)
@@ -51,9 +51,11 @@ pub const NavigationIntentWith = components.NavigationIntentWith;
 // Plugin-exported Controller (RFC-plugin-controllers §1/§2). The
 // assembler's `PluginControllers` dispatcher auto-wires setup/deinit
 // on scene load/unload; game scripts call into the public API via
-// `pathfinder.Controller.navigate / .cancel / .findClosestNode`. The
-// per-frame `advance` method is invoked by a plugin-shipped script
-// at `libs/pathfinder/scripts/playing/01_advance.zig`.
+// `pathfinder.Controller.navigate / .moveTo / .cancel / queries`. The
+// per-frame `advance` method is invoked by a thin pause-gated driver
+// script in the consuming game (the plugin can't read the game's
+// pause component across the module boundary — see the consolidation
+// RFC in flying-platform's docs/RFC-pathfinder-consolidation.md).
 // The controller submodule is re-exported under `controller` alongside
 // the other file-level namespaces (types/graph/floyd_warshall above)
 // so tests can reach pub internals like `cachedNearestStillValid`
@@ -64,6 +66,7 @@ pub const Controller = controller.Controller;
 pub const ControllerState = controller.ControllerState;
 pub const Result = controller.Result;
 pub const Reason = controller.Reason;
+pub const FailReason = controller.FailReason;
 
 /// Components exported for ECS integration.
 /// Auto-discovered by the CLI when this plugin is declared.
@@ -71,6 +74,11 @@ pub const Components = struct {
     pub const MovementNode = components.MovementNode;
     pub const MovementStair = components.MovementStair;
     pub const ClosestMovementNode = components.ClosestMovementNode;
+    /// The persisted walk order (v4) — saveable so mid-walk saves
+    /// resume on load via the advance rehydration sweep.
+    pub const Navigating = components.Navigating;
+    /// Per-entity walk speed (v4) — attach from game prefabs.
+    pub const MovementSpeed = components.MovementSpeed;
     /// Singleton component holding the Controller's runtime state
     /// (RFC-plugin-controllers §6, primary pattern). Transient — never
     /// persisted.

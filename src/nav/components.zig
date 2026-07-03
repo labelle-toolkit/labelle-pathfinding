@@ -32,39 +32,49 @@ pub const ClosestMovementNode = struct {
     distance: f32 = 0.0,
 };
 
-/// Movement target — directs an entity to move towards a position.
-/// Parameterized on the game's Action enum.
-pub fn MovementTargetWith(comptime ActionType: type) type {
-    return struct {
-        target_x: f32,
-        target_y: f32,
-        speed: f32 = 200.0,
-        action: ActionType,
-    };
-}
+/// Per-entity walk speed in px/s, read by BOTH the graph walker and
+/// `moveTo` direct walks. Attach it from game prefabs (worker.jsonc,
+/// bandit.jsonc); entities without it walk at the plugin default
+/// (`controller.DEFAULT_SPEED`).
+///
+/// Saveable on purpose: saved entities rehydrate their components from
+/// the save file (not from prefab respawn), so a `.transient` policy
+/// would silently reset every loaded entity to the default speed.
+pub const MovementSpeed = struct {
+    pub const save_policy: @import("labelle-core").SavePolicy = .saveable;
 
-/// Navigation intent — requests pathfinder-based navigation to a target.
-/// Lifecycle: pending → navigating → removed on arrival at destination CMN.
-/// Parameterized on the game's Action enum.
-pub fn NavigationIntentWith(comptime ActionType: type) type {
-    return struct {
-        /// Entity to navigate to.
-        target_entity: u64 = 0,
-        /// What to do when we arrive.
-        action: ActionType,
-        /// Cached world position of target (for pathfinder routing).
-        target_x: f32 = 0,
-        target_y: f32 = 0,
-        /// Resolved closest node of target (0xFFFFFFFF = unresolved).
-        target_node: u32 = 0xFFFFFFFF,
-        /// Current state in the navigation lifecycle.
-        state: State = .pending,
+    speed: f32 = 200.0,
+};
 
-        pub const State = enum {
-            /// Just set, needs pathfinder navigate() call.
-            pending,
-            /// Pathfinder is actively moving entity node-to-node.
-            navigating,
-        };
+/// The persisted walk order — one per walking entity. Attached by
+/// `Controller.navigate` / `Controller.moveTo`, removed when the walk
+/// settles (arrival, failure, cancel, entity death).
+///
+/// Saveable so a mid-walk save resumes on load: `Controller.advance`
+/// sweeps entities that carry `Navigating` but aren't tracked by the
+/// live pathfinder (the tracker state is `.transient`) and re-issues
+/// the walk from the entity's loaded position. Targets are world-space
+/// positions, not entity refs, so no `entity_ref_fields` remapping is
+/// needed across save/load.
+pub const Navigating = struct {
+    pub const save_policy: @import("labelle-core").SavePolicy = .saveable;
+
+    target_x: f32 = 0,
+    target_y: f32 = 0,
+    mode: Mode = .graph,
+
+    pub const Mode = enum {
+        /// Route through the movement-node graph (Floyd-Warshall).
+        graph,
+        /// Straight-line walk to the target — off-graph moves (ship
+        /// boundary hops, wander steps). No routing, just kinematics.
+        direct,
     };
-}
+};
+
+// (v4.0.0) The `MovementTargetWith` / `NavigationIntentWith` component
+// factories are gone: the request-packet pattern they served moved into
+// the plugin as `Navigating` + the `navigate`/`moveTo` commands, and the
+// game-specific `action` payload they carried was dropped — arrival
+// context lives in the caller's own state machine, announced via the
+// `pathfinder__arrived` event.

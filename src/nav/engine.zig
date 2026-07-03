@@ -262,6 +262,16 @@ pub fn PathfinderWith(
                     .goal_node = entry.value.path.goal_node,
                     .registry = null,
                 } });
+                // Ctx settle callback (v4): unlike the comptime GameHooks
+                // (static fns, no game access), the ctx carries live game
+                // state — the nav Controller uses this to emit the
+                // `pathfinder__arrived` game event, refresh the arrival
+                // CMN, and drop the `Navigating` component. `@hasDecl`-
+                // gated so plain contexts (tests, standalone consumers)
+                // keep compiling unchanged.
+                if (@hasDecl(@TypeOf(ctx.*), "onArrived")) {
+                    ctx.onArrived(entity, entry.value.path.goal_node);
+                }
             }
         }
 
@@ -386,6 +396,9 @@ pub fn PathfinderWith(
                             .current_node = current_node,
                             .registry = null,
                         } });
+                        if (@hasDecl(@TypeOf(ctx.*), "onPathInvalidated")) {
+                            ctx.onPathInvalidated(entity, goal_node);
+                        }
                         continue;
                     };
                     for (new_node_path, 0..) |node_id, i| {
@@ -418,10 +431,11 @@ pub fn PathfinderWith(
                         .current_node = current_node,
                         .registry = null,
                     } });
+                    if (@hasDecl(@TypeOf(ctx.*), "onPathInvalidated")) {
+                        ctx.onPathInvalidated(entity, goal_node);
+                    }
                 }
             }
-
-            _ = ctx;
         }
 
         /// Simple comptime hook dispatch — same pattern as labelle-tasks.
