@@ -1023,10 +1023,12 @@ pub const Controller = struct {
         game.emit(.{ .pathfinder__graph_rebuilt = .{ .epoch = st.graph_epoch } });
     }
 
-    fn hasMovementNodes(game: anytype) bool {
+    fn countMovementNodes(game: anytype) u32 {
         var view = game.active_world.ecs_backend.view(.{MovementNode}, .{});
         defer view.deinit();
-        return view.next() != null;
+        var n: u32 = 0;
+        while (view.next()) |_| n += 1;
+        return n;
     }
 
     fn isGraphStale(game: anytype, st: *State) bool {
@@ -1039,9 +1041,20 @@ pub const Controller = struct {
     }
 
     fn maybeRebuildGraph(game: anytype, st: *State) void {
-        const empty_but_populated = !st.nodes_registered and hasMovementNodes(game);
+        // Count-based change detection (v4): node ADDITIONS (a newly
+        // built room/carcase spawning MovementNodes) are invisible to
+        // the first-node-exists staleness probe, and previously needed
+        // a game-side `PathfinderRebuild` marker + debounce script.
+        // Comparing the live count against the tracked set catches
+        // additions and removals alike, with natural burst-debounce
+        // (however many nodes spawn in one frame, the next `advance`
+        // rebuilds once). The O(nodes) view walk per tick is noise
+        // next to the navigation tick it rides with.
+        const live = countMovementNodes(game);
+        const tracked: u32 = @intCast(st.node_entities.count());
+        const count_changed = live != tracked;
         const stale = st.nodes_registered and isGraphStale(game, st);
-        if (!empty_but_populated and !stale) return;
+        if (!count_changed and !stale) return;
 
         st.reset(st.allocator);
         buildGraphIntoState(game, st);

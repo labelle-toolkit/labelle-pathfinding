@@ -52,6 +52,7 @@ pub const Controller = nav.Controller;
 pub const ControllerState = nav.ControllerState;
 pub const Result = nav.Result;
 pub const Reason = nav.Reason;
+pub const FailReason = nav.FailReason;
 pub const controller = nav.controller; // module (pub internals: thresholds, helpers)
 
 // Pure engine + graph.

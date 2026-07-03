@@ -38,14 +38,14 @@ pub const Events = struct {
     /// reroute exists (`path_invalidated`), or a persisted order could
     /// not be re-issued after a load. The `Navigating` order is already
     /// removed when this fires — the owner decides whether to retry.
+    ///
+    /// (The `reason` field references the controller's `FailReason` by
+    /// import — the assembler's AST walk only needs the event DECL
+    /// itself inline in this file; field types resolve at compile time
+    /// through the module graph like any other type.)
     pub const navigation_failed = struct {
         entity: u64,
-        reason: enum {
-            path_invalidated,
-            no_path,
-            no_nearby_node,
-            navigate_error,
-        },
+        reason: pathfinding.FailReason,
     };
 
     /// The movement-node graph was (re)built; `epoch` is the new value
