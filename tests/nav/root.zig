@@ -7,4 +7,5 @@ test {
     _ = @import("controller_cache_test.zig");
     _ = @import("controller_snap_test.zig");
     _ = @import("controller_v4_test.zig");
+    _ = @import("reachable_test.zig");
 }
