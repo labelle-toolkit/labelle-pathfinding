@@ -5,11 +5,14 @@
 //!
 //! 1. **Navigation (the headline, top-level)** — `src/nav/`. An ECS-integrated
 //!    `Controller` for labelle-engine games: you keep entity positions in your
-//!    ECS (the single source of truth), and the Controller computes routes and
-//!    emits `MovementTarget` waypoints. Built on the pure `PathfinderWith` engine,
-//!    which is itself usable directly with no ECS. The Controller is duck-typed
-//!    (`game: anytype`) — it never imports labelle-engine, so depending on this
-//!    package never pulls the engine in.
+//!    ECS (the single source of truth), and the Controller routes AND walks
+//!    entities for you — graph navigation (`navigate`) and straight-line moves
+//!    (`moveTo`), announced back as `pathfinder__*` game events, with a query
+//!    surface (`reachable` / `walkDistance` / `isNavigating`) for reads. Built
+//!    on the pure `PathfinderWith` engine, which is itself usable directly
+//!    with no ECS. The Controller is duck-typed (`game: anytype`) — it never
+//!    imports labelle-engine, so depending on this package never pulls the
+//!    engine in.
 //!
 //! 2. **Algorithm core (`pathfinding.algo.*`)** — standalone, position-agnostic
 //!    building blocks: A*, Floyd-Warshall (incl. SIMD/parallel variants),
@@ -64,11 +67,11 @@ pub const components = nav.components;
 pub const MovementNode = nav.MovementNode;
 pub const MovementStair = nav.MovementStair;
 pub const ClosestMovementNode = nav.ClosestMovementNode;
-pub const MovementTargetWith = nav.MovementTargetWith;
-pub const NavigationIntentWith = nav.NavigationIntentWith;
+pub const Navigating = nav.Navigating;
+pub const MovementSpeed = nav.MovementSpeed;
 // The `Components` aggregator the assembler scans to register the plugin's
 // components (MovementNode / MovementStair / ClosestMovementNode /
-// ControllerState) into the ComponentRegistry.
+// Navigating / MovementSpeed / ControllerState) into the ComponentRegistry.
 pub const Components = nav.Components;
 
 // Paths, hooks, gizmos, scalar types.

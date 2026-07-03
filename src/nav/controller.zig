@@ -16,14 +16,21 @@
 // Every public method looks up the singleton via the active world's
 // ECS backend — no module-level `var`.
 //
-// Scope — what lives here vs. the caller:
+// Scope — what lives here vs. the caller (v4, the consolidation):
 //   Plugin (here):   graph build, node registration, per-frame tick,
-//                    pending-entity ring, arrival detection.
-//   Game:            request-packet components (NavigationIntent,
-//                    MovementTarget, NeedsClosestNode) and the dispatch
-//                    script that translates them into Controller API
-//                    calls. Those types are game-owned — the plugin
-//                    doesn't know about them by name.
+//                    BOTH walkers (graph + `moveTo` straight-line),
+//                    arrival/failure settling announced as
+//                    `pathfinder__*` game events, the persisted
+//                    `Navigating` order + its load-rehydration, CMN
+//                    maintenance, and the query surface (reachable /
+//                    walkDistance / isNavigating / distance).
+//   Game:            a thin pause-gated driver that calls `advance`
+//                    (the plugin can't read the game's pause component
+//                    across the module boundary), hooks subscribing to
+//                    the settle events for domain reactions (FSM
+//                    transitions), and "can't move right now" rules —
+//                    a fight/stun marker site must `cancel` the walk
+//                    (the walker is domain-blind by design).
 
 const std = @import("std");
 const engine_mod = @import("engine.zig");
@@ -33,6 +40,9 @@ const movement_path = @import("movement_path.zig");
 
 const MovementNode = components.MovementNode;
 const MovementStair = components.MovementStair;
+const ClosestMovementNode = components.ClosestMovementNode;
+const Navigating = components.Navigating;
+const MovementSpeed = components.MovementSpeed;
 
 const NodeId = types.NodeId;
 const Position = types.Position;
@@ -56,7 +66,14 @@ const Pf = engine_mod.PathfinderWith(GameId, struct {});
 /// deferral every tick). Sized to a typical mid-colony's
 /// concurrent-navigation count so steady state never reallocs.
 const PENDING_INITIAL_CAPACITY: usize = 64;
-const DEFAULT_SPEED: f32 = 200.0;
+/// Walk speed for entities without a `MovementSpeed` component, px/s.
+pub const DEFAULT_SPEED: f32 = 200.0;
+/// Arrival radius for `moveTo` direct walks, px. Matches the game-side
+/// walker this replaced (flying-platform's `03_worker_movement`
+/// `arrival_radius`) so straight-line arrival feel is unchanged. The
+/// graph walker keeps its own tighter `ARRIVAL_THRESHOLD` (2 px,
+/// `engine.zig`) — waypoints need precision, destinations need feel.
+pub const DIRECT_ARRIVAL_RADIUS: f32 = 5.0;
 /// Cap on **vertical** edge length — the climb between two stair
 /// nodes on adjacent floors (same-X axis, different Y).
 const MAX_VERTICAL_DISTANCE: f32 = 200.0;
@@ -132,6 +149,24 @@ pub const CachedNearest = struct {
     cached_node_y: f32,
 };
 
+/// One in-flight `moveTo` straight-line walk (see `State.direct_moves`).
+pub const DirectMove = struct {
+    target: Position,
+    speed: f32,
+};
+
+/// Why a walk ended without arriving — the payload of the
+/// `pathfinder__navigation_failed` event. Mirrors the reject/defer
+/// `Reason`s a caller can also see synchronously from `navigate`, plus
+/// the async-only `path_invalidated` (graph changed mid-walk, reroute
+/// failed).
+pub const FailReason = enum {
+    path_invalidated,
+    no_path,
+    no_nearby_node,
+    navigate_error,
+};
+
 /// Singleton ECS component attaching the Controller's runtime state to
 /// a world entity. `state_ptr` is a `usize` holding a type-erased
 /// pointer so the component doesn't pull game types into its shape;
@@ -192,6 +227,19 @@ pub const State = struct {
     /// entities exist; `advance` lazily builds once nodes appear.
     nodes_registered: bool = false,
 
+    /// In-flight `moveTo` straight-line walks, keyed by entity. Kept
+    /// OUT of the underlying pathfinder (these walks never touch the
+    /// graph) and deliberately NOT cleared by `reset` — a graph
+    /// rebuild doesn't invalidate a straight-line walk. Dead entities
+    /// are pruned by the per-tick existence check in
+    /// `advanceDirectMoves`.
+    direct_moves: std.AutoArrayHashMapUnmanaged(u64, DirectMove) = .empty,
+
+    /// Last graph epoch at which the CMN sweep ran — drives the
+    /// epoch-change invalidation of `ClosestMovementNode` components
+    /// (moved in from the game-side dispatch in v4).
+    last_cmn_epoch: u64 = 0,
+
     /// Monotonic counter incremented every time the graph is
     /// (re)built — i.e. whenever the set of registered nodes
     /// changes. Game-side scripts consume this to detect when
@@ -223,6 +271,7 @@ pub const State = struct {
         self.node_entities.deinit(self.allocator);
         self.pending_entities.deinit(self.allocator);
         self.cache_prune_scratch.deinit(self.allocator);
+        self.direct_moves.deinit(self.allocator);
         self.pf.deinit();
     }
 
@@ -444,6 +493,10 @@ pub const Controller = struct {
             return .{ .rejected = .no_nearby_node };
         };
 
+        // One mover per entity: a graph walk replaces any in-flight
+        // straight-line order.
+        _ = st.direct_moves.swapRemove(entity_id);
+
         if (from_node == to_node) {
             // Worker and target resolve to the same node. The worker
             // isn't necessarily AT that node's world position yet —
@@ -458,10 +511,20 @@ pub const Controller = struct {
             // own waypoint snap at ARRIVAL_THRESHOLD.
             const node_pos = st.pf.graph.getPosition(from_node);
             game.setPosition(entity, .{ .x = node_pos.x, .y = node_pos.y });
+            // A redundant navigate IS an arrival — settle it so the
+            // `pathfinder__arrived` event fires uniformly (subscribers
+            // shouldn't care whether any walking was needed) and any
+            // persisted `Navigating` from a prior order is cleared.
+            settleArrival(game, st, entity_id, from_node);
             return .redundant;
         }
 
-        const path = st.pf.navigate(entity_id, from_node, to_node, DEFAULT_SPEED) catch |err| {
+        const speed = if (game.active_world.ecs_backend.getComponent(entity, MovementSpeed)) |ms|
+            ms.speed
+        else
+            DEFAULT_SPEED;
+
+        const path = st.pf.navigate(entity_id, from_node, to_node, speed) catch |err| {
             log.err("navigate failed: entity={d} from={d} to={d}: {}", .{ entity_id, from_node, to_node, err });
             return .{ .rejected = .navigate_error };
         };
@@ -476,6 +539,62 @@ pub const Controller = struct {
             st.pf.cancel(entity_id);
             return .{ .deferred = .pending_alloc_failed };
         }
+
+        // Persist the order so a mid-walk save re-issues on load (the
+        // live route above is transient state).
+        game.active_world.ecs_backend.addComponent(entity, Navigating{
+            .target_x = target.x,
+            .target_y = target.y,
+            .mode = .graph,
+        });
+        return .accepted;
+    }
+
+    /// Straight-line walk to a world position — the off-graph mover
+    /// (ship-boundary hops, wander steps, anything the graph can't
+    /// route). No routing: pure clamp-kinematics toward `target`,
+    /// arrival at `DIRECT_ARRIVAL_RADIUS`, announced via
+    /// `pathfinder__arrived` like any other walk. Speed comes from the
+    /// entity's `MovementSpeed` (or the plugin default). Replaces the
+    /// game-side raw `MovementTarget` writes from v3.
+    pub fn moveTo(game: anytype, entity: anytype, target: Position) Result {
+        const st = findState(game) orelse return .{ .rejected = .controller_not_setup };
+        const entity_id: u64 = @intCast(entity);
+
+        // One mover per entity: a direct order replaces any graph walk.
+        st.pf.cancel(entity_id);
+        var i: usize = 0;
+        while (i < st.pending_entities.items.len) {
+            if (st.pending_entities.items[i] == entity_id) {
+                st.removePending(i);
+                break;
+            }
+            i += 1;
+        }
+
+        const pos = game.getPosition(entity);
+        const dx = target.x - pos.x;
+        const dy = target.y - pos.y;
+        if (@sqrt(dx * dx + dy * dy) < DIRECT_ARRIVAL_RADIUS) {
+            settleArrival(game, st, entity_id, null);
+            return .redundant;
+        }
+
+        const speed = if (game.active_world.ecs_backend.getComponent(entity, MovementSpeed)) |ms|
+            ms.speed
+        else
+            DEFAULT_SPEED;
+
+        st.direct_moves.put(st.allocator, entity_id, .{
+            .target = target,
+            .speed = speed,
+        }) catch return .{ .deferred = .pending_alloc_failed };
+
+        game.active_world.ecs_backend.addComponent(entity, Navigating{
+            .target_x = target.x,
+            .target_y = target.y,
+            .mode = .direct,
+        });
         return .accepted;
     }
 
@@ -493,6 +612,17 @@ pub const Controller = struct {
         const st = findState(game) orelse return;
         const entity_id: u64 = @intCast(entity);
         st.pf.cancel(entity_id);
+        _ = st.direct_moves.swapRemove(entity_id);
+        // Drop the persisted order too — a cancelled walk must not
+        // resurrect through the rehydration sweep next tick. No event:
+        // the canceller knows what it did (cancel is a command, not a
+        // surprise).
+        {
+            const Entity = @TypeOf(game.*).EntityType;
+            const e: Entity = @intCast(entity_id);
+            const ecs = &game.active_world.ecs_backend;
+            if (ecs.entityExists(e)) ecs.removeComponent(e, Navigating);
+        }
         // Swap-remove from the pending ring.
         var i: usize = 0;
         while (i < st.pending_entities.items.len) {
@@ -627,13 +757,73 @@ pub const Controller = struct {
         return findState(game);
     }
 
-    /// Report that a navigation is in-flight on the pending ring.
-    /// Used by the dispatch script to know whether to emit a new
-    /// NavigationIntent or wait for the current one to settle.
+    /// Is this entity currently walking — via the graph OR a `moveTo`
+    /// straight-line order? (v4: direct moves count; "is it walking"
+    /// is the question every caller actually asks.)
     pub fn isNavigating(game: anytype, entity: anytype) bool {
         const st = findState(game) orelse return false;
         const entity_id: u64 = @intCast(entity);
-        return st.isNavigating(entity_id);
+        return st.isNavigating(entity_id) or st.direct_moves.contains(entity_id);
+    }
+
+    /// Is there ANY walkable route between the two entities' nearest
+    /// nodes? The "can I even get there" gate (#48) — cheaper to ask
+    /// than to `navigate` and watch it reject, and the single source
+    /// of the reachability filter previously re-rolled game-side as
+    /// `distance(...) != null`.
+    pub fn reachable(game: anytype, from_entity: anytype, to_entity: anytype) bool {
+        return distance(game, from_entity, to_entity) != null;
+    }
+
+    /// Walk-cost between two entities with the game-proven "nearest X"
+    /// selector semantics (movement.md, single-sourced here in v4 —
+    /// this absorbs the `entityDistance` helper that was triplicated
+    /// across production/needs_machine/hunger call sites):
+    ///   - graph built → true path cost, `inf` when disconnected
+    ///     (an unreachable candidate must lose every distance-min
+    ///     comparison, never win via a Euclidean fallback)
+    ///   - graph not yet built → Euclidean (startup grace so finders
+    ///     don't deadlock before the first node registers)
+    /// World positions on both branches (parented entities compare in
+    /// world space, movement.md rule #4).
+    pub fn walkDistance(game: anytype, from_entity: anytype, to_entity: anytype) f32 {
+        const st = findState(game) orelse return euclideanBetween(game, from_entity, to_entity);
+        if (st.node_entities.count() == 0) {
+            return euclideanBetween(game, from_entity, to_entity);
+        }
+        return distance(game, from_entity, to_entity) orelse std.math.inf(f32);
+    }
+
+    fn euclideanBetween(game: anytype, a: anytype, b: anytype) f32 {
+        const pa = game.getWorldPosition(a);
+        const pb = game.getWorldPosition(b);
+        const dx = pa.x - pb.x;
+        const dy = pa.y - pb.y;
+        return @sqrt(dx * dx + dy * dy);
+    }
+
+    /// Re-resolve the entity's `ClosestMovementNode` immediately (v4:
+    /// replaces the game-side `PendingRepath` marker + next-tick
+    /// resolve round-trip — the plugin owns the CMN component, so
+    /// there's nothing to defer). Removes the CMN when the entity is
+    /// off-graph (no node within `MAX_NODE_SNAP_DISTANCE`).
+    pub fn requestRepath(game: anytype, entity: anytype) void {
+        const st = findState(game) orelse return;
+        const entity_id: u64 = @intCast(entity);
+        const ecs = &game.active_world.ecs_backend;
+        const pos = game.getWorldPosition(entity);
+        if (findNearestNodeForEntity(st, entity_id, pos.x, pos.y)) |nid| {
+            const node_pos = st.pf.graph.getPosition(nid);
+            const dx = node_pos.x - pos.x;
+            const dy = node_pos.y - pos.y;
+            ecs.addComponent(entity, ClosestMovementNode{
+                .node_entity = st.node_entities.get(nid) orelse 0,
+                .node_id = nid,
+                .distance = @sqrt(dx * dx + dy * dy),
+            });
+        } else {
+            ecs.removeComponent(entity, ClosestMovementNode);
+        }
     }
 
     /// Number of slots the underlying graph has allocated. Useful for
@@ -698,6 +888,7 @@ pub const Controller = struct {
     pub fn removeNode(game: anytype, node_id: NodeId) void {
         const st = findState(game) orelse return;
         st.pf.removeNode(node_id);
+        game.emit(.{ .pathfinder__node_removed = .{ .node_id = node_id } });
     }
 
     /// Per-frame advancement of in-flight navigations.
@@ -720,7 +911,10 @@ pub const Controller = struct {
         const st = findState(game) orelse return;
 
         maybeRebuildGraph(game, st);
+        sweepCmnOnEpochChange(st, game);
+        rehydrateNavigating(st, game);
         advanceNavigation(st, game, dt);
+        advanceDirectMoves(st, game, dt);
         processArrivals(game, st);
         pruneNearestNodeCache(game, st);
     }
@@ -819,12 +1013,14 @@ pub const Controller = struct {
         if (st.nodes_registered) {
             log.info("graph built: {d} nodes (Floyd-Warshall)", .{st.node_entities.count()});
         }
-        // Bump the rebuild epoch so game-side consumers know to
-        // re-resolve cached `ClosestMovementNode` assignments — see
-        // #424. Bumped even when no nodes ended up registered, so
-        // a transition from "had nodes" → "all nodes removed" still
-        // counts as a change observers can react to.
+        // Bump the rebuild epoch so consumers know cached node
+        // assignments went stale — see #424. Bumped even when no nodes
+        // ended up registered, so a transition from "had nodes" → "all
+        // nodes removed" still counts as a change observers can react
+        // to. The event is the push twin of the `graphEpoch()` poll
+        // (v4); the plugin's own CMN sweep keys off the same counter.
         st.graph_epoch += 1;
+        game.emit(.{ .pathfinder__graph_rebuilt = .{ .epoch = st.graph_epoch } });
     }
 
     fn hasMovementNodes(game: anytype) bool {
@@ -856,16 +1052,133 @@ pub const Controller = struct {
     // ------------------------------------------------------------------
 
     fn advanceNavigation(st: *State, game: anytype, dt: f32) void {
-        var ctx = GameCtx(@TypeOf(game)){ .game = game };
+        var ctx = GameCtx(@TypeOf(game)){ .game = game, .st = st };
         st.pf.tick(&ctx, dt);
+    }
+
+    /// Walk every in-flight `moveTo` straight-line order: clamp-move
+    /// toward the target, settle on arrival. Same kinematics as the
+    /// game-side walker this absorbed (min(speed·dt, dist), no
+    /// overshoot, `DIRECT_ARRIVAL_RADIUS` arrival).
+    fn advanceDirectMoves(st: *State, game: anytype, dt: f32) void {
+        if (st.direct_moves.count() == 0) return;
+        const Entity = @TypeOf(game.*).EntityType;
+        const ecs = &game.active_world.ecs_backend;
+
+        // Settles are collected and processed after the iteration —
+        // `settleArrival` mutates components and `fetchSwapRemove`
+        // reorders the map, neither safe mid-iteration.
+        var settled: std.ArrayListUnmanaged(u64) = .empty;
+        defer settled.deinit(st.allocator);
+
+        for (st.direct_moves.keys(), st.direct_moves.values()) |entity_id, dm| {
+            const entity: Entity = @intCast(entity_id);
+            if (!ecs.entityExists(entity)) {
+                settled.append(st.allocator, entity_id) catch break;
+                continue;
+            }
+            const pos = game.getPosition(entity);
+            switch (directStep(pos, dm.target, dm.speed, dt)) {
+                .arrived => settled.append(st.allocator, entity_id) catch break,
+                .move => |next| game.setPosition(entity, next),
+            }
+        }
+
+        for (settled.items) |entity_id| {
+            _ = st.direct_moves.swapRemove(entity_id);
+            const entity: Entity = @intCast(entity_id);
+            if (ecs.entityExists(entity)) {
+                settleArrival(game, st, entity_id, null);
+            }
+        }
+    }
+
+    /// Re-issue persisted walk orders the live tracker doesn't know
+    /// about. The tracker state (`ControllerState`) is `.transient`
+    /// while `Navigating` is `.saveable` — after a load, entities
+    /// carry their orders but the pathfinder has no routes for them.
+    /// A re-issue that no longer resolves (graph changed under the
+    /// save) settles as a failure so the order can't dangle forever.
+    fn rehydrateNavigating(st: *State, game: anytype) void {
+        if (!st.nodes_registered) return;
+        const Entity = @TypeOf(game.*).EntityType;
+        const ecs = &game.active_world.ecs_backend;
+
+        var orphans: std.ArrayListUnmanaged(u64) = .empty;
+        defer orphans.deinit(st.allocator);
+        {
+            var view = ecs.view(.{Navigating}, .{});
+            defer view.deinit();
+            while (view.next()) |entity| {
+                const id: u64 = @intCast(entity);
+                if (st.pf.isNavigating(id)) continue;
+                if (st.direct_moves.contains(id)) continue;
+                orphans.append(st.allocator, id) catch break;
+            }
+        }
+
+        for (orphans.items) |id| {
+            const entity: Entity = @intCast(id);
+            const nav = ecs.getComponent(entity, Navigating) orelse continue;
+            const target = Position{ .x = nav.target_x, .y = nav.target_y };
+            switch (nav.mode) {
+                .direct => {
+                    _ = moveTo(game, entity, target);
+                },
+                .graph => switch (navigate(game, entity, target, @src())) {
+                    .accepted, .redundant => {},
+                    // Deferred is transient (graph mid-rebuild) — keep the
+                    // order, retry next tick.
+                    .deferred => {},
+                    .rejected => |r| settleFailed(game, id, switch (r) {
+                        .no_path => .no_path,
+                        .no_nearby_node => .no_nearby_node,
+                        else => .navigate_error,
+                    }),
+                },
+            }
+        }
+    }
+
+    /// Epoch-change CMN invalidation (moved in from the game-side
+    /// dispatch in v4): when the graph is rebuilt, every cached
+    /// `ClosestMovementNode` may point at a node that no longer exists
+    /// or is no longer optimal. Drop them all; arrivals and
+    /// `requestRepath` re-resolve lazily.
+    fn sweepCmnOnEpochChange(st: *State, game: anytype) void {
+        if (st.graph_epoch == st.last_cmn_epoch) return;
+        const Entity = @TypeOf(game.*).EntityType;
+        const ecs = &game.active_world.ecs_backend;
+
+        var holders: std.ArrayListUnmanaged(u64) = .empty;
+        defer holders.deinit(st.allocator);
+        var collected_all = true;
+        {
+            var view = ecs.view(.{ClosestMovementNode}, .{});
+            defer view.deinit();
+            while (view.next()) |entity| {
+                holders.append(st.allocator, @intCast(entity)) catch {
+                    // OOM: don't advance the epoch marker — next tick
+                    // re-runs the whole sweep.
+                    collected_all = false;
+                    break;
+                };
+            }
+        }
+        for (holders.items) |id| {
+            const entity: Entity = @intCast(id);
+            ecs.removeComponent(entity, ClosestMovementNode);
+        }
+        if (collected_all) st.last_cmn_epoch = st.graph_epoch;
     }
 
     /// Drain the pending ring of entities whose pathfinder navigation
     /// has settled (arrived, destroyed, or cancelled externally).
     /// Removes them from the ring so `isNavigating` returns false.
-    /// The dispatch script reads `isNavigating` each tick and reacts
-    /// — the plugin itself doesn't know about game markers like
-    /// NeedsClosestNode, so arrival-side effects stay game-side.
+    /// Pure bookkeeping in v4 — the observable side effects (the
+    /// `pathfinder__arrived`/`navigation_failed` events, CMN refresh,
+    /// `Navigating` removal) fire from the tick's settle callbacks;
+    /// destroyed entities need none (their components die with them).
     fn processArrivals(game: anytype, st: *State) void {
         const ecs = &game.active_world.ecs_backend;
         const Entity = @TypeOf(game.*).EntityType;
@@ -1019,13 +1332,99 @@ pub fn findNearestNodeInState(st: *State, x: f32, y: f32) ?NodeId {
     return best;
 }
 
+/// One straight-line walk step: arrived when within
+/// `DIRECT_ARRIVAL_RADIUS`, else the next position clamped to
+/// `min(speed·dt, remaining)` so the walker never overshoots. Pure so
+/// the kinematics are unit-testable without a game harness (the same
+/// extraction the game-side walker this absorbed had).
+pub const DirectStep = union(enum) {
+    arrived,
+    move: Position,
+};
+
+pub fn directStep(pos: Position, target: Position, speed: f32, dt: f32) DirectStep {
+    const dx = target.x - pos.x;
+    const dy = target.y - pos.y;
+    const dist = @sqrt(dx * dx + dy * dy);
+    if (dist < DIRECT_ARRIVAL_RADIUS) return .arrived;
+    const move_dist = @min(speed * dt, dist);
+    return .{ .move = .{
+        .x = pos.x + (dx / dist) * move_dist,
+        .y = pos.y + (dy / dist) * move_dist,
+    } };
+}
+
+/// Settle an arrived walk: refresh the entity's CMN to where it now
+/// stands, drop the persisted `Navigating` order, and announce via the
+/// `pathfinder__arrived` game event (buffered; subscribers see it at
+/// end-of-frame dispatch). `goal_node` is null for direct (off-graph)
+/// arrivals — the CMN then re-resolves from the arrival position.
+fn settleArrival(game: anytype, st: *State, entity_id: u64, goal_node: ?NodeId) void {
+    const Entity = @TypeOf(game.*).EntityType;
+    const entity: Entity = @intCast(entity_id);
+    const ecs = &game.active_world.ecs_backend;
+    if (!ecs.entityExists(entity)) return;
+
+    ecs.removeComponent(entity, Navigating);
+
+    // CMN refresh replaces the old game-side arrival → NeedsClosestNode
+    // marker → next-tick resolve round-trip: the plugin owns the CMN
+    // component, so resolve it here and now.
+    var node_entity: u64 = 0;
+    const resolved: ?NodeId = goal_node orelse blk: {
+        const pos = game.getWorldPosition(entity);
+        break :blk findNearestNodeForEntity(st, entity_id, pos.x, pos.y);
+    };
+    if (resolved) |nid| {
+        node_entity = st.node_entities.get(nid) orelse 0;
+        ecs.addComponent(entity, ClosestMovementNode{
+            .node_entity = node_entity,
+            .node_id = nid,
+            .distance = 0,
+        });
+    }
+
+    game.emit(.{ .pathfinder__arrived = .{
+        .entity = entity_id,
+        .node_entity = node_entity,
+    } });
+}
+
+/// Settle a failed walk: drop the persisted order and announce. The
+/// caller that issued the walk learns the outcome by subscribing to
+/// `pathfinder__navigation_failed` (or by re-querying) — commands
+/// return acceptance, not effects (RFC-packs §6).
+fn settleFailed(game: anytype, entity_id: u64, reason: FailReason) void {
+    const Entity = @TypeOf(game.*).EntityType;
+    const entity: Entity = @intCast(entity_id);
+    const ecs = &game.active_world.ecs_backend;
+    if (ecs.entityExists(entity)) {
+        ecs.removeComponent(entity, Navigating);
+    }
+    game.emit(.{ .pathfinder__navigation_failed = .{
+        .entity = entity_id,
+        .reason = reason,
+    } });
+}
+
 /// Thin bridge exposing `getEntityPosition` / `moveEntity` to the
-/// pathfinder tick loop. Parameterized on the game's concrete type so
-/// the Entity cast and `getPosition` / `setPosition` lookups are
-/// monomorphized per call site.
+/// pathfinder tick loop, plus the v4 settle callbacks that let the
+/// tick announce arrivals/failures as game events. Parameterized on
+/// the game's concrete type so the Entity cast and `getPosition` /
+/// `setPosition` lookups are monomorphized per call site.
 fn GameCtx(comptime GameType: type) type {
     return struct {
         game: GameType,
+        st: *State,
+
+        pub fn onArrived(self: *@This(), entity_id: u64, goal_node: NodeId) void {
+            settleArrival(self.game, self.st, entity_id, goal_node);
+        }
+
+        pub fn onPathInvalidated(self: *@This(), entity_id: u64, goal_node: NodeId) void {
+            _ = goal_node;
+            settleFailed(self.game, entity_id, .path_invalidated);
+        }
 
         pub fn getEntityPosition(self: *@This(), entity_id: u64) ?Position {
             const Entity = @TypeOf(self.game.*).EntityType;
@@ -1058,4 +1457,3 @@ fn GameCtx(comptime GameType: type) type {
         }
     };
 }
-

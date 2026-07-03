@@ -50,7 +50,76 @@ exe.root_module.addImport("labelle_pathfinding", pathfinding_dep.module("labelle
 
 ## Usage
 
-### PathfindingEngine (Recommended)
+### Navigation Controller — labelle-engine games (the headline, v4)
+
+The plugin owns **everything movement**: the node graph (`MovementNode` /
+`MovementStair` entities), route computation (Floyd-Warshall), **both
+walkers** (graph navigation and straight-line `moveTo`), arrival
+handling, and the persisted walk order (`Navigating`, saveable — mid-walk
+saves resume on load). Entity positions stay in **your ECS** (single
+source of truth); the walkers mutate them through the game API.
+
+Communication follows the three-channel model (events up, commands and
+queries down):
+
+**Commands** (plain fns; acceptance via `Result`, effects via events):
+
+```zig
+const pathfinder = @import("pathfinder");
+
+_ = pathfinder.Controller.navigate(game, entity, target_pos, @src()); // graph walk
+_ = pathfinder.Controller.moveTo(game, entity, target_pos);           // straight-line (off-graph)
+pathfinder.Controller.cancel(game, entity);       // stop walking (also: your "can't move" rule —
+                                                  // a fight/stun marker site MUST cancel; the
+                                                  // walker is domain-blind by design)
+pathfinder.Controller.requestRepath(game, entity); // re-resolve the entity's ClosestMovementNode now
+pathfinder.Controller.removeNode(game, node_id);   // tombstone a node (deconstruction drains)
+pathfinder.Controller.rebuildGraph(game);          // full rebuild from current node entities
+```
+
+**Queries** (reads; never mutate):
+
+```zig
+pathfinder.Controller.reachable(game, a, b);     // bool — is there ANY route between them?
+pathfinder.Controller.walkDistance(game, a, b);  // f32 — path cost; inf when disconnected;
+                                                 //       Euclidean before the graph exists
+                                                 //       (the "nearest X" selector metric)
+pathfinder.Controller.distance(game, a, b);      // ?f32 — path cost or null
+pathfinder.Controller.isNavigating(game, e);     // walking? (graph OR direct)
+pathfinder.Controller.nodeCount(game);
+pathfinder.Controller.graphEpoch(game);          // bumps on every rebuild (poll twin of graph_rebuilt)
+pathfinder.Controller.findClosestNode(game, pos);
+pathfinder.Controller.targetPosition(game, entity);
+```
+
+**Events** (the only outbound channel — subscribe from game hooks; tags
+are `pathfinder__<name>`, which requires the plugin to be registered as
+`.name = "pathfinder"`):
+
+| Event | Payload | Fires when |
+|---|---|---|
+| `pathfinder__arrived` | `{ entity, node_entity }` | any walk settles at its destination (incl. `.redundant` already-there calls) |
+| `pathfinder__navigation_failed` | `{ entity, reason }` | graph changed mid-walk with no reroute, or a loaded order can't re-issue |
+| `pathfinder__graph_rebuilt` | `{ epoch }` | the node graph was (re)built |
+| `pathfinder__node_removed` | `{ node_id }` | a node was tombstoned |
+
+**Components** you attach from game prefabs: `MovementSpeed { speed }`
+(per-entity walk speed; plugin default when absent). The plugin manages
+the rest (`MovementNode`, `MovementStair`, `ClosestMovementNode`,
+`Navigating`, `ControllerState`).
+
+**The one thing the game still drives**: a thin pause-gated script that
+calls `pathfinder.Controller.advance(game, dt)` each frame — the plugin
+can't see your pause state across the module boundary.
+
+---
+
+> **Note:** the sections below document the **standalone algorithm
+> core** (`pathfinding.algo.*` — A*, Floyd-Warshall variants, QuadTree,
+> grids) usable with no ECS and no game. Some prose still describes the
+> pre-v3 position-owning engine and is pending a rewrite.
+
+### PathfindingEngine (standalone core)
 
 The PathfindingEngine is a complete solution that manages entity positions internally. The game queries the engine for positions rather than owning them.
 
