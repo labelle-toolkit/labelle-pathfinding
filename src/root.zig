@@ -103,3 +103,14 @@ pub const FloydWarshall = pathfinding.FloydWarshall;
 
 // Algorithm core (standalone).
 pub const algo = pathfinding.algo;
+
+// Pull the package's test tree into the unit-test build. The build's
+// test root is THIS file (build.zig `unit_tests`), and Zig only
+// collects tests from files referenced inside a collected test block —
+// the decl re-exports above analyze `pathfinding.zig` but do not
+// collect its `test { refAllDecls(nav); … }` chain. Without this block
+// `zig build test` compiles and runs zero tests (found while adding
+// the emitGameEvent tests for #52).
+test {
+    _ = pathfinding;
+}

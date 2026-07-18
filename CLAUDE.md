@@ -68,7 +68,10 @@ script calling `Controller.advance(game, dt)`.
   starting anew, so failed retargets can't be resurrected by the rehydration
   sweep.
 - **Events are sparse** (settles, rebuilds, tombstones) — continuous state is
-  behind the queries. The plugin never subscribes to game events.
+  behind the queries. The plugin never subscribes to game events. All emits go
+  through the comptime-gated `emitGameEvent` helper (controller.zig, #52) —
+  never `game.emit(.{ .pathfinder__… })` raw union literals, which defeat the
+  assembler's event-consumption elision (assembler#630).
 - **World positions** (`getWorldPosition`) everywhere positions are compared —
   parented entities (storages under rooms) are meaningless in local coords.
 

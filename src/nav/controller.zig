@@ -1034,7 +1034,7 @@ pub const Controller = struct {
     pub fn removeNode(game: anytype, node_id: NodeId) void {
         const st = findState(game) orelse return;
         st.pf.removeNode(node_id);
-        game.emit(.{ .pathfinder__node_removed = .{ .node_id = node_id } });
+        emitGameEvent(game, "pathfinder__node_removed", .{ .node_id = node_id });
     }
 
     /// Per-frame advancement of in-flight navigations.
@@ -1166,7 +1166,7 @@ pub const Controller = struct {
         // to. The event is the push twin of the `graphEpoch()` poll
         // (v4); the plugin's own CMN sweep keys off the same counter.
         st.graph_epoch += 1;
-        game.emit(.{ .pathfinder__graph_rebuilt = .{ .epoch = st.graph_epoch } });
+        emitGameEvent(game, "pathfinder__graph_rebuilt", .{ .epoch = st.graph_epoch });
     }
 
     fn countMovementNodes(game: anytype) u32 {
@@ -1553,10 +1553,10 @@ fn settleArrival(game: anytype, st: *State, entity_id: u64, goal_node: ?NodeId) 
         ecs.removeComponent(entity, ClosestMovementNode);
     }
 
-    game.emit(.{ .pathfinder__arrived = .{
+    emitGameEvent(game, "pathfinder__arrived", .{
         .entity = entity_id,
         .node_entity = node_entity,
-    } });
+    });
 }
 
 /// Settle a failed walk: drop the persisted order and announce. The
@@ -1570,10 +1570,10 @@ fn settleFailed(game: anytype, entity_id: u64, reason: FailReason) void {
     if (ecs.entityExists(entity)) {
         ecs.removeComponent(entity, Navigating);
     }
-    game.emit(.{ .pathfinder__navigation_failed = .{
+    emitGameEvent(game, "pathfinder__navigation_failed", .{
         .entity = entity_id,
         .reason = reason,
-    } });
+    });
 }
 
 /// Node → node graph reachability with removed / out-of-range guards.
@@ -1650,4 +1650,182 @@ fn GameCtx(comptime GameType: type) type {
             self.game.setPosition(entity, .{ .x = pos.x + dx, .y = pos.y + dy });
         }
     };
+}
+
+// ── Gated game-event emission (#52) ─────────────────────────────────────────
+
+/// Emit a `pathfinder__*` game event through a comptime gate instead of
+/// a raw union literal.
+///
+/// Why the indirection: `game.emit(.{ .pathfinder__arrived = … })` is a
+/// hard compile-time reference to that `GameEvents` variant. Under the
+/// assembler's consumption filter (assembler#630, ≥0.93.0) events with
+/// no subscriber are elided from the generated union — an ungated emit
+/// site then fails to compile, and the 0.93.1 safety net can only
+/// respond by force-keeping the event, which defeats the elision
+/// entirely (the payload is built and buffered for nobody). Same
+/// gated-emit contract box2d and the engine follow.
+///
+/// The gate: when the game's `GameEvents` is a union AND declares the
+/// requested variant tag, build the typed payload field-by-field
+/// (widening/narrowing ints with `@intCast`, filling omitted fields
+/// from their declared defaults, `@compileError` on a payload field the
+/// variant doesn't declare AND on a missing required field) and forward
+/// to `game.emit`. Otherwise the entire body folds to a no-op — safe
+/// for `GameEvents = void` builds, for games that never consume a given
+/// pathfinder event, and for synthetic test games with no `GameEvents`
+/// at all. Both the typed path and every no-op shape are unit-tested
+/// below ("emitGameEvent …" tests).
+inline fn emitGameEvent(game: anytype, comptime tag: []const u8, payload: anytype) void {
+    const Game = @TypeOf(game.*);
+    const should_emit = comptime blk: {
+        if (!@hasDecl(Game, "GameEvents")) break :blk false;
+        const GameEvents = Game.GameEvents;
+        const ev_info = @typeInfo(GameEvents);
+        if (ev_info != .@"union") break :blk false;
+        break :blk @hasField(GameEvents, tag);
+    };
+    if (comptime !should_emit) return;
+    const GameEvents = Game.GameEvents;
+    const Payload_t = @FieldType(GameEvents, tag);
+    var typed: Payload_t = undefined;
+    // Reject unknown payload fields up front: the mapping loop below
+    // iterates the *target* variant's fields, so a typo'd payload field
+    // (`.node_idd = …`) would otherwise be silently dropped — and a
+    // defaulted target field would mask the loss entirely.
+    inline for (comptime std.meta.fields(@TypeOf(payload))) |pf| {
+        if (comptime !@hasField(Payload_t, pf.name)) {
+            @compileError("emitGameEvent: unknown payload field '" ++ pf.name ++ "' for variant '" ++ tag ++ "'");
+        }
+    }
+    const fields = comptime std.meta.fields(Payload_t);
+    inline for (fields) |f| {
+        if (comptime @hasField(@TypeOf(payload), f.name)) {
+            const src_val = @field(payload, f.name);
+            const SrcT = @TypeOf(src_val);
+            if (comptime @typeInfo(f.type) == .int and @typeInfo(SrcT) == .int) {
+                @field(typed, f.name) = @intCast(src_val);
+            } else {
+                @field(typed, f.name) = src_val;
+            }
+        } else if (comptime f.default_value_ptr != null) {
+            @field(typed, f.name) = @as(*const f.type, @ptrCast(@alignCast(f.default_value_ptr.?))).*;
+        } else {
+            @compileError("emitGameEvent: missing field '" ++ f.name ++ "' for variant '" ++ tag ++ "'");
+        }
+    }
+    game.emit(@unionInit(GameEvents, tag, typed));
+}
+
+// ── emitGameEvent tests ──
+//
+// Synthetic games exercising both branches of the comptime gate: the
+// typed emit (field mapping, @intCast widening, default filling) and
+// every no-op shape (missing tag, void / non-union GameEvents, no
+// GameEvents decl at all). The @compileError branches — a missing
+// required field and an unknown payload field — are compile-time
+// failures by design and can't be runtime-tested. This repo
+// deliberately has no mock game (see CLAUDE.md), but these games mock
+// only the `GameEvents`/`emit` sliver of the contract, which is
+// exactly the surface under test.
+
+/// A game whose GameEvents union declares pathfinder tags.
+/// `pathfinder__arrived` uses u64 entity fields to prove the @intCast
+/// widening; `pathfinder__graph_rebuilt` carries a defaulted field the
+/// emit-site payload omits.
+const EmitRecordingGame = struct {
+    // `pub` on purpose: real games export GameEvents for cross-module
+    // access — mirror the production contract.
+    pub const GameEvents = union(enum) {
+        pathfinder__arrived: struct { entity: u64, node_entity: u64 },
+        pathfinder__graph_rebuilt: struct {
+            epoch: u64,
+            extra: f32 = 99.5,
+        },
+    };
+
+    last: ?GameEvents = null,
+    count: usize = 0,
+
+    pub fn emit(self: *@This(), event: GameEvents) void {
+        self.last = event;
+        self.count += 1;
+    }
+};
+
+test "emitGameEvent builds the typed payload and widens int fields" {
+    var game = EmitRecordingGame{};
+    emitGameEvent(&game, "pathfinder__arrived", .{
+        .entity = @as(u32, 7),
+        .node_entity = @as(u32, 42),
+    });
+    try std.testing.expectEqual(@as(usize, 1), game.count);
+    switch (game.last.?) {
+        .pathfinder__arrived => |p| {
+            try std.testing.expectEqual(@as(u64, 7), p.entity);
+            try std.testing.expectEqual(@as(u64, 42), p.node_entity);
+        },
+        else => return error.TestExpectedArrived,
+    }
+}
+
+test "emitGameEvent fills omitted fields from their declared defaults" {
+    var game = EmitRecordingGame{};
+    emitGameEvent(&game, "pathfinder__graph_rebuilt", .{
+        .epoch = @as(u64, 3),
+    });
+    try std.testing.expectEqual(@as(usize, 1), game.count);
+    switch (game.last.?) {
+        .pathfinder__graph_rebuilt => |p| {
+            try std.testing.expectEqual(@as(u64, 3), p.epoch);
+            try std.testing.expectEqual(@as(f32, 99.5), p.extra);
+        },
+        else => return error.TestExpectedGraphRebuilt,
+    }
+}
+
+test "emitGameEvent no-ops when the union lacks the requested tag" {
+    // The consumption-filter case this whole helper exists for: the
+    // game consumes `arrived` but the assembler elided `node_removed`.
+    var game = EmitRecordingGame{};
+    emitGameEvent(&game, "pathfinder__node_removed", .{
+        .node_id = @as(u32, 5),
+    });
+    try std.testing.expectEqual(@as(usize, 0), game.count);
+    try std.testing.expect(game.last == null);
+}
+
+test "emitGameEvent no-ops for void and non-union GameEvents" {
+    // Compiling IS the assertion here: if the gate wrongly fired for
+    // these shapes, `@FieldType(void, tag)` / the absent typed-union
+    // path would be a compile error. There is no meaningful runtime
+    // state to observe — the genuinely observable no-op (a missing tag
+    // in a real union) is the test above.
+    const VoidGame = struct {
+        pub const GameEvents = void;
+    };
+    var void_game = VoidGame{};
+    emitGameEvent(&void_game, "pathfinder__arrived", .{
+        .entity = @as(u32, 1),
+        .node_entity = @as(u32, 2),
+    });
+
+    const StructGame = struct {
+        pub const GameEvents = struct {};
+    };
+    var struct_game = StructGame{};
+    emitGameEvent(&struct_game, "pathfinder__arrived", .{
+        .entity = @as(u32, 1),
+        .node_entity = @as(u32, 2),
+    });
+}
+
+test "emitGameEvent no-ops when the game has no GameEvents decl" {
+    // Same contract: compiling is the assertion.
+    const BareGame = struct {};
+    var game = BareGame{};
+    emitGameEvent(&game, "pathfinder__arrived", .{
+        .entity = @as(u32, 1),
+        .node_entity = @as(u32, 2),
+    });
 }
