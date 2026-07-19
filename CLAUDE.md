@@ -71,7 +71,10 @@ script calling `Controller.advance(game, dt)`.
   behind the queries. The plugin never subscribes to game events. All emits go
   through the comptime-gated `emitGameEvent` helper (controller.zig, #52) —
   never `game.emit(.{ .pathfinder__… })` raw union literals, which defeat the
-  assembler's event-consumption elision (assembler#630).
+  assembler's event-consumption elision (assembler#630). Test code must use
+  synthetic tags (`prov__ev`), not real ones — a dot-prefixed real tag
+  anywhere in plugin source force-keeps the event in every consuming game
+  (assembler#636).
 - **World positions** (`getWorldPosition`) everywhere positions are compared —
   parented entities (storages under rooms) are meaningless in local coords.
 

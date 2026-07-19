@@ -1657,7 +1657,7 @@ fn GameCtx(comptime GameType: type) type {
 /// Emit a `pathfinder__*` game event through a comptime gate instead of
 /// a raw union literal.
 ///
-/// Why the indirection: `game.emit(.{ .pathfinder__arrived = … })` is a
+/// Why the indirection: `game.emit(.{ .pathfinder__<event> = … })` is a
 /// hard compile-time reference to that `GameEvents` variant. Under the
 /// assembler's consumption filter (assembler#630, ≥0.93.0) events with
 /// no subscriber are elided from the generated union — an ungated emit
@@ -1728,17 +1728,25 @@ inline fn emitGameEvent(game: anytype, comptime tag: []const u8, payload: anytyp
 // deliberately has no mock game (see CLAUDE.md), but these games mock
 // only the `GameEvents`/`emit` sliver of the contract, which is
 // exactly the surface under test.
+//
+// Tags here are SYNTHETIC (`prov__*`), never the plugin's real
+// `pathfinder__*` tags: the assembler's ungated-emit detector
+// (labelle-assembler#636) treats any dot-prefixed real tag in the
+// provider's source — test switch arms included — as an ungated emit
+// and force-keeps that event in every consuming game, defeating
+// elision. The helper's mechanics don't depend on the tag names;
+// real-tag coverage lives in consuming-game builds.
 
-/// A game whose GameEvents union declares pathfinder tags.
-/// `pathfinder__arrived` uses u64 entity fields to prove the @intCast
-/// widening; `pathfinder__graph_rebuilt` carries a defaulted field the
-/// emit-site payload omits.
+/// A game whose GameEvents union declares the emitted (synthetic)
+/// tags. `prov__arrived` uses u64 entity fields to prove the @intCast
+/// widening; `prov__rebuilt` carries a defaulted field the emit-site
+/// payload omits.
 const EmitRecordingGame = struct {
     // `pub` on purpose: real games export GameEvents for cross-module
     // access — mirror the production contract.
     pub const GameEvents = union(enum) {
-        pathfinder__arrived: struct { entity: u64, node_entity: u64 },
-        pathfinder__graph_rebuilt: struct {
+        prov__arrived: struct { entity: u64, node_entity: u64 },
+        prov__rebuilt: struct {
             epoch: u64,
             extra: f32 = 99.5,
         },
@@ -1755,13 +1763,13 @@ const EmitRecordingGame = struct {
 
 test "emitGameEvent builds the typed payload and widens int fields" {
     var game = EmitRecordingGame{};
-    emitGameEvent(&game, "pathfinder__arrived", .{
+    emitGameEvent(&game, "prov__arrived", .{
         .entity = @as(u32, 7),
         .node_entity = @as(u32, 42),
     });
     try std.testing.expectEqual(@as(usize, 1), game.count);
     switch (game.last.?) {
-        .pathfinder__arrived => |p| {
+        .prov__arrived => |p| {
             try std.testing.expectEqual(@as(u64, 7), p.entity);
             try std.testing.expectEqual(@as(u64, 42), p.node_entity);
         },
@@ -1771,12 +1779,12 @@ test "emitGameEvent builds the typed payload and widens int fields" {
 
 test "emitGameEvent fills omitted fields from their declared defaults" {
     var game = EmitRecordingGame{};
-    emitGameEvent(&game, "pathfinder__graph_rebuilt", .{
+    emitGameEvent(&game, "prov__rebuilt", .{
         .epoch = @as(u64, 3),
     });
     try std.testing.expectEqual(@as(usize, 1), game.count);
     switch (game.last.?) {
-        .pathfinder__graph_rebuilt => |p| {
+        .prov__rebuilt => |p| {
             try std.testing.expectEqual(@as(u64, 3), p.epoch);
             try std.testing.expectEqual(@as(f32, 99.5), p.extra);
         },
@@ -1788,7 +1796,7 @@ test "emitGameEvent no-ops when the union lacks the requested tag" {
     // The consumption-filter case this whole helper exists for: the
     // game consumes `arrived` but the assembler elided `node_removed`.
     var game = EmitRecordingGame{};
-    emitGameEvent(&game, "pathfinder__node_removed", .{
+    emitGameEvent(&game, "prov__missing", .{
         .node_id = @as(u32, 5),
     });
     try std.testing.expectEqual(@as(usize, 0), game.count);
@@ -1805,7 +1813,7 @@ test "emitGameEvent no-ops for void and non-union GameEvents" {
         pub const GameEvents = void;
     };
     var void_game = VoidGame{};
-    emitGameEvent(&void_game, "pathfinder__arrived", .{
+    emitGameEvent(&void_game, "prov__arrived", .{
         .entity = @as(u32, 1),
         .node_entity = @as(u32, 2),
     });
@@ -1814,7 +1822,7 @@ test "emitGameEvent no-ops for void and non-union GameEvents" {
         pub const GameEvents = struct {};
     };
     var struct_game = StructGame{};
-    emitGameEvent(&struct_game, "pathfinder__arrived", .{
+    emitGameEvent(&struct_game, "prov__arrived", .{
         .entity = @as(u32, 1),
         .node_entity = @as(u32, 2),
     });
@@ -1824,7 +1832,7 @@ test "emitGameEvent no-ops when the game has no GameEvents decl" {
     // Same contract: compiling is the assertion.
     const BareGame = struct {};
     var game = BareGame{};
-    emitGameEvent(&game, "pathfinder__arrived", .{
+    emitGameEvent(&game, "prov__arrived", .{
         .entity = @as(u32, 1),
         .node_entity = @as(u32, 2),
     });
