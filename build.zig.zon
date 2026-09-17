@@ -8,8 +8,8 @@
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .zig_utils = .{
-            .url = "git+https://github.com/labelle-toolkit/zig-utils.git?ref=feat/zig-0.16-migration#fa5758304d113679d9bd82187b2bad5fde95554e",
-            .hash = "zig_utils-0.6.1-dUo895zOAQAfpupehxPVlrar8v-EktyljpxzVal5jeJ4",
+            .url = "git+https://github.com/labelle-toolkit/zig-utils.git?ref=v0.7.3#f4e104bbb673e4507d159cbadbede44e52cd0ec5",
+            .hash = "zig_utils-0.7.3-dUo89yXUAQCzJKSJ4bvzP7jwoTv5ndBCM9PHUM0NkUD5",
         },
         .labelle_core = .{
             .path = "../labelle-core",
