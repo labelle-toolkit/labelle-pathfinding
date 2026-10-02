@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const types = @import("types.zig");
 const graph_mod = @import("graph.zig");
 const zig_utils = @import("zig_utils");
@@ -15,7 +16,9 @@ const U32_INF: u32 = std.math.maxInt(u32);
 
 /// Optimized FW backend: SIMD + multi-threading via zig-utils.
 const FWOptimized = zig_utils.FloydWarshallOptimized(.{
-    .parallel = true,
+    // The synchronous zig-utils implementation cannot reserve workers from
+    // the browser's shared pthread pool. Use SIMD on threaded web too.
+    .parallel = !builtin.single_threaded and builtin.os.tag != .emscripten,
     .simd = true,
 });
 
