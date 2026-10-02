@@ -9,6 +9,7 @@
 //! source-destination queries.
 
 const std = @import("std");
+const builtin = @import("builtin");
 
 const INF: u32 = std.math.maxInt(u32);
 
@@ -223,7 +224,12 @@ pub fn FloydWarshallOptimized(comptime config: Config) type {
 
         /// Run the Floyd-Warshall algorithm to compute all shortest paths
         pub fn generate(self: *Self) void {
-            if (config.parallel and self.size > 64) {
+            // Browser pthread pools are shared with persistent engine workers.
+            // This synchronous spawn/join algorithm cannot reserve a worker
+            // budget there; CPU discovery also uses unsupported sysctlbyname
+            // in Zig 0.16's Emscripten libc implementation. Keep web on SIMD
+            // until pathfinding can use an asynchronous, budgeted job API.
+            if (config.parallel and !builtin.single_threaded and builtin.os.tag != .emscripten and self.size > 64) {
                 self.generateParallel();
             } else if (config.simd) {
                 self.generateSimd();
