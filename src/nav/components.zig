@@ -22,6 +22,23 @@ pub const MovementStair = struct {
     _marker: u8 = 0,
 };
 
+/// An authored edge from this MovementNode to the node at its world
+/// position + (`dx`, `dy`), for connections the axis auto-connect can't
+/// express: a diagonal flight of steps, a ramp. The pathfinder resolves the
+/// target when it builds the graph (the nearest node within
+/// `controller.LINK_TOLERANCE` px) and logs a warning when there is none.
+/// The link is two-way, costs its straight-line length, and is walked as a
+/// straight leg.
+///
+/// Read only when the graph builds, which happens whenever the set of
+/// MovementNodes changes: author it with the node, not afterwards.
+pub const MovementLink = struct {
+    pub const save_policy: @import("labelle-core").SavePolicy = .saveable;
+
+    dx: f32 = 0,
+    dy: f32 = 0,
+};
+
 /// Tracks the nearest navigation graph node for this entity.
 /// Auto-assigned by the pathfinder during init to entities that have this component.
 pub const ClosestMovementNode = struct {

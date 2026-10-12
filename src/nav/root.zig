@@ -41,6 +41,7 @@ pub const GizmoCategories = struct {
 pub const components = @import("components.zig");
 pub const MovementNode = components.MovementNode;
 pub const MovementStair = components.MovementStair;
+pub const MovementLink = components.MovementLink;
 pub const ClosestMovementNode = components.ClosestMovementNode;
 pub const Navigating = components.Navigating;
 pub const MovementSpeed = components.MovementSpeed;
@@ -73,6 +74,8 @@ pub const FailReason = controller.FailReason;
 pub const Components = struct {
     pub const MovementNode = components.MovementNode;
     pub const MovementStair = components.MovementStair;
+    /// Authored edges (diagonal steps, ramps) — read at graph build.
+    pub const MovementLink = components.MovementLink;
     pub const ClosestMovementNode = components.ClosestMovementNode;
     /// The persisted walk order (v4) — saveable so mid-walk saves
     /// resume on load via the advance rehydration sweep.

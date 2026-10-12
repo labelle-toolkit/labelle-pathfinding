@@ -40,6 +40,7 @@ const movement_path = @import("movement_path.zig");
 
 const MovementNode = components.MovementNode;
 const MovementStair = components.MovementStair;
+const MovementLink = components.MovementLink;
 const ClosestMovementNode = components.ClosestMovementNode;
 const Navigating = components.Navigating;
 const MovementSpeed = components.MovementSpeed;
@@ -92,6 +93,10 @@ const MAX_VERTICAL_DISTANCE: f32 = 200.0;
 ///   construction-site cells — workers visibly walked "over"
 ///   in-progress rooms. See FP issue #360.
 const MAX_HORIZONTAL_DISTANCE: f32 = 78.0;
+
+/// How far (px) a `MovementLink` target may sit from an actual node and
+/// still resolve to it — authored offsets are hand-measured from art.
+pub const LINK_TOLERANCE: f32 = 4.0;
 
 /// Maximum distance (px) between an entity's world position and a
 /// movement node before `findNearestNodeInState` treats the entity
@@ -1155,6 +1160,11 @@ pub const Controller = struct {
             };
         }
 
+        // Second pass, once every node is in: authored links. Adding them
+        // after the auto-connect also keeps a later node's in-between
+        // pruning from ever seeing them mid-build.
+        linkAuthoredEdges(game, st);
+
         st.nodes_registered = st.node_entities.count() > 0;
         if (st.nodes_registered) {
             log.info("graph built: {d} nodes (Floyd-Warshall)", .{st.node_entities.count()});
@@ -1167,6 +1177,30 @@ pub const Controller = struct {
         // (v4); the plugin's own CMN sweep keys off the same counter.
         st.graph_epoch += 1;
         emitGameEvent(game, "pathfinder__graph_rebuilt", .{ .epoch = st.graph_epoch });
+    }
+
+    fn linkAuthoredEdges(game: anytype, st: *State) void {
+        const ecs = &game.active_world.ecs_backend;
+        var view = ecs.view(.{ MovementNode, MovementLink }, .{});
+        defer view.deinit();
+
+        while (view.next()) |entity| {
+            const from = ecs.getComponent(entity, MovementNode).?.node_id;
+            // `node_id` is only this build's if the first pass registered
+            // this entity (addNode can fail).
+            const entity_id: u64 = @intCast(entity);
+            if (st.node_entities.get(from) != entity_id) continue;
+            const link = ecs.getComponent(entity, MovementLink).?;
+            const pos = game.getWorldPosition(entity);
+            const target: Position = .{ .x = pos.x + link.dx, .y = pos.y + link.dy };
+            const to = st.pf.graph.nearestNodeWithin(target, LINK_TOLERANCE) orelse {
+                log.warn("MovementLink from ({d},{d}): no node within {d} px of ({d},{d})", .{ pos.x, pos.y, LINK_TOLERANCE, target.x, target.y });
+                continue;
+            };
+            st.pf.addLink(from, to) catch |err| {
+                log.err("addLink ({d},{d}) -> ({d},{d}) failed: {}", .{ pos.x, pos.y, target.x, target.y, err });
+            };
+        }
     }
 
     fn countMovementNodes(game: anytype) u32 {
