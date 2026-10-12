@@ -85,6 +85,7 @@ pub const graph = pathfinding.graph;
 pub const components = pathfinding.components;
 pub const MovementNode = pathfinding.MovementNode;
 pub const MovementStair = pathfinding.MovementStair;
+pub const MovementLink = pathfinding.MovementLink;
 pub const ClosestMovementNode = pathfinding.ClosestMovementNode;
 pub const Navigating = pathfinding.Navigating;
 pub const MovementSpeed = pathfinding.MovementSpeed;

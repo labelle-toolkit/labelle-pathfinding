@@ -335,3 +335,85 @@ test "removed node is skipped by addNode connections" {
         try std.testing.expect(e.to != a);
     }
 }
+
+// --- addLink (authored edges) ---
+
+fn hasEdge(g: *const Graph, from: u32, to: u32) bool {
+    for (g.getEdges(from)) |e| {
+        if (e.to == to) return true;
+    }
+    return false;
+}
+
+test "addLink connects diagonal nodes both ways at their straight-line cost" {
+    var g = Graph.init(std.testing.allocator, test_config);
+    defer g.deinit();
+
+    // A flight of steps: the axis auto-connect can't link these.
+    const top = try g.addNode(.{ .x = 88, .y = 28 }, false);
+    const bottom = try g.addNode(.{ .x = 126, .y = 0 }, false);
+    try std.testing.expect(!hasEdge(&g, top, bottom));
+
+    g.dirty = false;
+    try g.addLink(top, bottom);
+
+    try std.testing.expect(hasEdge(&g, top, bottom));
+    try std.testing.expect(hasEdge(&g, bottom, top));
+    try std.testing.expectApproxEqAbs(@sqrt(@as(f32, 38 * 38 + 28 * 28)), g.getEdges(top)[0].cost, 0.001);
+    try std.testing.expect(g.dirty);
+}
+
+test "addLink is a no-op when the nodes are already linked" {
+    var g = Graph.init(std.testing.allocator, test_config);
+    defer g.deinit();
+
+    const a = try g.addNode(.{ .x = 0, .y = 0 }, false);
+    const b = try g.addNode(.{ .x = 50, .y = 0 }, false); // auto-connected
+    try g.addLink(a, b);
+    try g.addLink(b, a);
+
+    try std.testing.expectEqual(@as(usize, 1), g.getEdges(a).len);
+    try std.testing.expectEqual(@as(usize, 1), g.getEdges(b).len);
+}
+
+test "addLink rejects a self-link and a removed node" {
+    var g = Graph.init(std.testing.allocator, test_config);
+    defer g.deinit();
+
+    const a = try g.addNode(.{ .x = 0, .y = 0 }, false);
+    const b = try g.addNode(.{ .x = 40, .y = 30 }, false);
+    try std.testing.expectError(error.InvalidNode, g.addLink(a, a));
+    g.removeNode(b);
+    try std.testing.expectError(error.InvalidNode, g.addLink(a, b));
+    try std.testing.expectError(error.InvalidNode, g.addLink(a, 99));
+}
+
+test "a diagonal link survives a later node landing on either end's axis" {
+    var g = Graph.init(std.testing.allocator, test_config);
+    defer g.deinit();
+
+    const top = try g.addNode(.{ .x = 88, .y = 28 }, false);
+    const bottom = try g.addNode(.{ .x = 126, .y = 0 }, false);
+    try g.addLink(top, bottom);
+    // Neighbours on both ends' rows: the in-between pruning only drops
+    // edges between two nodes on the new node's own axis.
+    _ = try g.addNode(.{ .x = 10, .y = 28 }, false);
+    _ = try g.addNode(.{ .x = 176, .y = 0 }, false);
+    _ = try g.addNode(.{ .x = 107, .y = 0 }, false);
+
+    try std.testing.expect(hasEdge(&g, top, bottom));
+    try std.testing.expect(hasEdge(&g, bottom, top));
+}
+
+test "nearestNodeWithin picks the closest live node inside the tolerance" {
+    var g = Graph.init(std.testing.allocator, test_config);
+    defer g.deinit();
+
+    const a = try g.addNode(.{ .x = 100, .y = 0 }, false);
+    const b = try g.addNode(.{ .x = 103, .y = 0 }, false);
+
+    try std.testing.expectEqual(@as(?u32, b), g.nearestNodeWithin(.{ .x = 102, .y = 1 }, 4));
+    try std.testing.expectEqual(@as(?u32, null), g.nearestNodeWithin(.{ .x = 120, .y = 0 }, 4));
+    g.removeNode(b);
+    try std.testing.expectEqual(@as(?u32, a), g.nearestNodeWithin(.{ .x = 102, .y = 1 }, 4));
+}

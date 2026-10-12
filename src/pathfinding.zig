@@ -67,11 +67,12 @@ pub const graph = nav.graph;
 pub const components = nav.components;
 pub const MovementNode = nav.MovementNode;
 pub const MovementStair = nav.MovementStair;
+pub const MovementLink = nav.MovementLink;
 pub const ClosestMovementNode = nav.ClosestMovementNode;
 pub const Navigating = nav.Navigating;
 pub const MovementSpeed = nav.MovementSpeed;
 // The `Components` aggregator the assembler scans to register the plugin's
-// components (MovementNode / MovementStair / ClosestMovementNode /
+// components (MovementNode / MovementStair / MovementLink / ClosestMovementNode /
 // Navigating / MovementSpeed / ControllerState) into the ComponentRegistry.
 pub const Components = nav.Components;
 

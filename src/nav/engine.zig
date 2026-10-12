@@ -79,6 +79,11 @@ pub fn PathfinderWith(
             return self.graph.addNode(position, is_stair);
         }
 
+        /// Link two nodes directly (see `Graph.addLink`). Marks dirty.
+        pub fn addLink(self: *Self, a: NodeId, b: NodeId) !void {
+            return self.graph.addLink(a, b);
+        }
+
         /// Remove a node and all its edges. Marks dirty.
         pub fn removeNode(self: *Self, node_id: NodeId) void {
             self.graph.removeNode(node_id);

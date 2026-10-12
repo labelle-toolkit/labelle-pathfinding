@@ -181,3 +181,30 @@ test "directStep: diagonal step normalizes direction" {
     try std.testing.expectApproxEqAbs(@as(f32, 6.0), step.move.x, 0.001);
     try std.testing.expectApproxEqAbs(@as(f32, 8.0), step.move.y, 0.001);
 }
+
+test "a walk crosses an authored diagonal link as one straight leg" {
+    const Pf = PathfinderWith(u64, struct {});
+    var pf = Pf.init(std.testing.allocator, test_config);
+    defer pf.deinit();
+
+    // A raised deck at y=28, steps down to the main deck at y=0.
+    const deck_far = try pf.addNode(.{ .x = 0, .y = 28 }, false);
+    const step_top = try pf.addNode(.{ .x = 88, .y = 28 }, false);
+    const step_bottom = try pf.addNode(.{ .x = 126, .y = 0 }, false);
+    const main = try pf.addNode(.{ .x = 176, .y = 0 }, false);
+    try pf.addLink(step_top, step_bottom);
+
+    var ctx = CallbackCtx.init(std.testing.allocator);
+    defer ctx.deinit();
+    try ctx.positions.put(3, .{ .x = 0, .y = 28 });
+
+    const path = (try pf.navigate(3, deck_far, main, 1000.0)).?;
+    try std.testing.expectEqualSlices(u32, &.{ deck_far, step_top, step_bottom, main }, path.node_path);
+
+    var i: usize = 0;
+    while (i < 100 and ctx.arrived.items.len == 0) : (i += 1) pf.tick(&ctx, 0.016);
+    try std.testing.expectEqual(@as(usize, 1), ctx.arrived.items.len);
+    const end = ctx.positions.get(3).?;
+    try std.testing.expectApproxEqAbs(@as(f32, 176), end.x, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 0), end.y, 0.01);
+}

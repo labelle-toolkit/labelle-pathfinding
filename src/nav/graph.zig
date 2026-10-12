@@ -177,6 +177,40 @@ pub const Graph = struct {
         }
     }
 
+    /// Link two nodes directly, whatever their axes and distance: the
+    /// authored connections the axis auto-connect can't express, such as
+    /// a diagonal flight of steps. The cost is the straight-line distance,
+    /// and the walker walks it as one straight leg. No-op when the nodes
+    /// are already linked; error on a removed or unknown node.
+    ///
+    /// A diagonal link survives later `addNode` calls: the in-between
+    /// pruning only drops edges between two nodes on the new node's axis.
+    /// An axis-aligned link can be pruned that way, like any other edge.
+    /// Sets dirty = true.
+    pub fn addLink(self: *Graph, a: NodeId, b: NodeId) !void {
+        if (a == b or self.isRemoved(a) or self.isRemoved(b)) return error.InvalidNode;
+        for (self.edges.items[a].items) |edge| {
+            if (edge.to == b) return;
+        }
+        try self.addBidirectionalEdge(a, b, distanceBetween(self.positions.items[a], self.positions.items[b]));
+        self.dirty = true;
+    }
+
+    /// The active node nearest `position`, if one is within `tolerance`.
+    pub fn nearestNodeWithin(self: *const Graph, position: Position, tolerance: f32) ?NodeId {
+        var best: ?NodeId = null;
+        var best_dist = tolerance;
+        for (self.positions.items, 0..) |p, i| {
+            if (self.removed.items[i]) continue;
+            const dist = distanceBetween(position, p);
+            if (dist <= best_dist) {
+                best = @intCast(i);
+                best_dist = dist;
+            }
+        }
+        return best;
+    }
+
     fn addBidirectionalEdge(self: *Graph, a: NodeId, b: NodeId, cost: f32) !void {
         try self.edges.items[a].append(self.allocator, .{ .to = b, .cost = cost });
         // If the second append OOMs, roll back the first so the graph is never

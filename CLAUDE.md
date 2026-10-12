@@ -46,11 +46,13 @@ script calling `Controller.advance(game, dt)`.
     the graph walker. `tick(ctx, dt)` calls `ctx.getEntityPosition`/`moveEntity`
     and, when declared (`@hasDecl`-gated), `ctx.onArrived`/`onPathInvalidated`.
   - `components.zig` — `MovementNode` (saveable), `MovementStair` (marker),
-    `ClosestMovementNode` (transient), `Navigating` (saveable walk order),
+    `MovementLink` (saveable authored edge), `ClosestMovementNode`
+    (transient), `Navigating` (saveable walk order),
     `MovementSpeed` (saveable, per-entity px/s).
   - `graph.zig` / `floyd_warshall.zig` / `movement_path.zig` — graph storage,
     axis-aligned auto-connection (horizontal cap 78 px, vertical via stairs,
-    cap 200 px), FW matrix, per-entity path state.
+    cap 200 px), plus authored `MovementLink` edges (any direction, added in
+    a second build pass), FW matrix, per-entity path state.
 - **`src/` (algo core)** — standalone: `a_star.zig`, `floyd_warshall_optimized.zig`
   (SIMD/parallel variants), `quad_tree.zig`, `heuristics.zig`, `distance_graph.zig`,
   `types.zig`. Namespaced as `pathfinding.algo.*`.
