@@ -735,9 +735,10 @@ pub const Controller = struct {
     /// Intended for sibling-plugin callers (e.g. `production.Controller`'s
     /// scheduler) that need a CMN-graph-aware distance instead of the
     /// raw Euclidean `getPosition` delta. Uses Floyd-Warshall's
-    /// pre-computed cost so each call is O(1) once the closest-node
-    /// lookups (linear scan over registered MN nodes) finish — opportunity
-    /// for entity-to-NodeId caching if this becomes a hot path.
+    /// pre-computed cost after resolving world positions and validating the
+    /// entity-keyed nearest-node cache. Only cache misses scan movement nodes.
+    /// For multiple targets with an unchanged origin, use walkDistancesFrom
+    /// to avoid repeating the origin's world-position and cache lookup.
     pub fn distance(game: anytype, from_entity: anytype, to_entity: anytype) ?f32 {
         const st = findState(game) orelse return null;
         // `getWorldPosition` (not `getPosition`) so parented
@@ -943,6 +944,37 @@ pub const Controller = struct {
             return euclideanBetween(game, from_entity, to_entity);
         }
         return distance(game, from_entity, to_entity) orelse std.math.inf(f32);
+    }
+
+    /// Distances from one origin during a synchronous, read-only candidate scan.
+    /// Resolves the origin lazily on the first candidate, then reuses its world
+    /// position and validated nearest node. Uses the SAME nearest-node cache
+    /// and fallback rules as walkDistance, not an unvalidated CMN component.
+    ///
+    /// Discard before moving/reparenting the origin (or its ancestors), changing
+    /// the graph, switching worlds, or advancing the simulation. Targets are
+    /// resolved live on each call. Do not retain this query across frames.
+    pub fn walkDistancesFrom(game: anytype, from_entity: anytype) WalkDistances(@TypeOf(game), @TypeOf(from_entity)) {
+        return .{ .game = game, .from_entity = from_entity };
+    }
+
+    pub fn WalkDistances(comptime Game: type, comptime Entity: type) type {
+        return struct {
+            game: Game,
+            from_entity: Entity,
+            origin: ?WalkOrigin = null,
+
+            pub fn to(self: *@This(), target_entity: anytype) f32 {
+                if (self.origin == null) {
+                    self.origin = WalkOrigin.resolve(
+                        findState(self.game),
+                        @intCast(self.from_entity),
+                        self.game.getWorldPosition(self.from_entity),
+                    );
+                }
+                return self.origin.?.distanceTo(self.game, target_entity);
+            }
+        };
     }
 
     fn euclideanBetween(game: anytype, a: anytype, b: anytype) f32 {
@@ -1446,6 +1478,46 @@ pub fn pruneNearestNodeCacheBy(st: *State, probe: anytype) void {
     }
 }
 
+/// Private resolved origin for a read-only scan. Both successful and failed
+/// resolutions are reused only for the lifetime of that scan; no new persistent
+/// cache or invalidation policy is introduced.
+const WalkOrigin = union(enum) {
+    euclidean: Position,
+    graph: struct { state: *State, node: NodeId },
+    off_graph,
+
+    fn resolve(state: ?*State, entity_id: u64, position: Position) WalkOrigin {
+        const st = state orelse return .{ .euclidean = position };
+        if (st.node_entities.count() == 0) return .{ .euclidean = position };
+        const node = findNearestNodeForEntity(st, entity_id, position.x, position.y) orelse return .off_graph;
+        return .{ .graph = .{ .state = st, .node = node } };
+    }
+
+    fn distanceTo(self: WalkOrigin, game: anytype, entity: anytype) f32 {
+        // Match distance's early return: an off-graph origin never resolves
+        // the target, so it must not populate the target's cache either.
+        if (self == .off_graph) return std.math.inf(f32);
+        return self.distanceToPosition(@intCast(entity), game.getWorldPosition(entity));
+    }
+
+    fn distanceToPosition(self: WalkOrigin, entity_id: u64, position: Position) f32 {
+        return switch (self) {
+            .off_graph => std.math.inf(f32),
+            .euclidean => |origin| blk: {
+                const dx = origin.x - position.x;
+                const dy = origin.y - position.y;
+                break :blk @sqrt(dx * dx + dy * dy);
+            },
+            .graph => |origin| blk: {
+                const target = findNearestNodeForEntity(origin.state, entity_id, position.x, position.y) orelse
+                    break :blk std.math.inf(f32);
+                const d = origin.state.pf.distance(origin.node, target);
+                break :blk if (d == types.INF) std.math.inf(f32) else d;
+            },
+        };
+    }
+};
+
 /// Entity-keyed wrapper over `findNearestNodeInState` that memoises
 /// per-entity lookups across calls. Correct for both stationary and
 /// moving entities — see `State.nearest_node_cache` for the
@@ -1870,4 +1942,49 @@ test "emitGameEvent no-ops when the game has no GameEvents decl" {
         .entity = @as(u32, 1),
         .node_entity = @as(u32, 2),
     });
+}
+
+test "walk origin preserves pre-graph Euclidean fallback and graph unreachable semantics" {
+    const pos = Position{ .x = 0, .y = 0 };
+    const target = Position{ .x = 3, .y = 4 };
+    try std.testing.expectEqual(@as(f32, 5), WalkOrigin.resolve(null, 10, pos).distanceToPosition(20, target));
+    var st = State.init(std.testing.allocator);
+    defer st.deinit();
+    try std.testing.expectEqual(@as(f32, 5), WalkOrigin.resolve(&st, 10, pos).distanceToPosition(20, target));
+    const a = try st.pf.addNode(pos, false);
+    const b = try st.pf.addNode(.{ .x = 60, .y = 0 }, false);
+    const disconnected = try st.pf.addNode(.{ .x = 300, .y = 0 }, false);
+    try st.node_entities.put(st.allocator, a, 100);
+    try st.node_entities.put(st.allocator, b, 101);
+    try st.node_entities.put(st.allocator, disconnected, 102);
+    const origin = WalkOrigin.resolve(&st, 10, pos);
+    try std.testing.expectEqual(@as(f32, 60), origin.distanceToPosition(20, .{ .x = 60, .y = 0 }));
+    try std.testing.expect(std.math.isInf(origin.distanceToPosition(21, .{ .x = 300, .y = 0 })));
+    try std.testing.expect(std.math.isInf(origin.distanceToPosition(22, .{ .x = 1000, .y = 0 })));
+    try std.testing.expect(std.math.isInf(WalkOrigin.resolve(&st, 30, .{ .x = 1000, .y = 0 }).distanceToPosition(20, target)));
+}
+
+test "walk origin refreshes between scans after movement and graph rebuild" {
+    var st = State.init(std.testing.allocator);
+    defer st.deinit();
+    const a = try st.pf.addNode(.{ .x = 0, .y = 0 }, false);
+    const b = try st.pf.addNode(.{ .x = 60, .y = 0 }, false);
+    try st.node_entities.put(st.allocator, a, 100);
+    try st.node_entities.put(st.allocator, b, 101);
+    const first = WalkOrigin.resolve(&st, 10, .{ .x = 0, .y = 0 });
+    try std.testing.expectEqual(@as(f32, 60), first.distanceToPosition(20, .{ .x = 60, .y = 0 }));
+    // Same entity now has a different world position (also covers a moved
+    // parent once the caller resolves the world position).
+    const moved = WalkOrigin.resolve(&st, 10, .{ .x = 60, .y = 0 });
+    try std.testing.expectEqual(@as(f32, 0), moved.distanceToPosition(20, .{ .x = 60, .y = 0 }));
+    // A failed result is scoped to one scan; it must not poison later scans.
+    const missing = WalkOrigin.resolve(&st, 30, .{ .x = 1000, .y = 0 });
+    try std.testing.expect(missing == .off_graph);
+    const returned = WalkOrigin.resolve(&st, 30, .{ .x = 0, .y = 0 });
+    try std.testing.expectEqual(@as(f32, 60), returned.distanceToPosition(20, .{ .x = 60, .y = 0 }));
+    st.reset(st.allocator);
+    const replacement = try st.pf.addNode(.{ .x = 60, .y = 0 }, false);
+    try st.node_entities.put(st.allocator, replacement, 200);
+    const rebuilt = WalkOrigin.resolve(&st, 10, .{ .x = 60, .y = 0 });
+    try std.testing.expectEqual(@as(f32, 0), rebuilt.distanceToPosition(20, .{ .x = 60, .y = 0 }));
 }
