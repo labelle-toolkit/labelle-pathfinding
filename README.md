@@ -76,6 +76,23 @@ pathfinder.Controller.findClosestNode(game, pos);
 pathfinder.Controller.targetPosition(game, entity);   // CMN-preferred nav target for an entity
 ```
 
+For a synchronous destination scan, reuse the origin resolution:
+
+```zig
+var distances = pathfinder.Controller.walkDistancesFrom(game, source);
+// Inside a read-only candidate loop:
+const cost = distances.to(destination);
+```
+
+The first candidate resolves the origin's world position and its validated
+nearest node; subsequent candidates reuse that result. Empty scans do no
+resolution work. Targets still resolve live, and distances retain `walkDistance`'s
+pre-graph Euclidean and unreachable-infinity behavior. Discard the query before
+moving/reparenting the origin or its ancestors, changing the graph or world, or
+advancing the simulation. It is not a cross-frame cache or a thread-safe handle.
+The query uses the existing position-validated node cache; the ECS
+`ClosestMovementNode` component alone does not supply that freshness contract.
+
 ### Events (the only outbound channel — subscribe from game hooks)
 
 | Event | Payload | Fires when |
