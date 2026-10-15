@@ -733,3 +733,73 @@ test "legacy navigation target lookup preserves stale matching debug records" {
     _ = try domainRun(&game, 1);
     try testing.expect(C.endpointPreparationComplete(&game, a));
 }
+
+test "walkers publish each frame without spending the preparation search budget" {
+    var game = Game.init(testing.allocator);
+    defer game.deinit();
+    _ = node(&game, 0);
+    _ = node(&game, 70);
+    const goal = node(&game, 140);
+    const mover = item(&game, 0);
+    const carried = item(&game, 0);
+    game.setParent(carried, mover, .{});
+    try setup(&game);
+    defer C.deinit(&game);
+    _ = try domainRun(&game, 8);
+    _ = C.navigate(&game, mover, .{ .x = 140, .y = 0 }, @src());
+    for (0..20) |_| {
+        C.advance(&game, 0.125); // low frame rate also needs no nearest searches
+        try testing.expect(C.preparedDistance(&game, mover, goal) != null);
+        try testing.expect(C.preparedDistance(&game, carried, goal) != null);
+        const stats = try domainRun(&game, 8);
+        try testing.expectEqual(@as(usize, 0), stats.nearest_searches);
+    }
+    // An external move immediately invalidates; cancellation does not bless it.
+    game.setPosition(mover, .{ .x = 10000 });
+    C.cancel(&game, mover);
+    try testing.expectEqual(null, C.preparedDistance(&game, mover, goal));
+    try testing.expectEqual(null, C.preparedDistance(&game, carried, goal));
+    try testing.expect((try domainRun(&game, 8)).nearest_searches > 0);
+}
+
+test "walker route endpoints remain current on long authored edges and reject graph changes" {
+    var game = Game.init(testing.allocator);
+    defer game.deinit();
+    const a = node(&game, 0);
+    const b = node(&game, 600);
+    game.addComponent(a, pf.MovementLink{ .dx = 600 });
+    const mover = item(&game, 0);
+    game.addComponent(mover, pf.MovementSpeed{ .speed = 100 });
+    try setup(&game);
+    defer C.deinit(&game);
+    _ = try domainRun(&game, 8);
+    _ = C.navigate(&game, mover, .{ .x = 600, .y = 0 }, @src());
+    for (0..4) |_| {
+        C.advance(&game, 1);
+        try testing.expect(C.preparedDistance(&game, mover, b) != null);
+        try testing.expectEqual(@as(usize, 0), (try domainRun(&game, 8)).nearest_searches);
+    }
+    game.setPosition(b, .{ .x = 610 });
+    try testing.expectEqual(null, C.preparedDistance(&game, mover, a));
+}
+
+test "direct walks retain a validated known anchor and dropping invalidates attached items" {
+    var game = Game.init(testing.allocator);
+    defer game.deinit();
+    const n = node(&game, 0);
+    const mover = item(&game, 1);
+    const carried = item(&game, 0);
+    game.setParent(carried, mover, .{});
+    try setup(&game);
+    defer C.deinit(&game);
+    _ = try domainRun(&game, 8);
+    _ = C.moveTo(&game, mover, .{ .x = 60, .y = 0 });
+    C.advance(&game, 0.125);
+    try testing.expect(C.preparedDistance(&game, mover, n) != null);
+    try testing.expect(C.preparedDistance(&game, carried, n) != null);
+    try testing.expectEqual(@as(usize, 0), (try domainRun(&game, 8)).nearest_searches);
+    game.removeParentKeepTransform(carried);
+    try testing.expectEqual(null, C.preparedDistance(&game, carried, n));
+    _ = try domainRun(&game, 8);
+    try testing.expect(C.preparedDistance(&game, carried, n) != null);
+}

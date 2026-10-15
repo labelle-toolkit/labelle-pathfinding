@@ -853,13 +853,70 @@ pub const Controller = struct {
         const dy = pos.y - anchor.y;
         const distance_to_node = @sqrt(dx * dx + dy * dy);
         if (!std.math.isFinite(distance_to_node) or distance_to_node > MAX_NODE_SNAP_DISTANCE or anchor.y > pos.y + Y_FILTER_EPS) return false;
+        return publishEndpointAt(game, st, entity, node, @intCast(node_entity), distance_to_node);
+    }
+
+    fn publishEndpointAt(game: anytype, st: *State, entity: anytype, node: NodeId, node_entity: u64, distance_to_node: f32) !bool {
+        const ecs = &game.active_world.ecs_backend;
         _ = try game.trackPositionRevision(entity);
         const stamp = endpointStamp(game, st, entity) orelse return false;
         var cmn = if (ecs.getComponent(entity, ClosestMovementNode)) |old| old.* else ClosestMovementNode{};
-        if (!cmn.publish(stamp, stamp, .{ .node_entity = @intCast(node_entity), .node_id = node, .distance = distance_to_node })) return false;
+        if (!cmn.publish(stamp, stamp, .{ .node_entity = node_entity, .node_id = node, .distance = distance_to_node })) return false;
         ecs.addComponent(entity, cmn);
         game.active_world.position_revisions.acknowledge(@intCast(entity), stamp.position_revision);
         return true;
+    }
+
+    /// A graph walker owns its current edge. Resolve only its two endpoints,
+    /// never the whole graph. A point on a long authored edge is on-graph even
+    /// beyond the off-route snap radius. External movement fails this geometric
+    /// check and leaves the entity pending for ordinary preparation.
+    fn publishWalkingEndpoint(game: anytype, st: *State, entity: anytype, path: *const movement_path.MovementPath) void {
+        if (!st.preparation_enabled or !preparedGraphCurrent(game, st) or path.len == 0) return;
+        const idx = @min(path.current_index, path.len - 1);
+        const prev = if (idx > 0) idx - 1 else idx;
+        const a = path.positions[prev];
+        const b = path.positions[idx];
+        const pos = game.getWorldPosition(entity);
+        const dx = b.x - a.x;
+        const dy = b.y - a.y;
+        const length2 = dx * dx + dy * dy;
+        const t = if (length2 > 0) ((pos.x - a.x) * dx + (pos.y - a.y) * dy) / length2 else 0;
+        const px = a.x + std.math.clamp(t, 0, 1) * dx;
+        const py = a.y + std.math.clamp(t, 0, 1) * dy;
+        const on_edge = idx > 0 and @abs(pos.x - px) <= 0.05 and @abs(pos.y - py) <= 0.05;
+        var best: ?NodeId = null;
+        var best_distance: f32 = std.math.inf(f32);
+        for ([_]u32{ prev, idx }) |i| {
+            const nid = path.node_path[i];
+            const node_entity = st.node_entities.get(nid) orelse continue;
+            if (!registeredIdentity(st, nid, node_entity)) continue;
+            const anchor = st.pf.graph.getPosition(nid);
+            if (anchor.y > pos.y + Y_FILTER_EPS) continue;
+            const node_distance = @sqrt((pos.x - anchor.x) * (pos.x - anchor.x) + (pos.y - anchor.y) * (pos.y - anchor.y));
+            if (!on_edge and node_distance > MAX_NODE_SNAP_DISTANCE) continue;
+            if (node_distance < best_distance or (node_distance == best_distance and nid < (best orelse std.math.maxInt(NodeId)))) {
+                best = nid;
+                best_distance = node_distance;
+            }
+        }
+        if (best) |nid| {
+            if (publishEndpointAt(game, st, entity, nid, st.node_entities.get(nid).?, best_distance) catch false)
+                publishAttachedEndpoints(game, entity, @intCast(st.node_entities.get(nid).?));
+        }
+    }
+
+    // Carried items follow the walker's known node while within the normal
+    // placement radius. Only already tracked descendants participate; dropping
+    // or moving them independently still invalidates through the shared API.
+    fn publishAttachedEndpoints(game: anytype, parent: anytype, node_entity: @TypeOf(parent)) void {
+        if (comptime @hasDecl(@TypeOf(game.*), "getChildren")) {
+            for (game.getChildren(parent)) |child| {
+                if (game.positionRevision(child) != null)
+                    _ = publishKnownEndpoint(game, child, node_entity) catch false;
+                publishAttachedEndpoints(game, child, node_entity);
+            }
+        }
     }
 
     /// Lifecycle gate, separate from matching: false means retry preparation
@@ -1332,7 +1389,7 @@ pub const Controller = struct {
         return result;
     }
 
-    /// Serial snapshot + compute phase. Feed a union of game-owned domain views
+    /// Joined snapshot + compute phase. Feed a union of game-owned domain views
     /// once per frame after movement. The caller owns/deinitializes the iterator
     /// before calling publishEndpointBatch. No CMN is written here.
     pub fn prepareEndpointBatch(game: anytype, participants: anytype, budget: usize) !PreparationStats {
@@ -1749,7 +1806,16 @@ pub const Controller = struct {
             const pos = game.getPosition(entity);
             switch (directStep(pos, dm.target, dm.speed, dt)) {
                 .arrived => settled.append(st.allocator, entity_id) catch break,
-                .move => |next| game.setPosition(entity, next),
+                .move => |next| {
+                    game.setPosition(entity, next);
+                    if (st.preparation_enabled) {
+                        if (ecs.getComponent(entity, ClosestMovementNode)) |cmn| {
+                            const known: Entity = @intCast(cmn.node_entity);
+                            if (publishKnownEndpoint(game, entity, known) catch false)
+                                publishAttachedEndpoints(game, entity, known);
+                        }
+                    }
+                },
             }
         }
 
@@ -2271,6 +2337,11 @@ fn GameCtx(comptime GameType: type) type {
     return struct {
         game: GameType,
         st: *State,
+
+        pub fn onPathStep(self: *@This(), entity_id: u64, path: *const movement_path.MovementPath) void {
+            const Entity = @TypeOf(self.game.*).EntityType;
+            Controller.publishWalkingEndpoint(self.game, self.st, @as(Entity, @intCast(entity_id)), path);
+        }
 
         pub fn onArrived(self: *@This(), entity_id: u64, goal_node: NodeId) void {
             settleArrival(self.game, self.st, entity_id, goal_node);

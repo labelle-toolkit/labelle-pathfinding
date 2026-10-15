@@ -36,7 +36,7 @@ jobs:
         run: |
           git init ../labelle-engine
           git -C ../labelle-engine remote add origin https://github.com/labelle-toolkit/labelle-engine.git
-          git -C ../labelle-engine fetch --depth 1 origin 2c4b0c17a669e520ff01f409714195d3b913ba57
+          git -C ../labelle-engine fetch --depth 1 origin 21ea60c67038416c007e308814c137358104353d
           git -C ../labelle-engine checkout --detach FETCH_HEAD
 
       - name: Run engine integration tests
