@@ -590,3 +590,58 @@ test "pending discovery retries after allocation failure and controller replacem
     game.removeComponent(e, CMN);
     try testing.expectEqual(@as(usize, 1), (try domainRun(&game, 1)).published);
 }
+
+test "pending and full-view preparation publish identical frame outcomes" {
+    var reference = Game.init(testing.allocator);
+    defer reference.deinit();
+    var queued = Game.init(testing.allocator);
+    defer queued.deinit();
+    const rn = node(&reference, 0);
+    const qn = node(&queued, 0);
+    _ = node(&reference, 50);
+    _ = node(&queued, 50);
+    var re: [6]Entity = undefined;
+    var qe: [6]Entity = undefined;
+    for (0..5) |i| {
+        re[i] = item(&reference, @floatFromInt(i * 10));
+        qe[i] = item(&queued, @floatFromInt(i * 10));
+    }
+    try setup(&reference);
+    defer C.deinit(&reference);
+    try setup(&queued);
+    defer C.deinit(&queued);
+    var count: usize = 5;
+    for (0..60) |frame| {
+        if (frame == 10) {
+            re[5] = item(&reference, 10000);
+            qe[5] = item(&queued, 10000);
+            count = 6;
+        }
+        if (frame == 20) {
+            reference.removeComponent(re[2], Participant);
+            queued.removeComponent(qe[2], Participant);
+        }
+        if (frame == 30) {
+            reference.addComponent(re[2], Participant{});
+            queued.addComponent(qe[2], Participant{});
+        }
+        if (frame == 40) {
+            reference.setPosition(rn, .{ .x = 5 });
+            queued.setPosition(qn, .{ .x = 5 });
+            C.advance(&reference, 0);
+            C.advance(&queued, 0);
+        }
+        const i = frame % count;
+        const pos = engine.Position{ .x = @floatFromInt(frame % 70) };
+        reference.setPosition(re[i], pos);
+        queued.setPosition(qe[i], pos);
+        const full = try run(&reference, 2);
+        const pending = try domainRun(&queued, 2);
+        try testing.expectEqual(full.selected, pending.selected);
+        try testing.expectEqual(full.published, pending.published);
+        try testing.expectEqual(full.off_graph, pending.off_graph);
+        for (0..count) |j| {
+            try testing.expectEqual(C.preparedDistance(&reference, re[j], rn), C.preparedDistance(&queued, qe[j], qn));
+        }
+    }
+}
