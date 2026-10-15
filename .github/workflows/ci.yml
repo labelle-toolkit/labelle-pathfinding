@@ -27,6 +27,9 @@ jobs:
       - name: Run zspec tests
         run: zig build spec
 
+      - name: Compile controller for wasm32
+        run: zig build wasm-check
+
       # Prepared endpoint integration depends on engine#916 until its release.
       # Pin the exact tested commit rather than following an unreleased branch.
       - name: Checkout engine position revision API
