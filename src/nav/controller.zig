@@ -190,6 +190,7 @@ pub const PreparationStats = struct {
     pending: usize = 0,
     selected: usize = 0,
     nearest_searches: usize = 0,
+    reused_endpoints: usize = 0,
     published: usize = 0,
     off_graph: usize = 0,
     discarded: usize = 0,
@@ -232,6 +233,7 @@ pub const State = struct {
     preparation_batch: @import("preparation_batch.zig").PreparationBatch = .{},
     preparation_snapshots: std.ArrayListUnmanaged(EndpointSnapshot) = .empty,
     graph_inputs: std.AutoHashMapUnmanaged(u32, GraphInput) = .empty,
+    registered_entities: std.ArrayListUnmanaged(?u64) = .empty,
     allocator: std.mem.Allocator,
     /// Node-ID → entity lookup. Iteration order is deterministic
     /// (insertion order) so simulation replay is stable.
@@ -318,6 +320,7 @@ pub const State = struct {
         self.preparation_batch.deinit(self.allocator);
         self.preparation_snapshots.deinit(self.allocator);
         self.graph_inputs.deinit(self.allocator);
+        self.registered_entities.deinit(self.allocator);
         self.nearest_node_cache.deinit();
         self.node_entities.deinit(self.allocator);
         self.pending_entities.deinit(self.allocator);
@@ -328,6 +331,7 @@ pub const State = struct {
 
     fn reset(self: *State, allocator: std.mem.Allocator) void {
         self.graph_inputs.clearRetainingCapacity();
+        self.registered_entities.clearRetainingCapacity();
         self.pf.deinit();
         self.node_entities.deinit(self.allocator);
         self.nearest_node_cache.deinit();
@@ -817,7 +821,7 @@ pub const Controller = struct {
         if (!ecs.entityExists(entity)) return false;
         if (ecs.hasComponent(entity, MovementNode)) return preparedEndpointNode(game, st, entity) != null;
         const cmn = ecs.getComponent(entity, ClosestMovementNode) orelse return false;
-        return cmn.current(endpointStamp(game, st, entity) orelse return false);
+        return preparedStampCurrent(game, st, entity, cmn);
     }
 
     fn preparedGraphCurrent(game: anytype, st: *State) bool {
@@ -834,15 +838,29 @@ pub const Controller = struct {
         return node.node_id;
     }
 
+    fn preparedStampCurrent(game: anytype, st: *State, entity: anytype, cmn: *const ClosestMovementNode) bool {
+        const stamp = cmn.stamp;
+        return cmn.status != .pending and stamp.world_revision == st.preparation_world and
+            stamp.entity_id == @as(u64, @intCast(entity)) and stamp.graph_revision == st.graph_epoch and
+            stamp.position_revision != 0 and game.positionRevisionAt(entity, stamp.position_slot) == stamp.position_revision;
+    }
+
+    fn registeredIdentity(st: *State, node: NodeId, entity: u64) bool {
+        return node < st.registered_entities.items.len and st.registered_entities.items[node] == entity and !st.pf.graph.isRemoved(node);
+    }
+
     fn preparedEndpointNode(game: anytype, st: *State, entity: anytype) ?NodeId {
         const ecs = &game.active_world.ecs_backend;
         if (!ecs.entityExists(entity)) return null;
-        if (ecs.hasComponent(entity, MovementNode)) return registeredNode(game, st, entity);
+        if (ecs.getComponent(entity, MovementNode)) |node| {
+            return if (registeredIdentity(st, node.node_id, @intCast(entity))) node.node_id else null;
+        }
         const cmn = ecs.getComponent(entity, ClosestMovementNode) orelse return null;
-        if (!cmn.ready(endpointStamp(game, st, entity) orelse return null)) return null;
-        const node = registeredNode(game, st, @as(@TypeOf(entity), @intCast(cmn.node_entity))) orelse return null;
-        if (node != cmn.node_id) return null;
-        return node;
+        if (cmn.status != .ready or !preparedStampCurrent(game, st, entity, cmn)) return null;
+        // The graph dependency token rejects node destruction/component changes.
+        // Its immutable, generation-qualified registration needs no ECS reread.
+        if (!registeredIdentity(st, cmn.node_id, cmn.node_entity)) return null;
+        return cmn.node_id;
     }
 
     /// Graph path-length between two game entities, via each entity's
@@ -1222,10 +1240,8 @@ pub const Controller = struct {
         while (participants.next()) |entity| {
             st.preparation_stats.discovered += 1;
             if (!ecs.entityExists(entity) or ecs.hasComponent(entity, MovementNode)) continue;
-            if (endpointStamp(game, st, entity)) |stamp| {
-                if (ecs.getComponent(entity, ClosestMovementNode)) |cmn| {
-                    if (cmn.current(stamp)) continue;
-                }
+            if (ecs.getComponent(entity, ClosestMovementNode)) |cmn| {
+                if (preparedStampCurrent(game, st, entity, cmn)) continue;
             }
             st.preparation_stats.pending += 1;
             st.preparation_batch.consider(@intCast(entity));
@@ -1244,14 +1260,16 @@ pub const Controller = struct {
             });
         }
         for (st.preparation_snapshots.items) |*snapshot| {
-            st.preparation_stats.nearest_searches += 1;
-            if (findNearestNodeInState(st, snapshot.position.x, snapshot.position.y)) |node| {
-                const node_entity = st.node_entities.get(node) orelse continue;
-                const pos = st.pf.graph.getPosition(node);
-                const dx = pos.x - snapshot.position.x;
-                const dy = pos.y - snapshot.position.y;
-                snapshot.resolution = .{ .node_entity = node_entity, .node_id = node, .distance = @sqrt(dx * dx + dy * dy) };
+            const entity: Entity = @intCast(snapshot.entity);
+            if (ecs.getComponent(entity, ClosestMovementNode)) |cmn| {
+                if (reusePreparedResolution(st, cmn, snapshot.stamp, snapshot.position)) |resolution| {
+                    snapshot.resolution = resolution;
+                    st.preparation_stats.reused_endpoints += 1;
+                    continue;
+                }
             }
+            st.preparation_stats.nearest_searches += 1;
+            snapshot.resolution = resolvePreparedNearest(st, snapshot.position);
         }
         st.preparation_stats.selected = st.preparation_batch.selected.items.len;
         st.preparation_stats.discarded = st.preparation_stats.selected - st.preparation_snapshots.items.len;
@@ -1313,6 +1331,7 @@ pub const Controller = struct {
             // The complete ECS handle, including generation, is the identity.
             .entity_id = @intCast(entity),
             .position_revision = revision,
+            .position_slot = game.positionRevisionSlot(entity) orelse return null,
             .graph_revision = st.graph_epoch,
         };
     }
@@ -1472,6 +1491,13 @@ pub const Controller = struct {
                 log.err("failed to track node {d}: {}", .{ node_id, err });
             };
             if (st.preparation_enabled) {
+                const old_len = st.registered_entities.items.len;
+                st.registered_entities.resize(st.allocator, @as(usize, node_id) + 1) catch {
+                    watches_ok = false;
+                    continue;
+                };
+                @memset(st.registered_entities.items[old_len..], null);
+                st.registered_entities.items[node_id] = entity_id;
                 st.graph_inputs.put(st.allocator, node_id, .{
                     .position = pos,
                     .stair = is_stair,
@@ -1876,6 +1902,79 @@ pub fn cachedNearestStillValid(cached: CachedNearest, x: f32, y: f32) bool {
     const dx = x - cached.cached_x;
     const dy = y - cached.cached_y;
     return dx * dx + dy * dy < CACHE_POS_THRESHOLD_SQ;
+}
+
+/// Reuse is preparation work, never a distance-query fallback. The original
+/// sample/radius are retained so small moves cannot accumulate unchecked drift.
+fn reusePreparedResolution(st: *State, cmn: *const ClosestMovementNode, stamp: ClosestMovementNode.Stamp, pos: Position) ?ClosestMovementNode.Resolution {
+    if (cmn.status == .off_graph or !cmn.stamp.eql(cmn.last_ready_stamp) or cmn.stamp.world_revision != stamp.world_revision or
+        cmn.stamp.entity_id != stamp.entity_id or cmn.stamp.graph_revision != stamp.graph_revision or
+        cmn.invalidation == .graph or cmn.invalidation == .world) return null;
+    if (!Controller.registeredIdentity(st, cmn.node_id, cmn.node_entity)) return null;
+    const region = cmn.reuse;
+    if (!(region.radius > 0) or !std.math.isFinite(pos.x) or !std.math.isFinite(pos.y)) return null;
+    if (@as(f64, pos.y) < region.min_y or @as(f64, pos.y) >= region.max_y) return null;
+    const dx = @as(f64, pos.x) - region.x;
+    const dy = @as(f64, pos.y) - region.y;
+    if (dx * dx + dy * dy >= region.radius * region.radius) return null;
+    const node_pos = st.pf.graph.getPosition(cmn.node_id);
+    const nx = node_pos.x - pos.x;
+    const ny = node_pos.y - pos.y;
+    const distance = @sqrt(nx * nx + ny * ny);
+    if (!std.math.isFinite(distance) or distance > MAX_NODE_SNAP_DISTANCE or node_pos.y > pos.y + Y_FILTER_EPS) return null;
+    return .{ .node_entity = cmn.node_entity, .node_id = cmn.node_id, .distance = distance, .reuse = region };
+}
+
+/// Same selection/tie order as findNearestNodeInState, with a conservative region
+/// where the winner cannot change. Distance differences are 2-Lipschitz: moving
+/// less than one quarter of the runner-up gap stays strictly inside that region.
+/// Separate Y bounds preserve the eligible node set during horizontal movement.
+fn resolvePreparedNearest(st: *State, pos: Position) ?ClosestMovementNode.Resolution {
+    if (!std.math.isFinite(pos.x) or !std.math.isFinite(pos.y)) return null;
+    var best: ?NodeId = null;
+    var best_distance: f32 = std.math.inf(f32);
+    var best_exact: f64 = std.math.inf(f64);
+    var second_exact: f64 = std.math.inf(f64);
+    var min_y: f64 = -std.math.inf(f64);
+    var max_y: f64 = std.math.inf(f64);
+    for (0..st.pf.graph.totalSlots()) |i| {
+        const node: NodeId = @intCast(i);
+        if (st.pf.graph.isRemoved(node)) continue;
+        const point = st.pf.graph.getPosition(node);
+        const boundary = @as(f64, point.y) - Y_FILTER_EPS;
+        const padding = 0.00001 * @max(1, @max(@abs(@as(f64, point.y)), @abs(@as(f64, pos.y))));
+        if (point.y > pos.y + Y_FILTER_EPS) {
+            max_y = @min(max_y, boundary - padding);
+            continue;
+        }
+        min_y = @max(min_y, boundary + padding);
+        const dx = point.x - pos.x;
+        const dy = point.y - pos.y;
+        const distance = @sqrt(dx * dx + dy * dy);
+        const ex = @as(f64, point.x) - pos.x;
+        const ey = @as(f64, point.y) - pos.y;
+        const exact = @sqrt(ex * ex + ey * ey);
+        if (distance < best_distance) {
+            second_exact = @min(second_exact, best_exact);
+            best_distance = distance;
+            best_exact = exact;
+            best = node;
+        } else {
+            second_exact = @min(second_exact, exact);
+        }
+    }
+    const node = best orelse return null;
+    if (best_distance > MAX_NODE_SNAP_DISTANCE) return null;
+    const entity = st.node_entities.get(node) orelse return null;
+    const gap = if (std.math.isFinite(second_exact)) second_exact - best_exact else MAX_NODE_SNAP_DISTANCE;
+    // Leave generous room for the f32 arithmetic used by the reference selector.
+    const rounding_guard = 0.0001 * @max(1, best_exact);
+    return .{
+        .node_entity = entity,
+        .node_id = node,
+        .distance = best_distance,
+        .reuse = .{ .x = pos.x, .y = pos.y, .radius = @max(0, gap * 0.25 - rounding_guard), .min_y = min_y, .max_y = max_y },
+    };
 }
 
 pub fn findNearestNodeInState(st: *State, x: f32, y: f32) ?NodeId {

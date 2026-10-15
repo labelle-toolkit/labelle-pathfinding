@@ -362,3 +362,88 @@ test "known docking placement validates world geometry and is invalidated by anc
     game.setPosition(parent, .{ .x = 1000 });
     try testing.expect(!try C.publishKnownEndpoint(&game, bandit, dock));
 }
+
+test "small moves reuse only during preparation and preserve the original region" {
+    var game = Game.init(testing.allocator);
+    defer game.deinit();
+    const n = node(&game, 0);
+    _ = node(&game, 50);
+    const e = item(&game, 1);
+    try setup(&game);
+    defer C.deinit(&game);
+    _ = try run(&game, 1);
+    const region = game.getComponent(e, CMN).?.reuse;
+    for (2..10) |x| {
+        game.setPosition(e, .{ .x = @floatFromInt(x) });
+        try testing.expectEqual(null, C.preparedDistance(&game, e, n));
+        const stats = try stage(&game, 1);
+        try testing.expectEqual(@as(usize, 1), stats.reused_endpoints);
+        try testing.expectEqual(@as(usize, 0), stats.nearest_searches);
+        try testing.expectEqual(null, C.preparedDistance(&game, e, n));
+        _ = C.publishEndpointBatch(&game);
+        try testing.expectEqual(@as(?f32, 0), C.preparedDistance(&game, e, n));
+        try testing.expectEqualDeep(region, game.getComponent(e, CMN).?.reuse);
+    }
+    game.setPosition(e, .{ .x = 30 });
+    try testing.expectEqual(@as(usize, 1), (try stage(&game, 1)).nearest_searches);
+    _ = C.publishEndpointBatch(&game);
+    try testing.expectEqual(@as(?f32, 50), C.preparedDistance(&game, e, n));
+}
+
+test "reuse agrees with exhaustive nearest selection across ties Y boundaries and teleports" {
+    var game = Game.init(testing.allocator);
+    defer game.deinit();
+    _ = node(&game, 0);
+    _ = node(&game, 50);
+    const upper = node(&game, 25);
+    game.setPosition(upper, .{ .x = 25, .y = 10 });
+    _ = node(&game, 50); // duplicate: retain first-node tie order
+    const e = item(&game, 1);
+    try setup(&game);
+    defer C.deinit(&game);
+    var reused: usize = 0;
+    for (0..600) |i| {
+        const x: f32 = @as(f32, @floatFromInt(i % 151)) - 40;
+        const y: f32 = switch ((i / 151) % 4) {
+            0 => 0,
+            1 => 4.99999,
+            2 => 5,
+            else => 5.00001,
+        };
+        game.setPosition(e, .{ .x = x, .y = y });
+        const stats = try run(&game, 1);
+        reused += stats.reused_endpoints;
+        const expected = pf.controller.findNearestNodeInState(C.getState(&game).?, x, y);
+        const cmn = game.getComponent(e, CMN).?;
+        if (expected) |id| {
+            try testing.expectEqual(CMN.Status.ready, cmn.status);
+            try testing.expectEqual(id, cmn.node_id);
+        } else try testing.expectEqual(CMN.Status.off_graph, cmn.status);
+    }
+    try testing.expect(reused > 0);
+    game.setPosition(e, .{ .x = 10000 });
+    try testing.expectEqual(@as(usize, 1), (try run(&game, 1)).off_graph);
+    game.setPosition(e, .{ .x = 1 });
+    try testing.expectEqual(@as(usize, 1), (try run(&game, 1)).nearest_searches);
+}
+
+test "known placements and changed graphs cannot reuse a nearest certificate" {
+    var game = Game.init(testing.allocator);
+    defer game.deinit();
+    const n = node(&game, 0);
+    const e = item(&game, 1);
+    try setup(&game);
+    defer C.deinit(&game);
+    _ = try run(&game, 1);
+    try testing.expect(try C.publishKnownEndpoint(&game, e, n));
+    game.setPosition(e, .{ .x = 2 });
+    try testing.expectEqual(@as(usize, 1), (try run(&game, 1)).nearest_searches);
+    game.setPosition(n, .{ .x = 3 });
+    C.advance(&game, 0);
+    try testing.expectEqual(@as(usize, 1), (try run(&game, 1)).nearest_searches);
+    game.setPosition(e, .{ .x = 4 });
+    try testing.expectEqual(@as(usize, 1), (try stage(&game, 1)).reused_endpoints);
+    game.setPosition(e, .{ .x = 5 });
+    try testing.expectEqual(@as(usize, 1), C.publishEndpointBatch(&game).discarded);
+    try testing.expectEqual(null, C.preparedDistance(&game, e, n));
+}
