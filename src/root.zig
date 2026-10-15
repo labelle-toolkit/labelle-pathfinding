@@ -115,3 +115,6 @@ pub const algo = pathfinding.algo;
 test {
     _ = pathfinding;
 }
+
+/// World-local bounded selection scratch for serial endpoint preparation.
+pub const PreparationBatch = @import("nav/preparation_batch.zig").PreparationBatch;

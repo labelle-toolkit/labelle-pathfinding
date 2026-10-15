@@ -58,3 +58,26 @@ matching consumers before the following integration is complete.
 regression tests exercise freshness/publication and the read-only table contract.
 This does not establish mutation coverage, rotating-batch fairness, game
 integration or WASM performance; those are subsequent acceptance checks.
+
+## Follow-up: rotating bounded selection
+
+`PreparationBatch` now provides world-local execution scratch. Each pass receives
+current ECS-derived pending identities, chooses up to the supplied budget in
+stable order after the previous cursor, and wraps. View order and duplicate
+memberships do not change selection. Deleting the cursor entity does not reset
+progress. Newly invalidated entities wait their turn. `finish` advances only at
+the publication barrier after the whole selected batch has been processed;
+rejected stale results still consume their turn. World changes call `reset`.
+
+There is no default budget or authoritative persistent pending list. Memory is
+bounded by the highest requested budget, and allocation failure leaves the batch
+empty without moving the cursor. Discovery currently costs O(candidate count ×
+budget), including duplicate checks. The helper reports inspected candidates;
+it does not claim a wall-time bound. Measure discovery together with snapshots,
+searches and publication before choosing the game's budget or optimizing selection.
+
+Five tests cover rotating fairness, deletion/insertion/wrap, duplicates, zero
+budget, empty views, OOM and every ordering of a small candidate set. There are
+now 81 navigation specs. This helper does not yet discover participants, take
+snapshots, search nodes or publish CMNs. Controller integration remains required;
+only a pending predicate backed by shared freshness may feed this selector.
