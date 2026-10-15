@@ -209,11 +209,14 @@ const EndpointSnapshot = struct {
 };
 // Identity only: never used for selection order. A fresh controller lifetime
 // cannot accept publication metadata from an old world, even at the same address.
-var next_preparation_world = std.atomic.Value(u64).init(0);
+// Controller lifetimes are created/destroyed on the simulation thread. Future
+// preparation workers consume snapshots; they must not construct controller state.
+// Keep the full u64 identity range without requiring unsupported wasm32 atomics.
+var next_preparation_world: u64 = 0;
 fn newPreparationWorld() u64 {
-    const previous = next_preparation_world.fetchAdd(1, .monotonic);
-    if (previous == std.math.maxInt(u64)) @panic("preparation world identity exhausted");
-    return previous + 1;
+    if (next_preparation_world == std.math.maxInt(u64)) @panic("preparation world identity exhausted");
+    next_preparation_world += 1;
+    return next_preparation_world;
 }
 
 /// Heap-allocated runtime state. Not exported directly — callers reach
