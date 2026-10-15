@@ -30,14 +30,18 @@ jobs:
       - name: Compile controller for wasm32
         run: zig build wasm-check
 
-      # Prepared endpoint integration depends on engine#916 until its release.
+      # Prepared endpoint integration depends on engine#917 until its release.
       # Pin the exact tested commit rather than following an unreleased branch.
       - name: Checkout engine position revision API
         run: |
           git init ../labelle-engine
           git -C ../labelle-engine remote add origin https://github.com/labelle-toolkit/labelle-engine.git
-          git -C ../labelle-engine fetch --depth 1 origin b93dafd1295fe5324be70c6249fc4687a78b8fe3
+          git -C ../labelle-engine fetch --depth 1 origin 21ea60c67038416c007e308814c137358104353d
           git -C ../labelle-engine checkout --detach FETCH_HEAD
 
       - name: Run engine integration tests
         run: zig build test --build-file tests/integration/build.zig --summary all
+
+      - name: Compile serial and threaded WASM snapshot executor
+        working-directory: ../labelle-engine
+        run: zig build snapshot-worker-check
