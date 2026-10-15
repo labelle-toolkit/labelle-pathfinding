@@ -447,3 +447,146 @@ test "known placements and changed graphs cannot reuse a nearest certificate" {
     try testing.expectEqual(@as(usize, 1), C.publishEndpointBatch(&game).discarded);
     try testing.expectEqual(null, C.preparedDistance(&game, e, n));
 }
+
+fn domainRun(game: *Game, budget: usize) !pf.controller.PreparationStats {
+    _ = try C.prepareEndpointDomains(game, .{Participant}, budget);
+    return C.publishEndpointBatch(game);
+}
+
+test "pending-only domains drain and idle frames visit no participants" {
+    var game = Game.init(testing.allocator);
+    defer game.deinit();
+    const n = node(&game, 0);
+    const parent = game.createEntity();
+    const a = item(&game, 1);
+    const b = item(&game, 2);
+    game.setParent(a, parent, .{});
+    try setup(&game);
+    defer C.deinit(&game);
+    const first = try domainRun(&game, 1);
+    try testing.expectEqual(@as(usize, 2), first.domain_discovered);
+    try testing.expectEqual(@as(usize, 2), first.discovered);
+    try testing.expectEqual(@as(usize, 1), (try domainRun(&game, 1)).discovered);
+    for (0..5) |_| {
+        const idle = try domainRun(&game, 1);
+        try testing.expectEqual(@as(usize, 0), idle.domain_discovered);
+        try testing.expectEqual(@as(usize, 0), idle.discovered);
+        try testing.expectEqual(@as(usize, 0), idle.nearest_searches);
+    }
+    game.setPosition(parent, .{ .x = 3 });
+    try testing.expectEqual(null, C.preparedDistance(&game, a, n));
+    const moved = try C.prepareEndpointDomains(&game, .{Participant}, 1);
+    try testing.expectEqual(@as(usize, 0), moved.domain_discovered);
+    try testing.expectEqual(@as(usize, 1), moved.discovered);
+    try testing.expectEqual(null, C.preparedDistance(&game, a, n));
+    _ = C.publishEndpointBatch(&game);
+    try testing.expectEqual(@as(?f32, 0), C.preparedDistance(&game, a, b));
+    game.setComponent(a, Participant{ .value = 3 });
+    try testing.expectEqual(@as(usize, 0), (try domainRun(&game, 1)).domain_discovered);
+}
+
+test "pending domains discover additions and component removal without count heuristics" {
+    var game = Game.init(testing.allocator);
+    defer game.deinit();
+    _ = node(&game, 0);
+    const a = item(&game, 1);
+    const b = game.createEntity();
+    game.setPosition(b, .{ .x = 2 });
+    try setup(&game);
+    defer C.deinit(&game);
+    _ = try domainRun(&game, 4);
+    game.removeComponent(a, Participant);
+    game.addComponent(b, Participant{}); // same participant count, different identity
+    game.setPosition(a, .{ .x = 4 });
+    const changed = try domainRun(&game, 4);
+    try testing.expectEqual(@as(usize, 1), changed.domain_discovered);
+    try testing.expectEqual(@as(usize, 1), changed.published);
+    try testing.expect(C.endpointPreparationComplete(&game, b));
+    game.setPosition(a, .{ .x = 5 });
+    try testing.expectEqual(@as(usize, 0), (try domainRun(&game, 4)).discovered);
+    game.active_world.ecs_backend.addComponent(a, Participant{});
+    game.invalidateComponentMembership(Participant);
+    try testing.expectEqual(@as(usize, 1), (try domainRun(&game, 4)).published);
+    game.destroyEntity(b);
+    try testing.expectEqual(@as(usize, 0), (try domainRun(&game, 4)).discovered);
+}
+
+test "pending work survives cancellation stale publication off graph and repath" {
+    var game = Game.init(testing.allocator);
+    defer game.deinit();
+    _ = node(&game, 0);
+    const a = item(&game, 1);
+    const b = item(&game, 10000);
+    try setup(&game);
+    defer C.deinit(&game);
+    _ = try C.prepareEndpointDomains(&game, .{Participant}, 1);
+    C.cancelEndpointBatch(&game);
+    try testing.expectEqual(@as(usize, 1), (try domainRun(&game, 1)).published);
+    _ = try C.prepareEndpointDomains(&game, .{Participant}, 1);
+    game.setPosition(b, .{ .x = 20000 });
+    try testing.expectEqual(@as(usize, 1), C.publishEndpointBatch(&game).discarded);
+    try testing.expectEqual(@as(usize, 1), (try domainRun(&game, 1)).off_graph);
+    try testing.expectEqual(@as(usize, 0), (try domainRun(&game, 1)).discovered);
+    C.requestRepath(&game, a);
+    try testing.expectEqual(@as(usize, 1), (try domainRun(&game, 1)).published);
+    game.setPosition(b, .{ .x = 2 });
+    try testing.expectEqual(@as(usize, 1), (try domainRun(&game, 1)).published);
+}
+
+test "graph changes and node role changes requeue endpoints; moving entities cannot starve others" {
+    var game = Game.init(testing.allocator);
+    defer game.deinit();
+    const n = node(&game, 0);
+    const a = item(&game, 1);
+    const b = item(&game, 2);
+    const c = item(&game, 3);
+    try setup(&game);
+    defer C.deinit(&game);
+    _ = try domainRun(&game, 1);
+    game.setPosition(a, .{ .x = 4 });
+    _ = try domainRun(&game, 1);
+    try testing.expect(C.endpointPreparationComplete(&game, b));
+    game.setPosition(a, .{ .x = 5 });
+    _ = try domainRun(&game, 1);
+    try testing.expect(C.endpointPreparationComplete(&game, c));
+    _ = try domainRun(&game, 4);
+    game.setPosition(n, .{ .x = 10 });
+    C.advance(&game, 0);
+    const rebuilt = try domainRun(&game, 4);
+    try testing.expectEqual(@as(usize, 0), rebuilt.domain_discovered);
+    try testing.expectEqual(@as(usize, 3), rebuilt.published);
+    game.addComponent(a, pf.MovementNode{});
+    C.advance(&game, 0);
+    _ = try domainRun(&game, 4);
+    game.removeComponent(a, pf.MovementNode);
+    C.advance(&game, 0);
+    _ = try domainRun(&game, 4);
+    try testing.expect(C.endpointPreparationComplete(&game, a));
+}
+
+test "pending discovery retries after allocation failure and controller replacement" {
+    var game = Game.init(testing.allocator);
+    defer game.deinit();
+    _ = node(&game, 0);
+    const e = item(&game, 1);
+    try setup(&game);
+    defer C.deinit(&game);
+    const state = C.getState(&game).?;
+    var bytes: [0]u8 = .{};
+    var allocator = std.heap.FixedBufferAllocator.init(&bytes);
+    {
+        state.allocator = allocator.allocator();
+        defer state.allocator = testing.allocator;
+        try testing.expectError(error.OutOfMemory, C.prepareEndpointDomains(&game, .{Participant}, 1));
+    }
+    try testing.expect(!C.endpointPreparationComplete(&game, e));
+    try testing.expectEqual(@as(usize, 1), (try domainRun(&game, 1)).published);
+    const old_world = game.getComponent(e, CMN).?.stamp.world_revision;
+    try C.setup(&game);
+    C.enableEndpointPreparation(&game);
+    C.advance(&game, 0);
+    try testing.expectEqual(@as(usize, 1), (try domainRun(&game, 1)).published);
+    try testing.expect(game.getComponent(e, CMN).?.stamp.world_revision != old_world);
+    game.removeComponent(e, CMN);
+    try testing.expectEqual(@as(usize, 1), (try domainRun(&game, 1)).published);
+}

@@ -187,6 +187,7 @@ pub const ControllerState = struct {
 
 pub const PreparationStats = struct {
     discovered: usize = 0,
+    domain_discovered: usize = 0,
     pending: usize = 0,
     selected: usize = 0,
     nearest_searches: usize = 0,
@@ -227,6 +228,9 @@ pub const State = struct {
     pf: Pf,
     preparation_world: u64,
     preparation_enabled: bool = false,
+    domain_revision: ?u64 = null,
+    domain_graph_epoch: u64 = 0,
+    domain_watches_ready: bool = false,
     graph_dependency_revision: ?u64 = null,
     preparation_in_flight: bool = false,
     preparation_stats: PreparationStats = .{},
@@ -808,6 +812,7 @@ pub const Controller = struct {
         var cmn = if (ecs.getComponent(entity, ClosestMovementNode)) |old| old.* else ClosestMovementNode{};
         if (!cmn.publish(stamp, stamp, .{ .node_entity = @intCast(node_entity), .node_id = node, .distance = distance_to_node })) return false;
         ecs.addComponent(entity, cmn);
+        game.active_world.position_revisions.acknowledge(@intCast(entity), stamp.position_revision);
         return true;
     }
 
@@ -1023,6 +1028,7 @@ pub const Controller = struct {
             const dx = node_pos.x - pos.x;
             const dy = node_pos.y - pos.y;
             const ne = st.node_entities.get(nid) orelse 0;
+            if (st.preparation_enabled) game.active_world.position_revisions.markPending(entity_id);
             ecs.addComponent(target_entity, components.ClosestMovementNode{
                 .node_entity = ne,
                 .node_id = nid,
@@ -1132,6 +1138,7 @@ pub const Controller = struct {
         const ecs = &game.active_world.ecs_backend;
         if (st.preparation_enabled) {
             if (ecs.getComponent(entity, ClosestMovementNode)) |cmn| cmn.invalidate(.position);
+            game.active_world.position_revisions.markPending(entity_id);
             return;
         }
         const pos = game.getWorldPosition(entity);
@@ -1222,6 +1229,66 @@ pub const Controller = struct {
         st.preparation_enabled = true;
     }
 
+    /// Pending-only preparation for one fixed union of component types per
+    /// world/controller. Shared membership changes trigger discovery; ordinary
+    /// movement only enqueues already registered endpoints. Queries stay pure.
+    pub fn prepareEndpointDomains(game: anytype, comptime domains: anytype, budget: usize) !PreparationStats {
+        const st = findState(game) orelse return .{};
+        if (st.preparation_in_flight) return error.PreparationInProgress;
+        const tracker = &game.active_world.position_revisions;
+        const ecs = &game.active_world.ecs_backend;
+        if (!st.domain_watches_ready) {
+            inline for (domains) |T| try tracker.watchMembership(game.allocator, T);
+            try tracker.watchMembership(game.allocator, MovementNode);
+            try tracker.watchMembership(game.allocator, ClosestMovementNode);
+            st.domain_watches_ready = true;
+        }
+        var discovered: usize = 0;
+        if (st.domain_revision == null or st.domain_revision.? != tracker.membership_revision) {
+            // Commit the revision only after every registration succeeds. OOM
+            // leaves the discovery pass retryable and publishes nothing.
+            inline for (domains) |T| {
+                var view = ecs.view(.{T}, .{});
+                defer view.deinit();
+                while (view.next()) |entity| {
+                    discovered += 1;
+                    if (!ecs.hasComponent(entity, MovementNode)) {
+                        try tracker.watchChanges(game.allocator, @intCast(entity));
+                        const current = if (ecs.getComponent(entity, ClosestMovementNode)) |cmn| preparedStampCurrent(game, st, entity, cmn) else false;
+                        if (!current) tracker.markPending(@intCast(entity));
+                    }
+                }
+            }
+            st.domain_revision = tracker.membership_revision;
+        }
+        if (st.domain_graph_epoch != st.graph_epoch) {
+            tracker.markAllPending();
+            st.domain_graph_epoch = st.graph_epoch;
+        }
+        const Entity = @TypeOf(game.*).EntityType;
+        var participants = struct {
+            game: @TypeOf(game),
+            pending: @TypeOf(tracker.pendingIterator()),
+            pub fn next(self: *@This()) ?Entity {
+                while (self.pending.next()) |id| {
+                    const entity: Entity = @intCast(id);
+                    const backend = &self.game.active_world.ecs_backend;
+                    if (backend.entityExists(entity) and !backend.hasComponent(entity, MovementNode)) {
+                        inline for (domains) |T| {
+                            if (backend.hasComponent(entity, T)) return entity;
+                        }
+                    }
+                    self.game.active_world.position_revisions.unwatchChanges(id);
+                }
+                return null;
+            }
+        }{ .game = game, .pending = tracker.pendingIterator() };
+        var result = try prepareEndpointBatch(game, &participants, budget);
+        result.domain_discovered = discovered;
+        st.preparation_stats.domain_discovered = discovered;
+        return result;
+    }
+
     /// Serial snapshot + compute phase. Feed a union of game-owned domain views
     /// once per frame after movement. The caller owns/deinitializes the iterator
     /// before calling publishEndpointBatch. No CMN is written here.
@@ -1241,7 +1308,10 @@ pub const Controller = struct {
             st.preparation_stats.discovered += 1;
             if (!ecs.entityExists(entity) or ecs.hasComponent(entity, MovementNode)) continue;
             if (ecs.getComponent(entity, ClosestMovementNode)) |cmn| {
-                if (preparedStampCurrent(game, st, entity, cmn)) continue;
+                if (preparedStampCurrent(game, st, entity, cmn)) {
+                    game.active_world.position_revisions.acknowledge(@intCast(entity), cmn.stamp.position_revision);
+                    continue;
+                }
             }
             st.preparation_stats.pending += 1;
             st.preparation_batch.consider(@intCast(entity));
@@ -1311,6 +1381,7 @@ pub const Controller = struct {
                         var cmn = if (ecs.getComponent(entity, ClosestMovementNode)) |old| old.* else ClosestMovementNode{};
                         if (cmn.publish(snapshot.stamp, stamp, snapshot.resolution)) {
                             ecs.addComponent(entity, cmn);
+                            game.active_world.position_revisions.acknowledge(snapshot.entity, stamp.position_revision);
                             st.preparation_stats.published += 1;
                             if (snapshot.resolution == null) st.preparation_stats.off_graph += 1;
                             continue;
@@ -2038,6 +2109,7 @@ fn settleArrival(game: anytype, st: *State, entity_id: u64, goal_node: ?NodeId) 
     if (!ecs.entityExists(entity)) return;
 
     ecs.removeComponent(entity, Navigating);
+    if (st.preparation_enabled) game.active_world.position_revisions.markPending(entity_id);
 
     // CMN refresh replaces the old game-side arrival → NeedsClosestNode
     // marker → next-tick resolve round-trip: the plugin owns the CMN
