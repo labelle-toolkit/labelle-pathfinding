@@ -1,0 +1,11 @@
+.{
+    .fingerprint = 0x2a94eae760223628,
+    .name = .prepared_endpoint_integration,
+    .version = "0.0.0",
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{
+        .pathfinder = .{ .path = "../.." },
+        .engine = .{ .path = "../../../labelle-engine" },
+    },
+    .paths = .{ "build.zig", "build.zig.zon", "preparation_test.zig" },
+}

@@ -185,11 +185,52 @@ pub const ControllerState = struct {
     state_ptr: usize = 0,
 };
 
+pub const PreparationStats = struct {
+    discovered: usize = 0,
+    pending: usize = 0,
+    selected: usize = 0,
+    nearest_searches: usize = 0,
+    published: usize = 0,
+    off_graph: usize = 0,
+    discarded: usize = 0,
+    graph_ready: bool = false,
+};
+
+const GraphInput = struct {
+    position: Position,
+    stair: bool,
+    link: ?MovementLink,
+};
+const EndpointSnapshot = struct {
+    entity: u64,
+    stamp: ClosestMovementNode.Stamp,
+    position: Position,
+    resolution: ?ClosestMovementNode.Resolution = null,
+};
+// Identity only: never used for selection order. A fresh controller lifetime
+// cannot accept publication metadata from an old world, even at the same address.
+// Controller lifetimes are created/destroyed on the simulation thread. Future
+// preparation workers consume snapshots; they must not construct controller state.
+// Keep the full u64 identity range without requiring unsupported wasm32 atomics.
+var next_preparation_world: u64 = 0;
+fn newPreparationWorld() u64 {
+    if (next_preparation_world == std.math.maxInt(u64)) @panic("preparation world identity exhausted");
+    next_preparation_world += 1;
+    return next_preparation_world;
+}
+
 /// Heap-allocated runtime state. Not exported directly — callers reach
 /// it through the Controller's methods, which look up the singleton
 /// `ControllerState` component and cast `state_ptr` back to `*State`.
 pub const State = struct {
     pf: Pf,
+    preparation_world: u64,
+    preparation_enabled: bool = false,
+    preparation_in_flight: bool = false,
+    preparation_stats: PreparationStats = .{},
+    preparation_batch: @import("preparation_batch.zig").PreparationBatch = .{},
+    preparation_snapshots: std.ArrayListUnmanaged(EndpointSnapshot) = .empty,
+    graph_inputs: std.AutoHashMapUnmanaged(u32, GraphInput) = .empty,
     allocator: std.mem.Allocator,
     /// Node-ID → entity lookup. Iteration order is deterministic
     /// (insertion order) so simulation replay is stable.
@@ -260,6 +301,7 @@ pub const State = struct {
         // few appends grow it lazily, never a correctness issue.
         pending.ensureTotalCapacity(allocator, PENDING_INITIAL_CAPACITY) catch {};
         return .{
+            .preparation_world = newPreparationWorld(),
             .pf = Pf.init(allocator, .{
                 .max_vertical_distance = MAX_VERTICAL_DISTANCE,
                 .max_horizontal_distance = MAX_HORIZONTAL_DISTANCE,
@@ -272,6 +314,9 @@ pub const State = struct {
     }
 
     pub fn deinit(self: *State) void {
+        self.preparation_batch.deinit(self.allocator);
+        self.preparation_snapshots.deinit(self.allocator);
+        self.graph_inputs.deinit(self.allocator);
         self.nearest_node_cache.deinit();
         self.node_entities.deinit(self.allocator);
         self.pending_entities.deinit(self.allocator);
@@ -281,6 +326,7 @@ pub const State = struct {
     }
 
     fn reset(self: *State, allocator: std.mem.Allocator) void {
+        self.graph_inputs.clearRetainingCapacity();
         self.pf.deinit();
         self.node_entities.deinit(self.allocator);
         self.nearest_node_cache.deinit();
@@ -861,7 +907,7 @@ pub const Controller = struct {
         // Fast path: a populated CMN (set by a prior nav, or by the
         // lazy resolve below on an earlier call).
         if (ecs.getComponent(target_entity, components.ClosestMovementNode)) |cmn| {
-            if (cmn.node_entity != 0) {
+            if (cmn.node_entity != 0 and legacyCmnUsable(game, target_entity, cmn.*)) {
                 const node_entity: Entity = @intCast(cmn.node_entity);
                 return game.getWorldPosition(node_entity);
             }
@@ -1074,6 +1120,148 @@ pub const Controller = struct {
         emitGameEvent(game, "pathfinder__node_removed", .{ .node_id = node_id });
     }
 
+    /// Opt in before advance. Graph-input validation and metadata are only
+    /// maintained for consumers using prepared endpoints. No game matching API
+    /// is changed by this opt-in. Existing worlds rebuild once on next advance.
+    pub fn enableEndpointPreparation(game: anytype) void {
+        const st = findState(game) orelse return;
+        st.preparation_enabled = true;
+    }
+
+    /// Serial snapshot + compute phase. Feed a union of game-owned domain views
+    /// once per frame after movement. The caller owns/deinitializes the iterator
+    /// before calling publishEndpointBatch. No CMN is written here.
+    pub fn prepareEndpointBatch(game: anytype, participants: anytype, budget: usize) !PreparationStats {
+        const st = findState(game) orelse return .{};
+        if (st.preparation_in_flight) return error.PreparationInProgress;
+        st.preparation_enabled = true;
+        st.preparation_stats = .{};
+        st.preparation_snapshots.clearRetainingCapacity();
+        try st.preparation_batch.begin(st.allocator, budget);
+        if (budget == 0 or !graphInputsCurrent(game, st)) return st.preparation_stats;
+        if (!st.pf.prepareDistanceTable()) return st.preparation_stats;
+        st.preparation_stats.graph_ready = true;
+        try st.preparation_snapshots.ensureTotalCapacityPrecise(st.allocator, budget);
+        const ecs = &game.active_world.ecs_backend;
+        while (participants.next()) |entity| {
+            st.preparation_stats.discovered += 1;
+            if (!ecs.entityExists(entity) or ecs.hasComponent(entity, MovementNode)) continue;
+            if (endpointStamp(game, st, entity)) |stamp| {
+                if (ecs.getComponent(entity, ClosestMovementNode)) |cmn| {
+                    if (cmn.current(stamp)) continue;
+                }
+            }
+            st.preparation_stats.pending += 1;
+            st.preparation_batch.consider(@intCast(entity));
+        }
+        const Entity = @TypeOf(game.*).EntityType;
+        // Snapshot every selected entity before searching or publishing any.
+        // OOM can register revision tokens, but cannot publish a partial batch.
+        for (st.preparation_batch.selected.items) |id| {
+            const entity: Entity = @intCast(id);
+            _ = try game.trackPositionRevision(entity);
+            const stamp = endpointStamp(game, st, entity) orelse continue;
+            st.preparation_snapshots.appendAssumeCapacity(.{
+                .entity = id,
+                .stamp = stamp,
+                .position = game.getWorldPosition(entity),
+            });
+        }
+        for (st.preparation_snapshots.items) |*snapshot| {
+            st.preparation_stats.nearest_searches += 1;
+            if (findNearestNodeInState(st, snapshot.position.x, snapshot.position.y)) |node| {
+                const node_entity = st.node_entities.get(node) orelse continue;
+                const pos = st.pf.graph.getPosition(node);
+                const dx = pos.x - snapshot.position.x;
+                const dy = pos.y - snapshot.position.y;
+                snapshot.resolution = .{ .node_entity = node_entity, .node_id = node, .distance = @sqrt(dx * dx + dy * dy) };
+            }
+        }
+        st.preparation_stats.selected = st.preparation_batch.selected.items.len;
+        st.preparation_stats.discarded = st.preparation_stats.selected - st.preparation_snapshots.items.len;
+        st.preparation_in_flight = true;
+        return st.preparation_stats;
+    }
+
+    /// Abort before publication (for example when cancelling a frame). No CMNs
+    /// were exposed and the continuation cursor does not consume a turn.
+    pub fn cancelEndpointBatch(game: anytype) void {
+        const st = findState(game) orelse return;
+        st.preparation_in_flight = false;
+        st.preparation_snapshots.clearRetainingCapacity();
+        st.preparation_batch.selected.clearRetainingCapacity();
+        st.preparation_batch.budget = 0;
+        st.preparation_stats = .{};
+    }
+
+    /// Same-frame publication barrier. Validate world, entity, transform and
+    /// graph inputs, then publish in the selected order. No asynchronous work
+    /// exists in this implementation; no result is exposed during computation.
+    pub fn publishEndpointBatch(game: anytype) PreparationStats {
+        const st = findState(game) orelse return .{};
+        if (!st.preparation_in_flight) return .{};
+        defer {
+            st.preparation_in_flight = false;
+            st.preparation_snapshots.clearRetainingCapacity();
+            st.preparation_batch.finish();
+        }
+        const graph_ready = graphInputsCurrent(game, st) and !st.pf.graph.dirty and st.pf.fw != null;
+        st.preparation_stats.graph_ready = graph_ready;
+        const Entity = @TypeOf(game.*).EntityType;
+        const ecs = &game.active_world.ecs_backend;
+        for (st.preparation_snapshots.items) |snapshot| {
+            const entity: Entity = @intCast(snapshot.entity);
+            if (graph_ready) {
+                if (endpointStamp(game, st, entity)) |stamp| {
+                    if (!ecs.hasComponent(entity, MovementNode)) {
+                        var cmn = if (ecs.getComponent(entity, ClosestMovementNode)) |old| old.* else ClosestMovementNode{};
+                        if (cmn.publish(snapshot.stamp, stamp, snapshot.resolution)) {
+                            ecs.addComponent(entity, cmn);
+                            st.preparation_stats.published += 1;
+                            if (snapshot.resolution == null) st.preparation_stats.off_graph += 1;
+                            continue;
+                        }
+                    }
+                }
+            }
+            st.preparation_stats.discarded += 1;
+        }
+        return st.preparation_stats;
+    }
+
+    fn endpointStamp(game: anytype, st: *State, entity: anytype) ?ClosestMovementNode.Stamp {
+        if (!game.active_world.ecs_backend.entityExists(entity)) return null;
+        const revision = game.positionRevision(entity) orelse return null;
+        return .{
+            .world_revision = st.preparation_world,
+            // The complete ECS handle, including generation, is the identity.
+            .entity_id = @intCast(entity),
+            .position_revision = revision,
+            .graph_revision = st.graph_epoch,
+        };
+    }
+
+    /// Runs only in preparation/advance, never in a distance query. Compare
+    /// actual ECS inputs, including ancestor movement and authored edge edits.
+    fn graphInputsCurrent(game: anytype, st: *State) bool {
+        if (!st.nodes_registered or st.graph_epoch == 0) return false;
+        if (st.graph_inputs.count() != st.node_entities.count()) return false;
+        const ecs = &game.active_world.ecs_backend;
+        var view = ecs.view(.{MovementNode}, .{});
+        defer view.deinit();
+        var count: usize = 0;
+        while (view.next()) |entity| {
+            const node = ecs.getComponent(entity, MovementNode).?.node_id;
+            if (st.node_entities.get(node) != @as(u64, @intCast(entity)) or st.pf.graph.isRemoved(node)) return false;
+            const old = st.graph_inputs.get(node) orelse return false;
+            const pos = game.getWorldPosition(entity);
+            const link: ?MovementLink = if (ecs.getComponent(entity, MovementLink)) |value| value.* else null;
+            if (!std.meta.eql(old.position, pos) or old.stair != ecs.hasComponent(entity, MovementStair) or !std.meta.eql(old.link, link)) return false;
+            count += 1;
+        }
+        return count == st.node_entities.count();
+    }
+
     /// Per-frame advancement of in-flight navigations.
     ///
     /// Not auto-called — a one-line plugin-shipped script at
@@ -1190,6 +1378,13 @@ pub const Controller = struct {
             st.node_entities.put(st.allocator, node_id, entity_id) catch |err| {
                 log.err("failed to track node {d}: {}", .{ node_id, err });
             };
+            if (st.preparation_enabled) {
+                st.graph_inputs.put(st.allocator, node_id, .{
+                    .position = pos,
+                    .stair = is_stair,
+                    .link = if (ecs.getComponent(entity, MovementLink)) |link| link.* else null,
+                }) catch {}; // Missing metadata prevents publication; retry on advance.
+            }
         }
 
         // Second pass, once every node is in: authored links. Adding them
@@ -1266,7 +1461,8 @@ pub const Controller = struct {
         const tracked: u32 = @intCast(st.node_entities.count());
         const count_changed = live != tracked;
         const stale = st.nodes_registered and isGraphStale(game, st);
-        if (!count_changed and !stale) return;
+        const inputs_changed = st.preparation_enabled and live > 0 and !graphInputsCurrent(game, st);
+        if (!count_changed and !stale and !inputs_changed) return;
 
         st.reset(st.allocator);
         buildGraphIntoState(game, st);
@@ -1365,16 +1561,21 @@ pub const Controller = struct {
         }
     }
 
-    /// Epoch-change CMN invalidation (moved in from the game-side
-    /// dispatch in v4): when the graph is rebuilt, every cached
-    /// `ClosestMovementNode` may point at a node that no longer exists
-    /// or is no longer optimal. Drop them all; arrivals and
-    /// `requestRepath` re-resolve lazily.
+    /// Preserve the last node for debugging after opting into preparation.
+    /// Legacy-only consumers retain their existing destructive sweep behavior.
     fn sweepCmnOnEpochChange(st: *State, game: anytype) void {
         if (st.graph_epoch == st.last_cmn_epoch) return;
         const Entity = @TypeOf(game.*).EntityType;
         const ecs = &game.active_world.ecs_backend;
-
+        if (st.preparation_enabled) {
+            var view = ecs.view(.{ClosestMovementNode}, .{});
+            defer view.deinit();
+            while (view.next()) |entity| {
+                if (ecs.getComponent(entity, ClosestMovementNode)) |cmn| cmn.invalidate(.graph);
+            }
+            st.last_cmn_epoch = st.graph_epoch;
+            return;
+        }
         var holders: std.ArrayListUnmanaged(u64) = .empty;
         defer holders.deinit(st.allocator);
         var collected_all = true;
@@ -1383,18 +1584,31 @@ pub const Controller = struct {
             defer view.deinit();
             while (view.next()) |entity| {
                 holders.append(st.allocator, @intCast(entity)) catch {
-                    // OOM: don't advance the epoch marker — next tick
-                    // re-runs the whole sweep.
                     collected_all = false;
                     break;
                 };
             }
         }
-        for (holders.items) |id| {
-            const entity: Entity = @intCast(id);
-            ecs.removeComponent(entity, ClosestMovementNode);
-        }
+        for (holders.items) |id| ecs.removeComponent(@as(Entity, @intCast(id)), ClosestMovementNode);
         if (collected_all) st.last_cmn_epoch = st.graph_epoch;
+    }
+
+    /// A retained prepared/sweep-invalidated CMN is not the legacy navigation
+    /// cache. Do not let targetPosition dereference its stale debugging node.
+    fn legacyCmnUsable(game: anytype, entity: anytype, cmn: ClosestMovementNode) bool {
+        if (!cmn.stamp.valid() and cmn.invalidation == .none) return true;
+        if (comptime @hasDecl(@TypeOf(game.*), "positionRevision")) {
+            const st = findState(game) orelse return false;
+            const stamp = endpointStamp(game, st, entity) orelse return false;
+            if (!cmn.ready(stamp) or st.pf.graph.isRemoved(cmn.node_id)) return false;
+            if (st.node_entities.get(cmn.node_id) != cmn.node_entity) return false;
+            const node: @TypeOf(game.*).EntityType = @intCast(cmn.node_entity);
+            const ecs = &game.active_world.ecs_backend;
+            if (!ecs.entityExists(node)) return false;
+            const registration = ecs.getComponent(node, MovementNode) orelse return false;
+            return registration.node_id == cmn.node_id;
+        }
+        return false;
     }
 
     /// Drain the pending ring of entities whose pathfinder navigation

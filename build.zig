@@ -74,4 +74,35 @@ pub fn build(b: *std.Build) void {
 
     const spec_step = b.step("spec", "Run zspec navigation tests");
     spec_step.dependOn(&run_nav_tests.step);
+
+    // Force controller lifecycle code generation for the threaded web target.
+    // This catches unsupported atomics without requiring the Emscripten SDK.
+    const wasm_target = b.resolveTargetQuery(.{
+        .cpu_arch = .wasm32,
+        .os_tag = .freestanding,
+        .cpu_features_add = std.Target.wasm.featureSet(&.{ .atomics, .bulk_memory }),
+    });
+    const wasm_core = b.dependency("labelle_core", .{
+        .target = wasm_target,
+        .optimize = .ReleaseSmall,
+    }).module("labelle-core");
+    const wasm_pathfinder = b.createModule(.{
+        .root_source_file = b.path("src/root.zig"),
+        .target = wasm_target,
+        .optimize = .ReleaseSmall,
+        .imports = &.{
+            .{ .name = "zig_utils", .module = zig_utils },
+            .{ .name = "labelle-core", .module = wasm_core },
+        },
+    });
+    const wasm_controller = b.addObject(.{
+        .name = "wasm-controller-check",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/wasm/controller_compile.zig"),
+            .target = wasm_target,
+            .optimize = .ReleaseSmall,
+            .imports = &.{.{ .name = "pathfinder", .module = wasm_pathfinder }},
+        }),
+    });
+    b.step("wasm-check", "Compile controller lifecycle for wasm32").dependOn(&wasm_controller.step);
 }

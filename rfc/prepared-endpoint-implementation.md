@@ -2,8 +2,8 @@
 
 Design: [Flying Platform RFC #1046](https://github.com/moca-tecnologia/flying-platform-labelle/pull/1046).
 
-This is an additive first slice, not the completed prepared matching API.
-Existing navigation and game matching behavior is unchanged.
+This is a staged implementation, not the completed prepared matching API.
+Existing matching APIs remain available. The serial controller phase is opt-in.
 
 ## Implemented
 
@@ -81,3 +81,70 @@ budget, empty views, OOM and every ordering of a small candidate set. There are
 now 81 navigation specs. This helper does not yet discover participants, take
 snapshots, search nodes or publish CMNs. Controller integration remains required;
 only a pending predicate backed by shared freshness may feed this selector.
+
+## Serial controller phase
+
+The controller now owns batch scratch, snapshots and computed results. Opt in with
+`Controller.enableEndpointPreparation(game)` before `advance`. Opt-in graph
+validation detects changes in node identity/registration, node world position
+(including ancestor motion), stairs and authored links even when node count is
+unchanged. The next advance rebuilds the graph when those inputs differ. Missing
+metadata or an unavailable graph defers preparation normally. Legacy-only callers
+retain the existing graph handling.
+
+After movement, feed the union of the game's matching-participant views to
+`prepareEndpointBatch(game, &iterator, budget)`. The union may contain duplicate
+entities. Current CMNs and current off-graph results are skipped; MovementNode
+entities never enter this ordinary-entity batch. The selected ordinary entities
+receive revision tracking through engine#916. All positions are snapshotted before
+nearest-node computation, and no CMN is published by this call.
+
+Deinitialize the iterator before the explicit publication phase:
+
+```zig
+{
+    var participants = game.active_world.ecs_backend.view(.{MatchingParticipant}, .{});
+    defer participants.deinit();
+    _ = try pathfinder.Controller.prepareEndpointBatch(game, &participants, budget);
+}
+const stats = pathfinder.Controller.publishEndpointBatch(game);
+```
+
+`MatchingParticipant` is an example domain marker, not a new mandatory prefab
+component. The game may instead provide an iterator joining its existing domain
+views. Call once per frame for the complete participant set; separate per-domain
+calls would consume separate budgets and distort rotation. No initial budget is
+chosen here: measure discovery, snapshots, searches, graph validation and
+publication together before choosing it.
+
+Publication validates the controller/world lifetime, full entity handle, position
+revision, graph epoch and graph inputs. It publishes in deterministic selection
+order and rejects obsolete results. Rejected results consume their turn, preserving
+fairness. `cancelEndpointBatch` discards an unfinished batch without consuming the
+turn. A second prepare before publish/cancel returns `PreparationInProgress`;
+repeated publication is a no-op. World/controller teardown frees outstanding data.
+
+This is synchronous serial execution. The compute phase reads the current graph
+on the main thread; it does not own the immutable graph copy required for worker
+threads. These APIs must not be moved onto background threads. Call prepare and
+publish in the same logical frame; no scheduler callback should run between them.
+
+Opt-in epoch sweeping invalidates CMNs in place, preserving last-known node data.
+Legacy `targetPosition` does not reuse those stale records or completed off-graph
+records as a live navigation cache. Other legacy CMN writers can still replace a
+record with pending metadata; reconciling those writers and known-node updates
+remains part of migration.
+
+Stats expose discovered/pending iterator entries (including duplicate membership),
+selected entities, actual nearest-node searches, published/off-graph results and
+discarded results. Scratch capacities are reused. OOM before publication exposes
+no partial batch and does not consume the cursor; revision registrations made
+before an allocation error are harmless and may be reused. Graph-input validation
+and discovery are not bounded by the nearest-search budget.
+
+**Not enabled in the game yet:** no gameplay query is switched, and no entity-level
+prepared distance API is introduced by this phase. Before rollout, finish the raw
+mutation and participant audits, generation-qualified graph/query freshness,
+remaining CMN writers/known-node updates, frame-order placement, game query migration
+and normal-retry handling for active jobs/raids. In particular, this phase's graph
+checks do not constitute a query-time guarantee after arbitrary later mutations.
