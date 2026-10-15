@@ -294,6 +294,11 @@ test "prepared matching rejects stale endpoints and graph inputs without repairi
     _ = try run(&game, 8);
     try testing.expectEqual(@as(?f32, 50), C.preparedDistance(&game, a, b));
     try testing.expectEqual(@as(?f32, 50), C.preparedDistance(&game, n, n2));
+    C.requestRepath(&game, a);
+    try testing.expectEqual(CMN.Status.pending, game.getComponent(a, CMN).?.status);
+    try testing.expectEqual(null, C.preparedDistance(&game, a, b));
+    _ = try run(&game, 8);
+    try testing.expectEqual(@as(?f32, 50), C.preparedDistance(&game, a, b));
     try testing.expect(!game.hasComponent(n, CMN));
     const old = game.getComponent(a, CMN).?.*;
     game.setPosition(a, .{ .x = 2 });
