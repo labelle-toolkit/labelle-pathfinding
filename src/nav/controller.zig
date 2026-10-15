@@ -223,6 +223,7 @@ pub const State = struct {
     pf: Pf,
     preparation_world: u64,
     preparation_enabled: bool = false,
+    graph_dependency_revision: ?u64 = null,
     preparation_in_flight: bool = false,
     preparation_stats: PreparationStats = .{},
     preparation_batch: @import("preparation_batch.zig").PreparationBatch = .{},
@@ -770,6 +771,77 @@ pub const Controller = struct {
         return st.graph_epoch;
     }
 
+    /// Pure prepared matching: no world-position reads, nearest-node search,
+    /// allocation, table rebuild, or fallback. All nonmatches return null.
+    pub fn preparedDistance(game: anytype, from_entity: anytype, to_entity: anytype) ?f32 {
+        const st = findState(game) orelse return null;
+        if (!preparedGraphCurrent(game, st)) return null;
+        const from = preparedEndpointNode(game, st, from_entity) orelse return null;
+        const to = preparedEndpointNode(game, st, to_entity) orelse return null;
+        return st.pf.preparedNodeDistance(from, to);
+    }
+
+    /// Publish a known placement (for example a ship's docking node). This
+    /// command validates the actual world-space position; it never scans for
+    /// another node and never attaches a CMN to a MovementNode.
+    pub fn publishKnownEndpoint(game: anytype, entity: anytype, node_entity: anytype) !bool {
+        const st = findState(game) orelse return false;
+        if (!preparedGraphCurrent(game, st)) return false;
+        const ecs = &game.active_world.ecs_backend;
+        if (!ecs.entityExists(entity) or ecs.hasComponent(entity, MovementNode)) return false;
+        const node = registeredNode(game, st, node_entity) orelse return false;
+        const pos = game.getWorldPosition(entity);
+        const anchor = st.pf.graph.getPosition(node);
+        const dx = pos.x - anchor.x;
+        const dy = pos.y - anchor.y;
+        const distance_to_node = @sqrt(dx * dx + dy * dy);
+        if (!std.math.isFinite(distance_to_node) or distance_to_node > MAX_NODE_SNAP_DISTANCE or anchor.y > pos.y + Y_FILTER_EPS) return false;
+        _ = try game.trackPositionRevision(entity);
+        const stamp = endpointStamp(game, st, entity) orelse return false;
+        var cmn = if (ecs.getComponent(entity, ClosestMovementNode)) |old| old.* else ClosestMovementNode{};
+        if (!cmn.publish(stamp, stamp, .{ .node_entity = @intCast(node_entity), .node_id = node, .distance = distance_to_node })) return false;
+        ecs.addComponent(entity, cmn);
+        return true;
+    }
+
+    /// Lifecycle gate, separate from matching: false means retry preparation
+    /// before concluding that an active job/raid has no reachable candidates.
+    /// Off-graph is a completed result, while pending/stale is not.
+    pub fn endpointPreparationComplete(game: anytype, entity: anytype) bool {
+        const st = findState(game) orelse return false;
+        if (!preparedGraphCurrent(game, st)) return false;
+        const ecs = &game.active_world.ecs_backend;
+        if (!ecs.entityExists(entity)) return false;
+        if (ecs.hasComponent(entity, MovementNode)) return preparedEndpointNode(game, st, entity) != null;
+        const cmn = ecs.getComponent(entity, ClosestMovementNode) orelse return false;
+        return cmn.current(endpointStamp(game, st, entity) orelse return false);
+    }
+
+    fn preparedGraphCurrent(game: anytype, st: *State) bool {
+        const revision = st.graph_dependency_revision orelse return false;
+        return st.preparation_enabled and st.nodes_registered and
+            revision == game.dependencyRevision() and !st.pf.graph.dirty and st.pf.fw != null;
+    }
+
+    fn registeredNode(game: anytype, st: *State, entity: anytype) ?NodeId {
+        const ecs = &game.active_world.ecs_backend;
+        if (!ecs.entityExists(entity)) return null;
+        const node = ecs.getComponent(entity, MovementNode) orelse return null;
+        if (st.node_entities.get(node.node_id) != @as(u64, @intCast(entity)) or st.pf.graph.isRemoved(node.node_id)) return null;
+        return node.node_id;
+    }
+
+    fn preparedEndpointNode(game: anytype, st: *State, entity: anytype) ?NodeId {
+        const ecs = &game.active_world.ecs_backend;
+        if (!ecs.entityExists(entity)) return null;
+        if (ecs.hasComponent(entity, MovementNode)) return registeredNode(game, st, entity);
+        const cmn = ecs.getComponent(entity, ClosestMovementNode) orelse return null;
+        if (!cmn.ready(endpointStamp(game, st, entity) orelse return null)) return null;
+        const node = registeredNode(game, st, @as(@TypeOf(entity), @intCast(cmn.node_entity))) orelse return null;
+        if (node != cmn.node_id) return null;
+        return node;
+    }
+
     /// Graph path-length between two game entities, via each entity's
     /// nearest movement node. Returns `null` when the controller isn't
     /// set up, either entity has no nearby node (Y-filtered, see
@@ -1037,6 +1109,10 @@ pub const Controller = struct {
         const st = findState(game) orelse return;
         const entity_id: u64 = @intCast(entity);
         const ecs = &game.active_world.ecs_backend;
+        if (st.preparation_enabled) {
+            if (ecs.getComponent(entity, ClosestMovementNode)) |cmn| cmn.invalidate(.position);
+            return;
+        }
         const pos = game.getWorldPosition(entity);
         if (findNearestNodeForEntity(st, entity_id, pos.x, pos.y)) |nid| {
             const node_pos = st.pf.graph.getPosition(nid);
@@ -1242,6 +1318,7 @@ pub const Controller = struct {
     /// actual ECS inputs, including ancestor movement and authored edge edits.
     fn graphInputsCurrent(game: anytype, st: *State) bool {
         if (!st.nodes_registered or st.graph_epoch == 0) return false;
+        if (st.graph_dependency_revision == null or st.graph_dependency_revision.? != game.dependencyRevision()) return false;
         if (st.graph_inputs.count() != st.node_entities.count()) return false;
         const ecs = &game.active_world.ecs_backend;
         var view = ecs.view(.{MovementNode}, .{});
@@ -1344,10 +1421,26 @@ pub const Controller = struct {
 
     fn buildGraphIntoState(game: anytype, st: *State) void {
         const ecs = &game.active_world.ecs_backend;
+        st.graph_dependency_revision = null;
+        var watches_ok = st.preparation_enabled;
+        if (st.preparation_enabled) {
+            game.watchComponentDependency(MovementNode) catch {
+                watches_ok = false;
+            };
+            game.watchComponentDependency(MovementStair) catch {
+                watches_ok = false;
+            };
+            game.watchComponentDependency(MovementLink) catch {
+                watches_ok = false;
+            };
+        }
         var view = ecs.view(.{MovementNode}, .{});
         defer view.deinit();
 
         while (view.next()) |entity| {
+            if (st.preparation_enabled) game.watchPositionDependency(entity) catch {
+                watches_ok = false;
+            };
             // World position, not local: movement nodes declared
             // inside a room prefab (`Room.movement_nodes`) end up as
             // children of the room entity, so `getPosition` returns
@@ -1390,6 +1483,7 @@ pub const Controller = struct {
         linkAuthoredEdges(game, st);
 
         st.nodes_registered = st.node_entities.count() > 0;
+        if (watches_ok) st.graph_dependency_revision = game.dependencyRevision();
         if (st.nodes_registered) {
             log.info("graph built: {d} nodes (Floyd-Warshall)", .{st.node_entities.count()});
         }

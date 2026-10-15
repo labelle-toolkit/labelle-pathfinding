@@ -280,3 +280,80 @@ test "legacy targetPosition never treats off-graph debugging data as a ready nod
     try testing.expectEqual(old.node_entity, off_graph.node_entity);
     try testing.expectEqualDeep(game.getWorldPosition(e), C.targetPosition(&game, e));
 }
+
+test "prepared matching rejects stale endpoints and graph inputs without repairing them" {
+    var game = Game.init(testing.allocator);
+    defer game.deinit();
+    const n = node(&game, 0);
+    const n2 = node(&game, 50);
+    const a = item(&game, 1);
+    const b = item(&game, 51);
+    try setup(&game);
+    defer C.deinit(&game);
+    try testing.expectEqual(null, C.preparedDistance(&game, a, b));
+    _ = try run(&game, 8);
+    try testing.expectEqual(@as(?f32, 50), C.preparedDistance(&game, a, b));
+    try testing.expectEqual(@as(?f32, 50), C.preparedDistance(&game, n, n2));
+    try testing.expect(!game.hasComponent(n, CMN));
+    const old = game.getComponent(a, CMN).?.*;
+    game.setPosition(a, .{ .x = 2 });
+    try testing.expectEqual(null, C.preparedDistance(&game, a, b));
+    try testing.expect(!C.endpointPreparationComplete(&game, a));
+    try testing.expectEqualDeep(old, game.getComponent(a, CMN).?.*);
+    _ = try run(&game, 8);
+    try testing.expect(C.endpointPreparationComplete(&game, a));
+    game.setPosition(n2, .{ .x = 60 });
+    // Even a query involving only the unchanged node must reject the graph.
+    try testing.expectEqual(null, C.preparedDistance(&game, n, n));
+    C.advance(&game, 0);
+    _ = try run(&game, 8);
+    try testing.expectEqual(@as(?f32, 60), C.preparedDistance(&game, a, b));
+    game.addComponent(n, pf.MovementStair{});
+    try testing.expectEqual(null, C.preparedDistance(&game, a, b));
+    C.advance(&game, 0);
+    _ = try run(&game, 8);
+    _ = node(&game, 75);
+    try testing.expectEqual(null, C.preparedDistance(&game, a, b));
+}
+
+test "off-graph is complete but never a match; missing controller never falls back" {
+    var game = Game.init(testing.allocator);
+    defer game.deinit();
+    const a = item(&game, 0);
+    const b = item(&game, 10000);
+    try testing.expectEqual(null, C.preparedDistance(&game, a, a));
+    _ = node(&game, 0);
+    try setup(&game);
+    defer C.deinit(&game);
+    _ = try run(&game, 8);
+    try testing.expect(C.endpointPreparationComplete(&game, b));
+    try testing.expectEqual(null, C.preparedDistance(&game, a, b));
+    try testing.expectEqual(null, C.preparedDistance(&game, b, b));
+}
+
+test "known docking placement validates world geometry and is invalidated by ancestry" {
+    var game = Game.init(testing.allocator);
+    defer game.deinit();
+    const dock = node(&game, 0);
+    const other = node(&game, 500);
+    const parent = game.createEntity();
+    const bandit = item(&game, 1);
+    game.setParent(bandit, parent, .{});
+    try testing.expect(!try C.publishKnownEndpoint(&game, bandit, dock));
+    try setup(&game);
+    defer C.deinit(&game);
+    _ = try run(&game, 8);
+    try testing.expect(try C.publishKnownEndpoint(&game, bandit, dock));
+    try testing.expectEqual(@as(?f32, 0), C.preparedDistance(&game, bandit, dock));
+    try testing.expectEqual(null, C.preparedDistance(&game, bandit, other));
+    try testing.expect(!try C.publishKnownEndpoint(&game, bandit, other));
+    try testing.expect(!try C.publishKnownEndpoint(&game, dock, dock));
+    game.setPosition(parent, .{ .x = 5 });
+    try testing.expectEqual(null, C.preparedDistance(&game, bandit, dock));
+    try testing.expect(try C.publishKnownEndpoint(&game, bandit, dock));
+    game.setPosition(parent, .{ .y = -10 }); // anchor is above the allowed Y filter
+    try testing.expect(!try C.publishKnownEndpoint(&game, bandit, dock));
+    try testing.expectEqual(null, C.preparedDistance(&game, bandit, dock));
+    game.setPosition(parent, .{ .x = 1000 });
+    try testing.expect(!try C.publishKnownEndpoint(&game, bandit, dock));
+}
