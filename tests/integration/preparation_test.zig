@@ -610,6 +610,7 @@ test "pending and full-view preparation publish identical frame outcomes" {
     defer C.deinit(&reference);
     try setup(&queued);
     defer C.deinit(&queued);
+    C.setPreparationWorker(&queued, true);
     var count: usize = 5;
     for (0..60) |frame| {
         if (frame == 10) {
@@ -644,4 +645,91 @@ test "pending and full-view preparation publish identical frame outcomes" {
             try testing.expectEqual(C.preparedDistance(&reference, re[j], rn), C.preparedDistance(&queued, qe[j], qn));
         }
     }
+}
+
+test "prepared origin scans reject movement repath destruction and controller replacement" {
+    var game = Game.init(testing.allocator);
+    defer game.deinit();
+    const n = node(&game, 0);
+    const n2 = node(&game, 50);
+    const a = item(&game, 1);
+    const b = item(&game, 51);
+    try setup(&game);
+    defer C.deinit(&game);
+    try testing.expectEqual(null, C.preparedDistancesFrom(&game, a));
+    _ = try domainRun(&game, 8);
+    var scan = C.preparedDistancesFrom(&game, a).?;
+    try testing.expectEqual(C.preparedDistance(&game, a, b), scan.to(b));
+    // A validated known placement can change the node without changing the stamp.
+    try testing.expect(try C.publishKnownEndpoint(&game, a, n2));
+    try testing.expectEqual(null, scan.to(b));
+    scan = C.preparedDistancesFrom(&game, a).?;
+    C.requestRepath(&game, a);
+    try testing.expectEqual(null, scan.to(b));
+    _ = try domainRun(&game, 8);
+    scan = C.preparedDistancesFrom(&game, a).?;
+    game.setPosition(a, .{ .x = 2 });
+    try testing.expectEqual(null, scan.to(b));
+    _ = try domainRun(&game, 8);
+    scan = C.preparedDistancesFrom(&game, a).?;
+    var direct = C.preparedDistancesFrom(&game, n).?;
+    game.setPosition(n2, .{ .x = 60 });
+    try testing.expectEqual(null, scan.to(b));
+    try testing.expectEqual(null, direct.to(n));
+    C.advance(&game, 0);
+    _ = try domainRun(&game, 8);
+    scan = C.preparedDistancesFrom(&game, a).?;
+    try C.setup(&game);
+    C.enableEndpointPreparation(&game);
+    C.advance(&game, 0);
+    _ = try domainRun(&game, 8);
+    try testing.expectEqual(null, scan.to(b));
+    scan = C.preparedDistancesFrom(&game, a).?;
+    game.destroyEntity(a);
+    try testing.expectEqual(null, scan.to(b));
+}
+
+test "worker batch joins all results and retains publication cancellation and stale checks" {
+    var game = Game.init(testing.allocator);
+    defer game.deinit();
+    const n = node(&game, 0);
+    const a = item(&game, 1);
+    const b = item(&game, 2);
+    const c = item(&game, 10000);
+    try setup(&game);
+    defer C.deinit(&game);
+    C.setPreparationWorker(&game, true);
+    const computed = try C.prepareEndpointDomains(&game, .{Participant}, 3);
+    if (!@import("builtin").single_threaded) try testing.expect(computed.worker_executed);
+    try testing.expectEqual(null, C.preparedDistance(&game, a, n));
+    C.cancelEndpointBatch(&game);
+    try testing.expect(!game.hasComponent(a, CMN));
+    _ = try C.prepareEndpointDomains(&game, .{Participant}, 3);
+    game.setPosition(b, .{ .x = 3 });
+    const published = C.publishEndpointBatch(&game);
+    try testing.expectEqual(@as(usize, 1), published.discarded);
+    try testing.expectEqual(@as(usize, 1), published.off_graph);
+    try testing.expectEqual(@as(?f32, 0), C.preparedDistance(&game, a, n));
+    try testing.expectEqual(null, C.preparedDistance(&game, b, n));
+    try testing.expect(C.endpointPreparationComplete(&game, c));
+    _ = try domainRun(&game, 3);
+    try testing.expectEqual(@as(?f32, 0), C.preparedDistance(&game, b, n));
+}
+
+test "legacy navigation target lookup preserves stale matching debug records" {
+    var game = Game.init(testing.allocator);
+    defer game.deinit();
+    _ = node(&game, 0);
+    _ = node(&game, 50);
+    const a = item(&game, 1);
+    try setup(&game);
+    defer C.deinit(&game);
+    _ = try domainRun(&game, 1);
+    game.setPosition(a, .{ .x = 51 });
+    const old = game.getComponent(a, CMN).?.*;
+    _ = C.targetPosition(&game, a);
+    try testing.expectEqualDeep(old, game.getComponent(a, CMN).?.*);
+    try testing.expect(!C.endpointPreparationComplete(&game, a));
+    _ = try domainRun(&game, 1);
+    try testing.expect(C.endpointPreparationComplete(&game, a));
 }

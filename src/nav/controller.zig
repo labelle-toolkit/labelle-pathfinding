@@ -192,6 +192,7 @@ pub const PreparationStats = struct {
     selected: usize = 0,
     nearest_searches: usize = 0,
     reused_endpoints: usize = 0,
+    worker_executed: bool = false,
     published: usize = 0,
     off_graph: usize = 0,
     discarded: usize = 0,
@@ -203,7 +204,9 @@ const GraphInput = struct {
     stair: bool,
     link: ?MovementLink,
 };
+const SearchNode = struct { id: NodeId, entity: u64, position: Position };
 const EndpointSnapshot = struct {
+    search: bool = true,
     entity: u64,
     stamp: ClosestMovementNode.Stamp,
     position: Position,
@@ -228,6 +231,9 @@ pub const State = struct {
     pf: Pf,
     preparation_world: u64,
     preparation_enabled: bool = false,
+    preparation_worker: bool = false,
+    search_nodes: std.ArrayListUnmanaged(SearchNode) = .empty,
+    search_epoch: u64 = 0,
     domain_revision: ?u64 = null,
     domain_graph_epoch: u64 = 0,
     domain_watches_ready: bool = false,
@@ -323,6 +329,7 @@ pub const State = struct {
     pub fn deinit(self: *State) void {
         self.preparation_batch.deinit(self.allocator);
         self.preparation_snapshots.deinit(self.allocator);
+        self.search_nodes.deinit(self.allocator);
         self.graph_inputs.deinit(self.allocator);
         self.registered_entities.deinit(self.allocator);
         self.nearest_node_cache.deinit();
@@ -792,6 +799,45 @@ pub const Controller = struct {
         return st.pf.preparedNodeDistance(from, to);
     }
 
+    /// Reuse a validated origin across a destination scan; every lookup still
+    /// rejects changes to the origin, world, graph, or destination.
+    pub fn preparedDistancesFrom(game: anytype, entity: anytype) ?PreparedDistances(@TypeOf(game), @TypeOf(entity)) {
+        const st = findState(game) orelse return null;
+        if (!preparedGraphCurrent(game, st)) return null;
+        const node = preparedEndpointNode(game, st, entity) orelse return null;
+        const stamp = if (game.active_world.ecs_backend.hasComponent(entity, MovementNode)) null else game.active_world.ecs_backend.getComponent(entity, ClosestMovementNode).?.stamp;
+        return .{ .game = game, .entity = entity, .node = node, .world = st.preparation_world, .epoch = st.graph_epoch, .stamp = stamp };
+    }
+
+    pub fn PreparedDistances(comptime GamePtr: type, comptime Entity: type) type {
+        return struct {
+            game: GamePtr,
+            entity: Entity,
+            node: NodeId,
+            world: u64,
+            epoch: u64,
+            stamp: ?ClosestMovementNode.Stamp,
+            pub fn to(self: *const @This(), target: anytype) ?f32 {
+                const st = findState(self.game) orelse return null;
+                if (st.preparation_world != self.world or st.graph_epoch != self.epoch or !preparedGraphCurrent(self.game, st)) return null;
+                if (self.stamp) |stamp| {
+                    const cmn = self.game.active_world.ecs_backend.getComponent(self.entity, ClosestMovementNode) orelse return null;
+                    if (cmn.node_id != self.node or !cmn.ready(stamp) or self.game.positionRevisionAt(self.entity, stamp.position_slot) != stamp.position_revision) return null;
+                    if (!registeredIdentity(st, self.node, cmn.node_entity)) return null;
+                } else if (!registeredIdentity(st, self.node, @intCast(self.entity))) return null;
+                const target_node = preparedEndpointNode(self.game, st, target) orelse return null;
+                return st.pf.preparedNodeDistance(self.node, target_node);
+            }
+        };
+    }
+
+    /// Optional shared worker execution. Serial remains the default. A supported
+    /// host may run one half on its persistent worker and one on the main thread;
+    /// every result is joined before prepare returns and remains unpublished.
+    pub fn setPreparationWorker(game: anytype, enabled: bool) void {
+        if (findState(game)) |st| st.preparation_worker = enabled;
+    }
+
     /// Publish a known placement (for example a ship's docking node). This
     /// command validates the actual world-space position; it never scans for
     /// another node and never attaches a CMN to a MovementNode.
@@ -1028,8 +1074,7 @@ pub const Controller = struct {
             const dx = node_pos.x - pos.x;
             const dy = node_pos.y - pos.y;
             const ne = st.node_entities.get(nid) orelse 0;
-            if (st.preparation_enabled) game.active_world.position_revisions.markPending(entity_id);
-            ecs.addComponent(target_entity, components.ClosestMovementNode{
+            if (!st.preparation_enabled) ecs.addComponent(target_entity, components.ClosestMovementNode{
                 .node_entity = ne,
                 .node_id = nid,
                 .distance = @sqrt(dx * dx + dy * dy),
@@ -1127,11 +1172,9 @@ pub const Controller = struct {
         return @sqrt(dx * dx + dy * dy);
     }
 
-    /// Re-resolve the entity's `ClosestMovementNode` immediately (v4:
-    /// replaces the game-side `PendingRepath` marker + next-tick
-    /// resolve round-trip — the plugin owns the CMN component, so
-    /// there's nothing to defer). Removes the CMN when the entity is
-    /// off-graph (no node within `MAX_NODE_SNAP_DISTANCE`).
+    /// In preparation mode, invalidate and queue the endpoint while retaining
+    /// its last published node for debugging. Legacy mode resolves immediately
+    /// and removes the component if no node is in range.
     pub fn requestRepath(game: anytype, entity: anytype) void {
         const st = findState(game) orelse return;
         const entity_id: u64 = @intCast(entity);
@@ -1316,6 +1359,16 @@ pub const Controller = struct {
             st.preparation_stats.pending += 1;
             st.preparation_batch.consider(@intCast(entity));
         }
+        if (st.search_epoch != st.graph_epoch) {
+            st.search_nodes.clearRetainingCapacity();
+            try st.search_nodes.ensureTotalCapacity(st.allocator, st.pf.graph.totalSlots());
+            for (0..st.pf.graph.totalSlots()) |i| {
+                const id: NodeId = @intCast(i);
+                if (st.pf.graph.isRemoved(id)) continue;
+                st.search_nodes.appendAssumeCapacity(.{ .id = id, .entity = st.node_entities.get(id) orelse continue, .position = st.pf.graph.getPosition(id) });
+            }
+            st.search_epoch = st.graph_epoch;
+        }
         const Entity = @TypeOf(game.*).EntityType;
         // Snapshot every selected entity before searching or publishing any.
         // OOM can register revision tokens, but cannot publish a partial batch.
@@ -1334,13 +1387,17 @@ pub const Controller = struct {
             if (ecs.getComponent(entity, ClosestMovementNode)) |cmn| {
                 if (reusePreparedResolution(st, cmn, snapshot.stamp, snapshot.position)) |resolution| {
                     snapshot.resolution = resolution;
+                    snapshot.search = false;
                     st.preparation_stats.reused_endpoints += 1;
                     continue;
                 }
             }
             st.preparation_stats.nearest_searches += 1;
-            snapshot.resolution = resolvePreparedNearest(st, snapshot.position);
         }
+        var job = SearchJob{ .nodes = st.search_nodes.items, .endpoints = st.preparation_snapshots.items };
+        if (st.preparation_worker) {
+            st.preparation_stats.worker_executed = game.active_world.snapshot_executor.run(&job, job.endpoints.len, SearchJob.run);
+        } else SearchJob.run(&job, 0, job.endpoints.len);
         st.preparation_stats.selected = st.preparation_batch.selected.items.len;
         st.preparation_stats.discarded = st.preparation_stats.selected - st.preparation_snapshots.items.len;
         st.preparation_in_flight = true;
@@ -1996,22 +2053,31 @@ fn reusePreparedResolution(st: *State, cmn: *const ClosestMovementNode, stamp: C
     return .{ .node_entity = cmn.node_entity, .node_id = cmn.node_id, .distance = distance, .reuse = region };
 }
 
+const SearchJob = struct {
+    nodes: []const SearchNode,
+    endpoints: []EndpointSnapshot,
+    fn run(raw: *anyopaque, start: usize, end: usize) void {
+        const job: *@This() = @ptrCast(@alignCast(raw));
+        for (job.endpoints[start..end]) |*endpoint| {
+            if (endpoint.search) endpoint.resolution = resolvePreparedNearest(job.nodes, endpoint.position);
+        }
+    }
+};
+
 /// Same selection/tie order as findNearestNodeInState, with a conservative region
 /// where the winner cannot change. Distance differences are 2-Lipschitz: moving
 /// less than one quarter of the runner-up gap stays strictly inside that region.
 /// Separate Y bounds preserve the eligible node set during horizontal movement.
-fn resolvePreparedNearest(st: *State, pos: Position) ?ClosestMovementNode.Resolution {
+fn resolvePreparedNearest(nodes: []const SearchNode, pos: Position) ?ClosestMovementNode.Resolution {
     if (!std.math.isFinite(pos.x) or !std.math.isFinite(pos.y)) return null;
-    var best: ?NodeId = null;
+    var best: ?SearchNode = null;
     var best_distance: f32 = std.math.inf(f32);
     var best_exact: f64 = std.math.inf(f64);
     var second_exact: f64 = std.math.inf(f64);
     var min_y: f64 = -std.math.inf(f64);
     var max_y: f64 = std.math.inf(f64);
-    for (0..st.pf.graph.totalSlots()) |i| {
-        const node: NodeId = @intCast(i);
-        if (st.pf.graph.isRemoved(node)) continue;
-        const point = st.pf.graph.getPosition(node);
+    for (nodes) |node| {
+        const point = node.position;
         const boundary = @as(f64, point.y) - Y_FILTER_EPS;
         const padding = 0.00001 * @max(1, @max(@abs(@as(f64, point.y)), @abs(@as(f64, pos.y))));
         if (point.y > pos.y + Y_FILTER_EPS) {
@@ -2036,13 +2102,13 @@ fn resolvePreparedNearest(st: *State, pos: Position) ?ClosestMovementNode.Resolu
     }
     const node = best orelse return null;
     if (best_distance > MAX_NODE_SNAP_DISTANCE) return null;
-    const entity = st.node_entities.get(node) orelse return null;
+
     const gap = if (std.math.isFinite(second_exact)) second_exact - best_exact else MAX_NODE_SNAP_DISTANCE;
     // Leave generous room for the f32 arithmetic used by the reference selector.
     const rounding_guard = 0.0001 * @max(1, best_exact);
     return .{
-        .node_entity = entity,
-        .node_id = node,
+        .node_entity = node.entity,
+        .node_id = node.id,
         .distance = best_distance,
         .reuse = .{ .x = pos.x, .y = pos.y, .radius = @max(0, gap * 0.25 - rounding_guard), .min_y = min_y, .max_y = max_y },
     };
@@ -2109,7 +2175,17 @@ fn settleArrival(game: anytype, st: *State, entity_id: u64, goal_node: ?NodeId) 
     if (!ecs.entityExists(entity)) return;
 
     ecs.removeComponent(entity, Navigating);
-    if (st.preparation_enabled) game.active_world.position_revisions.markPending(entity_id);
+    if (st.preparation_enabled) {
+        var arrival_node: u64 = 0;
+        if (goal_node) |node| {
+            if (st.node_entities.get(node)) |node_entity| {
+                if (Controller.publishKnownEndpoint(game, entity, @as(Entity, @intCast(node_entity))) catch false) arrival_node = node_entity;
+            }
+        }
+        if (arrival_node == 0) Controller.requestRepath(game, entity);
+        emitGameEvent(game, "pathfinder__arrived", .{ .entity = entity_id, .node_entity = arrival_node });
+        return;
+    }
 
     // CMN refresh replaces the old game-side arrival → NeedsClosestNode
     // marker → next-tick resolve round-trip: the plugin owns the CMN

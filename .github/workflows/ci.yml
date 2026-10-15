@@ -36,8 +36,12 @@ jobs:
         run: |
           git init ../labelle-engine
           git -C ../labelle-engine remote add origin https://github.com/labelle-toolkit/labelle-engine.git
-          git -C ../labelle-engine fetch --depth 1 origin 241556dc0263c975bbd4de1257ed6a6c8e3e22e5
+          git -C ../labelle-engine fetch --depth 1 origin 2c4b0c17a669e520ff01f409714195d3b913ba57
           git -C ../labelle-engine checkout --detach FETCH_HEAD
 
       - name: Run engine integration tests
         run: zig build test --build-file tests/integration/build.zig --summary all
+
+      - name: Compile serial and threaded WASM snapshot executor
+        working-directory: ../labelle-engine
+        run: zig build snapshot-worker-check
