@@ -140,3 +140,6 @@ test {
     _ = @import("a_star.zig");
     _ = @import("heuristics.zig");
 }
+
+/// World-local bounded selection scratch for serial endpoint preparation.
+pub const PreparationBatch = @import("nav/preparation_batch.zig").PreparationBatch;

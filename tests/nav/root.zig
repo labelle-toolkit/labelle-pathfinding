@@ -1,6 +1,7 @@
 const std = @import("std");
 
 test {
+    _ = @import("preparation_batch_test.zig");
     _ = @import("prepared_endpoint_test.zig");
     _ = @import("graph_test.zig");
     _ = @import("floyd_warshall_test.zig");

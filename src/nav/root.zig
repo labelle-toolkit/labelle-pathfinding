@@ -87,3 +87,6 @@ pub const Components = struct {
     /// persisted.
     pub const ControllerState = controller.ControllerState;
 };
+
+/// World-local bounded selection scratch for serial endpoint preparation.
+pub const PreparationBatch = @import("preparation_batch.zig").PreparationBatch;
