@@ -856,6 +856,39 @@ pub const Controller = struct {
         return publishEndpointAt(game, st, entity, node, @intCast(node_entity), distance_to_node);
     }
 
+    fn ensureSearchNodes(st: *State) !void {
+        if (st.search_epoch != st.graph_epoch) {
+            st.search_nodes.clearRetainingCapacity();
+            try st.search_nodes.ensureTotalCapacity(st.allocator, st.pf.graph.totalSlots());
+            for (0..st.pf.graph.totalSlots()) |i| {
+                const id: NodeId = @intCast(i);
+                if (st.pf.graph.isRemoved(id)) continue;
+                st.search_nodes.appendAssumeCapacity(.{ .id = id, .entity = st.node_entities.get(id) orelse continue, .position = st.pf.graph.getPosition(id) });
+            }
+            st.search_epoch = st.graph_epoch;
+        }
+    }
+
+    // Direct movers have no graph edge to own. Reuse a proven nearest-node
+    // region, or resolve again at the new position before publishing.
+    fn publishDirectEndpoint(game: anytype, st: *State, entity: anytype) !void {
+        if (!preparedGraphCurrent(game, st)) return;
+        const ecs = &game.active_world.ecs_backend;
+        _ = try game.trackPositionRevision(entity);
+        const stamp = endpointStamp(game, st, entity) orelse return;
+        var cmn = if (ecs.getComponent(entity, ClosestMovementNode)) |old| old.* else ClosestMovementNode{};
+        const pos = game.getWorldPosition(entity);
+        var resolution = reusePreparedResolution(st, &cmn, stamp, pos);
+        if (resolution == null) {
+            try ensureSearchNodes(st);
+            resolution = resolvePreparedNearest(st.search_nodes.items, pos);
+        }
+        if (!cmn.publish(stamp, stamp, resolution)) return;
+        ecs.addComponent(entity, cmn);
+        game.active_world.position_revisions.acknowledge(@intCast(entity), stamp.position_revision);
+        if (resolution) |ready| publishAttachedEndpoints(game, entity, @as(@TypeOf(entity), @intCast(ready.node_entity)));
+    }
+
     fn publishEndpointAt(game: anytype, st: *State, entity: anytype, node: NodeId, node_entity: u64, distance_to_node: f32) !bool {
         const ecs = &game.active_world.ecs_backend;
         _ = try game.trackPositionRevision(entity);
@@ -954,7 +987,11 @@ pub const Controller = struct {
     }
 
     fn registeredIdentity(st: *State, node: NodeId, entity: u64) bool {
-        return node < st.registered_entities.items.len and st.registered_entities.items[node] == entity and !st.pf.graph.isRemoved(node);
+        const registered = if (node < st.registered_entities.items.len)
+            st.registered_entities.items[node] orelse st.node_entities.get(node)
+        else
+            st.node_entities.get(node);
+        return registered == entity and !st.pf.graph.isRemoved(node);
     }
 
     fn preparedEndpointNode(game: anytype, st: *State, entity: anytype) ?NodeId {
@@ -1416,16 +1453,7 @@ pub const Controller = struct {
             st.preparation_stats.pending += 1;
             st.preparation_batch.consider(@intCast(entity));
         }
-        if (st.search_epoch != st.graph_epoch) {
-            st.search_nodes.clearRetainingCapacity();
-            try st.search_nodes.ensureTotalCapacity(st.allocator, st.pf.graph.totalSlots());
-            for (0..st.pf.graph.totalSlots()) |i| {
-                const id: NodeId = @intCast(i);
-                if (st.pf.graph.isRemoved(id)) continue;
-                st.search_nodes.appendAssumeCapacity(.{ .id = id, .entity = st.node_entities.get(id) orelse continue, .position = st.pf.graph.getPosition(id) });
-            }
-            st.search_epoch = st.graph_epoch;
-        }
+        try ensureSearchNodes(st);
         const Entity = @TypeOf(game.*).EntityType;
         // Snapshot every selected entity before searching or publishing any.
         // OOM can register revision tokens, but cannot publish a partial batch.
@@ -1677,12 +1705,13 @@ pub const Controller = struct {
             };
             if (st.preparation_enabled) {
                 const old_len = st.registered_entities.items.len;
-                st.registered_entities.resize(st.allocator, @as(usize, node_id) + 1) catch {
-                    watches_ok = false;
-                    continue;
-                };
-                @memset(st.registered_entities.items[old_len..], null);
-                st.registered_entities.items[node_id] = entity_id;
+                if (st.registered_entities.resize(st.allocator, @as(usize, node_id) + 1)) |_| {
+                    @memset(st.registered_entities.items[old_len..], null);
+                    st.registered_entities.items[node_id] = entity_id;
+                } else |_| {
+                    // Optional fast index: the canonical registration map remains
+                    // usable. Allocation failure must not invalidate graph watches.
+                }
                 st.graph_inputs.put(st.allocator, node_id, .{
                     .position = pos,
                     .stair = is_stair,
@@ -1809,11 +1838,7 @@ pub const Controller = struct {
                 .move => |next| {
                     game.setPosition(entity, next);
                     if (st.preparation_enabled) {
-                        if (ecs.getComponent(entity, ClosestMovementNode)) |cmn| {
-                            const known: Entity = @intCast(cmn.node_entity);
-                            if (publishKnownEndpoint(game, entity, known) catch false)
-                                publishAttachedEndpoints(game, entity, known);
-                        }
+                        publishDirectEndpoint(game, st, entity) catch {};
                     }
                 },
             }

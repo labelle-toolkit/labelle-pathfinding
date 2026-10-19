@@ -803,3 +803,46 @@ test "direct walks retain a validated known anchor and dropping invalidates atta
     _ = try domainRun(&game, 8);
     try testing.expect(C.preparedDistance(&game, carried, n) != null);
 }
+
+test "direct movers switch to nearer nodes before leaving the old snap radius" {
+    var game = Game.init(testing.allocator);
+    defer game.deinit();
+    _ = node(&game, 0);
+    const nearer = node(&game, 40);
+    _ = node(&game, 80);
+    const mover = item(&game, 1);
+    const carried = item(&game, 0);
+    game.setParent(carried, mover, .{});
+    try setup(&game);
+    defer C.deinit(&game);
+    _ = try domainRun(&game, 8);
+    _ = C.moveTo(&game, mover, .{ .x = 100, .y = 0 });
+    // Default direct speed is 200 px/s: cross the first nearest-node boundary.
+    C.advance(&game, 0.2);
+    const pos = game.getWorldPosition(mover);
+    try testing.expect(pos.x > 20 and pos.x < 60);
+    try testing.expectEqual(@as(u64, @intCast(nearer)), game.getComponent(mover, CMN).?.node_entity);
+    try testing.expectEqual(@as(u64, @intCast(nearer)), game.getComponent(carried, CMN).?.node_entity);
+    try testing.expect(C.endpointPreparationComplete(&game, mover));
+}
+
+test "missing optional registration index preserves prepared queries and graph epoch" {
+    var game = Game.init(testing.allocator);
+    defer game.deinit();
+    const n = node(&game, 0);
+    const mover = item(&game, 1);
+    try setup(&game);
+    defer C.deinit(&game);
+    _ = try domainRun(&game, 8);
+    var view = game.active_world.ecs_backend.view(.{pf.ControllerState}, .{});
+    defer view.deinit();
+    const holder = view.next().?;
+    const state: *pf.controller.State = @ptrFromInt(game.getComponent(holder, pf.ControllerState).?.state_ptr);
+    const epoch = state.graph_epoch;
+    // Same absent-index state as an allocation failure during registration.
+    state.registered_entities.clearRetainingCapacity();
+    try testing.expect(C.preparedDistance(&game, mover, n) != null);
+    C.advance(&game, 0);
+    try testing.expectEqual(epoch, state.graph_epoch);
+    try testing.expect(C.preparedDistance(&game, mover, n) != null);
+}
