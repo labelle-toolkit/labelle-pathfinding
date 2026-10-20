@@ -524,6 +524,27 @@ pub const Controller = struct {
         return reissue.walk_same_node and !withinDirectArrival(pos, node_pos);
     }
 
+    /// Start a graph route from `from_node` to `to_node` (the same node
+    /// walks a one-waypoint route) and track it for arrival.
+    fn startRoute(st: *State, entity_id: u64, from_node: NodeId, to_node: NodeId, speed: f32) Result {
+        const maybe_path = st.pf.navigate(entity_id, from_node, to_node, speed) catch |err| {
+            log.err("navigate failed: entity={d} from={d} to={d}: {}", .{ entity_id, from_node, to_node, err });
+            return .{ .rejected = .navigate_error };
+        };
+        if (maybe_path == null) return .{ .rejected = .no_path };
+
+        if (!st.addPending(entity_id)) {
+            // Allocation failure growing the ring. Cancel the route we
+            // just started so we don't leak the entity in the underlying
+            // pathfinder (it'd keep moving without the Controller
+            // tracking it for arrivals). Caller sees `.deferred` and
+            // retries next frame once memory frees up.
+            st.pf.cancel(entity_id);
+            return .{ .deferred = .pending_alloc_failed };
+        }
+        return .accepted;
+    }
+
     fn navigateWith(game: anytype, entity: anytype, target: Position, reissue: Reissue) Result {
         const st = findState(game) orelse return .{ .rejected = .controller_not_setup };
         if (!st.nodes_registered) return .{ .deferred = .graph_not_built };
@@ -589,23 +610,12 @@ pub const Controller = struct {
             return .{ .rejected = .no_nearby_node };
         };
 
-        if (from_node == to_node) {
-            const node_pos = st.pf.graph.getPosition(from_node);
-            // A re-issued order can find the walker partway down its last
-            // segment, heading to this very node: walk the rest (#60)
-            // rather than snap; the arrival settles it like any walk.
-            if (walksToSameNode(reissue, .{ .x = pos.x, .y = pos.y }, node_pos)) {
-                st.direct_moves.put(st.allocator, entity_id, .{
-                    .target = node_pos,
-                    .speed = speedOf(game, entity),
-                }) catch return .{ .deferred = .pending_alloc_failed };
-                game.active_world.ecs_backend.addComponent(entity, Navigating{
-                    .target_x = target.x,
-                    .target_y = target.y,
-                    .mode = .graph,
-                });
-                return .accepted;
-            }
+        // A re-issued order can find the walker partway down its last
+        // segment, heading to this very node: walk the rest (#60) rather
+        // than snap. It walks a one-waypoint route like any graph walk,
+        // so a later rebuild re-validates it and the arrival settles it.
+        const node_pos = st.pf.graph.getPosition(from_node);
+        if (from_node == to_node and !walksToSameNode(reissue, .{ .x = pos.x, .y = pos.y }, node_pos)) {
             // Worker and target resolve to the same node. The worker
             // isn't necessarily AT that node's world position yet —
             // the CMN-per-Euclidean-closest snap means the starting
@@ -626,21 +636,8 @@ pub const Controller = struct {
             return .redundant;
         }
 
-        const maybe_path = st.pf.navigate(entity_id, from_node, to_node, speedOf(game, entity)) catch |err| {
-            log.err("navigate failed: entity={d} from={d} to={d}: {}", .{ entity_id, from_node, to_node, err });
-            return .{ .rejected = .navigate_error };
-        };
-        if (maybe_path == null) return .{ .rejected = .no_path };
-
-        if (!st.addPending(entity_id)) {
-            // Allocation failure growing the ring. Cancel the route we
-            // just started so we don't leak the entity in the underlying
-            // pathfinder (it'd keep moving without the Controller
-            // tracking it for arrivals). Caller sees `.deferred` and
-            // retries next frame once memory frees up.
-            st.pf.cancel(entity_id);
-            return .{ .deferred = .pending_alloc_failed };
-        }
+        const started = startRoute(st, entity_id, from_node, to_node, speedOf(game, entity));
+        if (started != .accepted) return started;
 
         // Persist the order so a mid-walk save re-issues on load (the
         // live route above is transient state).
@@ -2108,4 +2105,35 @@ test "a re-issue walks the rest of its last segment; a fresh navigate still snap
     try std.testing.expect(!Controller.walksToSameNode(.{}, partway, node));
     // Already within the arrival radius: settles in place.
     try std.testing.expect(!Controller.walksToSameNode(.{ .walk_same_node = true }, .{ .x = 0, .y = 2 }, node));
+}
+
+test "a re-issued last leg stays graph-tracked, so the next rebuild re-validates it (#60)" {
+    var st = State.init(std.testing.allocator);
+    defer st.deinit();
+    const bottom = try st.pf.addNode(.{ .x = 0, .y = 0 }, true);
+    _ = try st.pf.addNode(.{ .x = 0, .y = 93 }, true);
+
+    // A rebuild found the walker partway down to `bottom`, its
+    // destination's node: the re-issue walks a one-waypoint route.
+    try std.testing.expectEqual(Result.accepted, Controller.startRoute(&st, 7, bottom, bottom, 60));
+    try std.testing.expect(st.pf.isNavigating(7));
+    try std.testing.expect(!st.direct_moves.contains(7));
+    try std.testing.expectEqualSlices(u64, &.{7}, st.pending_entities.items);
+
+    // A second rebuild snapshots that leg and drops it with the other
+    // routes, leaving the order for `rehydrateNavigating` to re-issue
+    // against the new graph (re-route, or fail it).
+    Controller.snapshotSegments(&st);
+    st.reset(std.testing.allocator);
+    try std.testing.expect(!st.pf.isNavigating(7));
+    try std.testing.expect(!st.direct_moves.contains(7));
+    try std.testing.expectEqual(@as(usize, 0), st.pending_entities.items.len);
+    const resume_at = st.resume_at.get(7) orelse return error.TestExpectedSnapshot;
+    try std.testing.expectEqual(Position{ .x = 0, .y = 0 }, resume_at);
+
+    // The rebuilt graph lost the destination: the hint no longer
+    // resolves, so the re-issue falls back to the nearest-node pick.
+    const top2 = try st.pf.addNode(.{ .x = 0, .y = 93 }, true);
+    try std.testing.expectEqual(@as(?NodeId, null), st.pf.graph.nearestNodeWithin(resume_at, RESUME_TOLERANCE));
+    try std.testing.expectEqual(top2, Controller.reissueFromNode(&st, .{ .x = 0, .y = 120 }, resume_at).?);
 }
