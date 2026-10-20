@@ -248,7 +248,7 @@ pub const State = struct {
     /// a rebuild dropped its route, so the re-issue right after resumes
     /// that segment (#60). Filled by `snapshotSegments`, consumed and
     /// cleared by the next `rehydrateNavigating`; NOT cleared by `reset`,
-    /// which runs in between.
+    /// which runs in between, nor by a second rebuild before it.
     resume_at: std.AutoHashMapUnmanaged(u64, Position) = .empty,
 
     /// Last graph epoch at which the CMN sweep ran — drives the
@@ -1203,8 +1203,12 @@ pub const Controller = struct {
     /// node behind it or beside the segment (a walk back, or off it).
     /// An allocation failure only loses the hint: those walkers fall
     /// back to the nearest-node re-issue.
+    ///
+    /// Hints from an earlier rebuild are kept, not cleared: two rebuilds
+    /// can land before the next `advance` (an explicit one, then a node
+    /// count change), and the second sees no live routes, since the
+    /// first dropped them. A live route overwrites its walker's hint.
     fn snapshotSegments(st: *State) void {
-        st.resume_at.clearRetainingCapacity();
         for (st.pf.active.keys(), st.pf.active.values()) |id, entry| {
             const path = entry.path;
             if (path.current_index >= path.len) continue;
@@ -2136,4 +2140,30 @@ test "a re-issued last leg stays graph-tracked, so the next rebuild re-validates
     const top2 = try st.pf.addNode(.{ .x = 0, .y = 93 }, true);
     try std.testing.expectEqual(@as(?NodeId, null), st.pf.graph.nearestNodeWithin(resume_at, RESUME_TOLERANCE));
     try std.testing.expectEqual(top2, Controller.reissueFromNode(&st, .{ .x = 0, .y = 120 }, resume_at).?);
+}
+
+test "a second rebuild before the re-issue keeps the waypoint hints (#60)" {
+    var st = State.init(std.testing.allocator);
+    defer st.deinit();
+    const bottom = try st.pf.addNode(.{ .x = 0, .y = 0 }, true);
+    _ = try st.pf.addNode(.{ .x = 0, .y = 93 }, true);
+    const top = try st.pf.addNode(.{ .x = 0, .y = 186 }, true);
+    _ = try st.pf.navigate(7, bottom, top, 60);
+    st.pf.active.getPtr(7).?.path.current_index = 1;
+
+    Controller.snapshotSegments(&st);
+    st.reset(std.testing.allocator);
+    // The second rebuild: no live routes left to snapshot.
+    Controller.snapshotSegments(&st);
+    st.reset(std.testing.allocator);
+    try std.testing.expectEqual(Position{ .x = 0, .y = 93 }, st.resume_at.get(7).?);
+
+    // A walker with a live route gets its hint refreshed.
+    const bottom2 = try st.pf.addNode(.{ .x = 0, .y = 0 }, true);
+    _ = try st.pf.addNode(.{ .x = 0, .y = 93 }, true);
+    const top2 = try st.pf.addNode(.{ .x = 0, .y = 186 }, true);
+    _ = try st.pf.navigate(7, bottom2, top2, 60);
+    st.pf.active.getPtr(7).?.path.current_index = 2;
+    Controller.snapshotSegments(&st);
+    try std.testing.expectEqual(Position{ .x = 0, .y = 186 }, st.resume_at.get(7).?);
 }
