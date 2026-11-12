@@ -115,6 +115,56 @@ test "tick fires onPathInvalidated when the goal dies and no reroute exists" {
     try std.testing.expect(!pf.isNavigating(9));
 }
 
+test "a one-waypoint route walks the rest of a segment and arrives (#60)" {
+    const Pf = PathfinderWith(u64, struct {});
+    var pf = Pf.init(std.testing.allocator, test_config);
+    defer pf.deinit();
+
+    const a = try pf.addNode(.{ .x = 100, .y = 100 }, true);
+    _ = try pf.addNode(.{ .x = 100, .y = 200 }, true);
+
+    var ctx = CallbackCtx.init(std.testing.allocator);
+    defer ctx.deinit();
+    // 40 px short of `a`, as a re-issue finds a walker on its last leg.
+    try ctx.positions.put(7, .{ .x = 100, .y = 140 });
+
+    _ = try pf.navigate(7, a, a, 60.0);
+    var i: usize = 0;
+    while (i < 120 and pf.isNavigating(7)) : (i += 1) {
+        const before = ctx.positions.get(7).?;
+        pf.tick(&ctx, 0.016);
+        // Walks, never jumps: no step beyond the engine's 2 px waypoint
+        // snap (speed·dt is ~1 px here; the jump was the whole 40 px).
+        try std.testing.expect(before.y - ctx.positions.get(7).?.y <= 2.0 + 0.001);
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), ctx.arrived.items.len);
+    try std.testing.expectEqual(a, ctx.arrived.items[0].goal_node);
+    try std.testing.expectEqual(@as(f32, 100), ctx.positions.get(7).?.y);
+}
+
+test "a one-waypoint route is invalidated when its node goes away (#60)" {
+    const Pf = PathfinderWith(u64, struct {});
+    var pf = Pf.init(std.testing.allocator, test_config);
+    defer pf.deinit();
+
+    const a = try pf.addNode(.{ .x = 100, .y = 100 }, true);
+    _ = try pf.addNode(.{ .x = 900, .y = 900 }, false);
+
+    var ctx = CallbackCtx.init(std.testing.allocator);
+    defer ctx.deinit();
+    try ctx.positions.put(9, .{ .x = 100, .y = 140 });
+
+    _ = try pf.navigate(9, a, a, 10.0);
+    pf.tick(&ctx, 0.016);
+    pf.removeNode(a);
+    pf.tick(&ctx, 0.016);
+
+    try std.testing.expectEqual(@as(usize, 0), ctx.arrived.items.len);
+    try std.testing.expectEqual(@as(usize, 1), ctx.invalidated.items.len);
+    try std.testing.expect(!pf.isNavigating(9));
+}
+
 test "plain ctx without settle callbacks still compiles and ticks" {
     const Pf = PathfinderWith(u64, struct {});
     var pf = Pf.init(std.testing.allocator, test_config);
