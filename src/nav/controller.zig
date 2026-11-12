@@ -557,6 +557,13 @@ pub const Controller = struct {
         src: std.builtin.SourceLocation,
     ) Result {
         _ = src;
+        // Route on the world's nodes as they are now, not as of the last
+        // `advance` (`maybeRebuildGraph`), so a walk toward nodes spawned
+        // earlier this frame isn't rejected. Before `navigateWith`'s
+        // registered check, so a scene's first nodes route at once.
+        // Only fresh orders: `advance`'s re-issues run right after its
+        // own check.
+        if (findState(game)) |st| maybeRebuildGraph(game, st);
         return navigateWith(game, entity, target, .{});
     }
 
@@ -1835,32 +1842,47 @@ pub const Controller = struct {
         return n;
     }
 
-    fn isGraphStale(game: anytype, st: *State) bool {
-        if (st.node_entities.count() == 0) return false;
+    /// The graph no longer matches the world's MovementNode set.
+    ///
+    /// The live count catches additions and removals (v4: a newly built
+    /// room or carcase spawning nodes used to need a game-side
+    /// `PathfinderRebuild` marker). With an equal count, every tracked
+    /// node must still be a MovementNode entity: that catches a swapped
+    /// set, nodes removed and others added in the same frame, which the
+    /// count alone, and the old first-node-exists probe, both missed
+    /// (FP Trello 2myCi3yH). Equal count + every tracked node alive
+    /// means the same set, since entity ids are unique.
+    fn nodeSetChanged(game: anytype, st: *State) bool {
         const ecs = &game.active_world.ecs_backend;
-        const first_id = st.node_entities.values()[0];
         const Entity = @TypeOf(game.*).EntityType;
-        const first_entity: Entity = @intCast(first_id);
-        return !ecs.entityExists(first_entity);
+        const Probe = struct {
+            ecs_ptr: @TypeOf(ecs),
+            pub fn isNode(self: @This(), entity_id: u64) bool {
+                const e: Entity = @intCast(entity_id);
+                return self.ecs_ptr.entityExists(e) and self.ecs_ptr.hasComponent(e, MovementNode);
+            }
+        };
+        return trackedNodesDiffer(st.node_entities.values(), countMovementNodes(game), Probe{ .ecs_ptr = ecs });
     }
 
+    /// Rebuild the graph when the node set changed. Runs at the top of
+    /// `advance`, and of every fresh `navigate`: nodes spawned earlier in
+    /// the same frame (a section's catwalk, a new room) would otherwise
+    /// be invisible until the next `advance`, and a `navigate` toward
+    /// them came back `.rejected` / `no_nearby_node` (FP Trello
+    /// 2myCi3yH; #1123 worked around it for the turbine repairer only).
+    /// Bursts still rebuild once: the first caller after a change
+    /// rebuilds, later ones find the set unchanged.
+    ///
+    /// Walkers whose routes the rebuild drops resume on the next
+    /// `advance` (`snapshotSegments` + `rehydrateNavigating`), as after
+    /// a rebuild there. The O(nodes) check per call is noise next to a
+    /// route query.
     fn maybeRebuildGraph(game: anytype, st: *State) void {
-        // Count-based change detection (v4): node ADDITIONS (a newly
-        // built room/carcase spawning MovementNodes) are invisible to
-        // the first-node-exists staleness probe, and previously needed
-        // a game-side `PathfinderRebuild` marker + debounce script.
-        // Comparing the live count against the tracked set catches
-        // additions and removals alike, with natural burst-debounce
-        // (however many nodes spawn in one frame, the next `advance`
-        // rebuilds once). The O(nodes) view walk per tick is noise
-        // next to the navigation tick it rides with.
-        const live = countMovementNodes(game);
-        const tracked: u32 = @intCast(st.node_entities.count());
-        const count_changed = live != tracked;
-        const stale = st.nodes_registered and isGraphStale(game, st);
-        const inputs_changed = st.preparation_enabled and live > 0 and !graphInputsCurrent(game, st);
-        if (!count_changed and !stale and !inputs_changed) return;
-
+        // The rc line's prepared queries also rebuild when the graph's
+        // inputs (node positions, links) moved without the set changing.
+        const inputs_changed = st.preparation_enabled and countMovementNodes(game) > 0 and !graphInputsCurrent(game, st);
+        if (!nodeSetChanged(game, st) and !inputs_changed) return;
         snapshotSegments(st);
         st.reset(st.allocator);
         buildGraphIntoState(game, st);
@@ -2074,6 +2096,19 @@ pub const Controller = struct {
 // ============================================================================
 // Shared helpers
 // ============================================================================
+
+/// Pure core of `Controller.nodeSetChanged`: `tracked` (the graph's
+/// node entities) differs from the world's set of `live_count` nodes, as
+/// `probe.isNode(entity_id)` sees it. Equal counts with every tracked
+/// node still a node means the same set (entity ids are unique). Public
+/// for the unit tests.
+pub fn trackedNodesDiffer(tracked: []const u64, live_count: u32, probe: anytype) bool {
+    if (tracked.len != live_count) return true;
+    for (tracked) |id| {
+        if (!probe.isNode(id)) return true;
+    }
+    return false;
+}
 
 /// Prune `nearest_node_cache` entries whose entity is no longer alive,
 /// as judged by `probe.alive(entity_id) bool` (#493). Two-pass: collect

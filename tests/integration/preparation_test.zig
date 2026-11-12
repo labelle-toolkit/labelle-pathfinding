@@ -846,3 +846,65 @@ test "missing optional registration index preserves prepared queries and graph e
     try testing.expectEqual(epoch, state.graph_epoch);
     try testing.expect(C.preparedDistance(&game, mover, n) != null);
 }
+
+// ---- navigate in the frame new nodes appear (labelle-pathfinding#67) ----
+
+fn walker(game: *Game, x: f32) Entity {
+    const e = game.createEntity();
+    game.setPosition(e, .{ .x = x, .y = 0 });
+    return e;
+}
+
+test "navigate toward nodes spawned this frame routes there instead of being rejected" {
+    var game = Game.init(testing.allocator);
+    defer game.deinit();
+    _ = node(&game, 0);
+    _ = node(&game, 60);
+    const w = walker(&game, 0);
+    try C.setup(&game);
+    defer C.deinit(&game);
+    C.advance(&game, 0);
+    // A new walkway appears after this frame's advance: its far end is out
+    // of every old node's snap distance (100 px), so the stale graph had
+    // no node for the target.
+    for ([_]f32{ 120, 180, 240, 300 }) |x| _ = node(&game, x);
+    const epoch = C.graphEpoch(&game);
+    try testing.expectEqual(pf.controller.Result.accepted, C.navigate(&game, w, .{ .x = 300, .y = 0 }, @src()));
+    try testing.expect(C.graphEpoch(&game) > epoch); // navigate rebuilt the graph itself
+    var i: usize = 0;
+    while (i < 40 and C.isNavigating(&game, w)) : (i += 1) C.advance(&game, 0.1);
+    try testing.expect(!C.isNavigating(&game, w));
+    try testing.expectApproxEqAbs(@as(f32, 300), game.getPosition(w).x, 1);
+}
+
+test "navigate routes on a scene's first nodes spawned this frame" {
+    var game = Game.init(testing.allocator);
+    defer game.deinit();
+    const w = walker(&game, 0);
+    try C.setup(&game);
+    defer C.deinit(&game);
+    C.advance(&game, 0);
+    _ = node(&game, 0);
+    _ = node(&game, 60);
+    // Was .deferred / graph_not_built until the next advance.
+    try testing.expectEqual(pf.controller.Result.accepted, C.navigate(&game, w, .{ .x = 60, .y = 0 }, @src()));
+}
+
+test "a swapped node set with an unchanged count rebuilds the graph" {
+    var game = Game.init(testing.allocator);
+    defer game.deinit();
+    _ = node(&game, 0);
+    const old = node(&game, 60);
+    try C.setup(&game);
+    defer C.deinit(&game);
+    C.advance(&game, 0);
+    const epoch = C.graphEpoch(&game);
+    C.advance(&game, 0);
+    try testing.expectEqual(epoch, C.graphEpoch(&game)); // unchanged set: no rebuild
+    // One node destroyed and another spawned in the same frame: the count
+    // stays 2 and the first tracked node is still alive.
+    game.destroyEntity(old);
+    _ = node(&game, 70);
+    C.advance(&game, 0);
+    try testing.expect(C.graphEpoch(&game) > epoch);
+}

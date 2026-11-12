@@ -156,3 +156,37 @@ test "thresholds match documentation" {
     try std.testing.expectEqual(@as(f32, 15.0), CACHE_POS_THRESHOLD);
     try std.testing.expectEqual(@as(f32, 5.0), Y_FILTER_EPS);
 }
+
+// ---- trackedNodesDiffer (FP Trello 2myCi3yH) ------------------------------
+
+const NodeSetProbe = struct {
+    live: []const u64,
+    pub fn isNode(self: @This(), id: u64) bool {
+        for (self.live) |l| if (l == id) return true;
+        return false;
+    }
+};
+
+test "trackedNodesDiffer: the same node set is unchanged" {
+    const tracked = [_]u64{ 10, 11, 12 };
+    try std.testing.expect(!pathfinder.controller.trackedNodesDiffer(&tracked, 3, NodeSetProbe{ .live = &.{ 12, 10, 11 } }));
+}
+
+test "trackedNodesDiffer: nodes added or removed change the set" {
+    const tracked = [_]u64{ 10, 11, 12 };
+    try std.testing.expect(pathfinder.controller.trackedNodesDiffer(&tracked, 5, NodeSetProbe{ .live = &.{ 10, 11, 12, 13, 14 } }));
+    try std.testing.expect(pathfinder.controller.trackedNodesDiffer(&tracked, 2, NodeSetProbe{ .live = &.{ 10, 11 } }));
+}
+
+test "trackedNodesDiffer: a swapped set with an equal count is a change" {
+    // Node 11 destroyed and node 20 spawned in the same frame: the count
+    // alone (3 == 3) and the old first-node-alive probe (10 still there)
+    // both missed this.
+    const tracked = [_]u64{ 10, 11, 12 };
+    try std.testing.expect(pathfinder.controller.trackedNodesDiffer(&tracked, 3, NodeSetProbe{ .live = &.{ 10, 12, 20 } }));
+}
+
+test "trackedNodesDiffer: an empty graph with no nodes is unchanged; first nodes are a change" {
+    try std.testing.expect(!pathfinder.controller.trackedNodesDiffer(&.{}, 0, NodeSetProbe{ .live = &.{} }));
+    try std.testing.expect(pathfinder.controller.trackedNodesDiffer(&.{}, 4, NodeSetProbe{ .live = &.{ 1, 2, 3, 4 } }));
+}
