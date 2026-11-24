@@ -66,7 +66,8 @@ pub const Graph = struct {
     ///
     /// Auto-connects to existing nodes on:
     /// * The same X axis (vertical) within `max_vertical_distance` —
-    ///   requires at least one of the two nodes to be a stair.
+    ///   to its nearest neighbour above and below, where the UPPER node
+    ///   of the pair is a stair (`autoConnectVertical`).
     /// * The same Y axis (horizontal) within `max_horizontal_distance` —
     ///   applies to every MovementNode, regardless of `is_stair`.
     ///
@@ -79,102 +80,159 @@ pub const Graph = struct {
         try self.removed.append(self.allocator, false);
         try self.edges.append(self.allocator, .empty);
 
-        // Auto-connect on same X axis (vertical, between floors — requires at least one stair)
-        try self.autoConnectAxis(new_id, position, stair, .x);
+        // Auto-connect on same X axis (vertical, between floors: a stair
+        // reaching down)
+        try self.autoConnectVertical(new_id, position, stair);
 
         // Auto-connect on same Y axis (horizontal, same level) for all nodes
-        try self.autoConnectAxis(new_id, position, stair, .y);
+        try self.autoConnectHorizontal(new_id, position);
 
         self.dirty = true;
         return new_id;
     }
 
-    const Axis = enum { x, y };
+    /// Vertical links (same X, different Y): a stair reaches DOWN to the
+    /// nearest node under it, whatever that node is; nothing reaches up
+    /// to a node that is not a stair. So a link joins the new node to its
+    /// nearest neighbour above when that neighbour is a stair, and to its
+    /// nearest neighbour below when the new node is one.
+    ///
+    /// "Nearest" counts every node on the X, stair or not: a node between
+    /// two others stands in the way of a link between them, also when it
+    /// links to neither. That makes the result the same in whatever order
+    /// the nodes are added. Before, a plain node was only ever compared
+    /// with stairs, so one added under a floor linked to a stair two
+    /// floors up, straight through that floor (#69).
+    ///
+    /// Nodes on one spot (same X and Y) have no floor between them: they
+    /// are joined by the horizontal pass, and the stair among them holds
+    /// the spot's vertical links.
+    fn autoConnectVertical(self: *Graph, new_id: NodeId, position: Position, is_new_stair: bool) !void {
+        const max_dist = self.config.max_vertical_distance;
+        var above: ?NodeId = null;
+        var above_dist: f32 = max_dist + 1.0;
+        var below: ?NodeId = null;
+        var below_dist: f32 = max_dist + 1.0;
+        var stair_on_spot = false;
 
-    /// Find nearest neighbors on the given axis and create bidirectional edges.
-    /// For X axis (vertical): the new node must be a stair.
-    ///   - Downward (lower Y): connects to any node.
-    ///   - Upward (higher Y): connects only if the target is also a stair.
-    /// For Y axis (horizontal): connects to nearest left and right.
-    fn autoConnectAxis(self: *Graph, new_id: NodeId, position: Position, is_new_stair: bool, comptime axis: Axis) !void {
-        const axis_val = switch (axis) {
-            .x => position.x,
-            .y => position.y,
-        };
-        const perp_val = switch (axis) {
-            .x => position.y,
-            .y => position.x,
-        };
-        const max_dist = switch (axis) {
-            .x => self.config.max_vertical_distance,
-            .y => self.config.max_horizontal_distance,
-        };
+        for (self.positions.items, 0..) |other_pos, i| {
+            const other_id: NodeId = @intCast(i);
+            if (other_id == new_id or !self.inColumn(other_id, position.x)) continue;
+            if (other_pos.y == position.y) {
+                // The very same spot, not merely the same column: a stair
+                // a pixel to the side has neighbours of its own.
+                if (self.is_stair.items[i] and other_pos.x == position.x) stair_on_spot = true;
+                continue;
+            }
+            const dist = distanceBetween(position, other_pos);
+            if (dist > max_dist) continue;
 
-        var nearest_pos: ?NodeId = null; // nearest in positive perpendicular direction
-        var nearest_pos_dist: f32 = max_dist + 1.0;
-        var nearest_neg: ?NodeId = null; // nearest in negative perpendicular direction
-        var nearest_neg_dist: f32 = max_dist + 1.0;
+            // Of two nodes on one spot, the stair is the neighbour.
+            const stair = self.is_stair.items[i];
+            if (other_pos.y < position.y) {
+                if (dist < below_dist or (dist == below_dist and stair)) {
+                    below = other_id;
+                    below_dist = dist;
+                }
+            } else if (dist < above_dist or (dist == above_dist and stair)) {
+                above = other_id;
+                above_dist = dist;
+            }
+        }
+
+        // A plain node on a stair's spot: the stair already holds the
+        // spot's vertical links, and the node is between nothing new.
+        if (!is_new_stair and stair_on_spot) return;
+
+        if (above) |a| {
+            if (self.is_stair.items[a]) try self.addBidirectionalEdge(new_id, a, above_dist);
+        }
+        if (below) |b| {
+            if (is_new_stair) try self.addBidirectionalEdge(new_id, b, below_dist);
+        }
+
+        // After the links are added, so an allocation failure above leaves
+        // the old ones standing.
+        for (self.positions.items, 0..) |other_pos, i| {
+            const other_id: NodeId = @intCast(i);
+            if (other_id == new_id or !self.inColumn(other_id, position.x)) continue;
+            if (other_pos.y > position.y) {
+                // The new node stands between this node and everything
+                // under the new node: a link across it goes.
+                self.removeColumnEdges(other_id, position.x, .below, position.y);
+            } else if (other_pos.y == position.y and other_pos.x == position.x and is_new_stair and !self.is_stair.items[i]) {
+                // A stair arriving on a plain node's spot takes over the
+                // vertical links that node had.
+                self.removeColumnEdges(other_id, position.x, .off, position.y);
+            }
+        }
+    }
+
+    /// An active node on the X axis `x` (within `axis_tolerance`).
+    fn inColumn(self: *const Graph, node_id: NodeId, x: f32) bool {
+        return !self.removed.items[node_id] and @abs(self.positions.items[node_id].x - x) <= self.config.axis_tolerance;
+    }
+
+    /// Drop `node_id`'s vertical links to the nodes of column `x` that are
+    /// `.below` the height `y`, or `.off` it (above or below). Vertical:
+    /// the two ends share an X themselves. Two nodes on either edge of the
+    /// column's tolerance are a diagonal, an authored link (`addLink`)
+    /// that stays.
+    fn removeColumnEdges(self: *Graph, node_id: NodeId, x: f32, which: enum { below, off }, y: f32) void {
+        const from_x = self.positions.items[node_id].x;
+        var i: usize = 0;
+        while (i < self.edges.items[node_id].items.len) {
+            const to = self.edges.items[node_id].items[i].to;
+            const to_y = self.positions.items[to].y;
+            const vertical = @abs(self.positions.items[to].x - from_x) <= self.config.axis_tolerance;
+            const hit = vertical and self.inColumn(to, x) and switch (which) {
+                .below => to_y < y,
+                .off => to_y != y,
+            };
+            if (hit) {
+                // Swap-removes from both lists: look at index `i` again.
+                self.removeEdgeBetween(node_id, to);
+            } else {
+                i += 1;
+            }
+        }
+    }
+
+    /// Horizontal links (same Y, different X): the nearest node to the
+    /// left and to the right within `max_horizontal_distance`, stair or
+    /// not. A link the two had goes: the new node is in between.
+    fn autoConnectHorizontal(self: *Graph, new_id: NodeId, position: Position) !void {
+        const max_dist = self.config.max_horizontal_distance;
+        var right: ?NodeId = null;
+        var right_dist: f32 = max_dist + 1.0;
+        var left: ?NodeId = null;
+        var left_dist: f32 = max_dist + 1.0;
 
         for (self.positions.items, 0..) |other_pos, i| {
             const other_id: NodeId = @intCast(i);
             if (other_id == new_id) continue;
             if (self.removed.items[i]) continue;
-
-            // For X-axis (vertical): at least one of the two nodes must be a stair
-            if (axis == .x and !is_new_stair and !self.is_stair.items[i]) continue;
-
-            const other_axis_val = switch (axis) {
-                .x => other_pos.x,
-                .y => other_pos.y,
-            };
-            const other_perp_val = switch (axis) {
-                .x => other_pos.y,
-                .y => other_pos.x,
-            };
-
-            // Check same axis (within tolerance)
-            if (@abs(other_axis_val - axis_val) > self.config.axis_tolerance) continue;
-
+            if (@abs(other_pos.y - position.y) > self.config.axis_tolerance) continue;
             const dist = distanceBetween(position, other_pos);
             if (dist > max_dist) continue;
 
-            // Classify as positive or negative direction on perpendicular axis
-            // For X-axis: positive Y = above, negative Y = below
-            if (other_perp_val > perp_val) {
-                // Upward: for X-axis, only connect if target is also a stair
-                if (axis == .x and !self.is_stair.items[i]) continue;
-                if (dist < nearest_pos_dist) {
-                    nearest_pos = other_id;
-                    nearest_pos_dist = dist;
+            // A node at the very same X counts as to the right.
+            if (other_pos.x < position.x) {
+                if (dist < left_dist) {
+                    left = other_id;
+                    left_dist = dist;
                 }
-            } else if (other_perp_val < perp_val) {
-                if (dist < nearest_neg_dist) {
-                    nearest_neg = other_id;
-                    nearest_neg_dist = dist;
-                }
-            }
-            // If perp values are equal, classify as positive
-            else {
-                if (axis == .x and !self.is_stair.items[i]) continue;
-                if (dist < nearest_pos_dist) {
-                    nearest_pos = other_id;
-                    nearest_pos_dist = dist;
-                }
+            } else if (dist < right_dist) {
+                right = other_id;
+                right_dist = dist;
             }
         }
 
-        // Connect to nearest neighbors and re-evaluate existing edges
-        if (nearest_pos) |pos_id| {
-            try self.addBidirectionalEdge(new_id, pos_id, nearest_pos_dist);
-            // Re-evaluate: if pos_id was connected to neg_id, remove that edge
-            // (the new node is in between)
-            if (nearest_neg) |neg_id| {
-                self.removeEdgeBetween(pos_id, neg_id);
-            }
+        if (right) |r| {
+            try self.addBidirectionalEdge(new_id, r, right_dist);
+            if (left) |l| self.removeEdgeBetween(r, l);
         }
-        if (nearest_neg) |neg_id| {
-            try self.addBidirectionalEdge(new_id, neg_id, nearest_neg_dist);
-        }
+        if (left) |l| try self.addBidirectionalEdge(new_id, l, left_dist);
     }
 
     /// Link two nodes directly, whatever their axes and distance: the
