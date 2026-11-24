@@ -103,38 +103,44 @@ pub const Graph = struct {
     /// the nodes are added. Before, a plain node was only ever compared
     /// with stairs, so one added under a floor linked to a stair two
     /// floors up, straight through that floor (#69).
+    ///
+    /// Nodes on one spot (same X and Y) have no floor between them: they
+    /// are joined by the horizontal pass, and the stair among them holds
+    /// the spot's vertical links.
     fn autoConnectVertical(self: *Graph, new_id: NodeId, position: Position, is_new_stair: bool) !void {
         const max_dist = self.config.max_vertical_distance;
         var above: ?NodeId = null;
         var above_dist: f32 = max_dist + 1.0;
         var below: ?NodeId = null;
         var below_dist: f32 = max_dist + 1.0;
+        var stair_on_spot = false;
 
         for (self.positions.items, 0..) |other_pos, i| {
             const other_id: NodeId = @intCast(i);
-            if (other_id == new_id) continue;
-            if (self.removed.items[i]) continue;
-            if (@abs(other_pos.x - position.x) > self.config.axis_tolerance) continue;
+            if (other_id == new_id or !self.inColumn(other_id, position.x)) continue;
+            if (other_pos.y == position.y) {
+                if (self.is_stair.items[i]) stair_on_spot = true;
+                continue;
+            }
             const dist = distanceBetween(position, other_pos);
             if (dist > max_dist) continue;
 
-            // A node at the very same height is neither above nor below:
-            // there is no floor between the two, so it blocks nothing and
-            // takes no vertical link. The horizontal pass joins the pair
-            // (it counts a node on the same X as a neighbour).
-            if (other_pos.y == position.y) continue;
+            // Of two nodes on one spot, the stair is the neighbour.
+            const stair = self.is_stair.items[i];
             if (other_pos.y < position.y) {
-                if (dist < below_dist) {
+                if (dist < below_dist or (dist == below_dist and stair)) {
                     below = other_id;
                     below_dist = dist;
                 }
-            } else if (dist < above_dist or (dist == above_dist and self.is_stair.items[i])) {
-                // Of two nodes on one spot, the stair is the neighbour:
-                // it is the one that can take the link.
+            } else if (dist < above_dist or (dist == above_dist and stair)) {
                 above = other_id;
                 above_dist = dist;
             }
         }
+
+        // A plain node on a stair's spot: the stair already holds the
+        // spot's vertical links, and the node is between nothing new.
+        if (!is_new_stair and stair_on_spot) return;
 
         if (above) |a| {
             if (self.is_stair.items[a]) try self.addBidirectionalEdge(new_id, a, above_dist);
@@ -142,10 +148,47 @@ pub const Graph = struct {
         if (below) |b| {
             if (is_new_stair) try self.addBidirectionalEdge(new_id, b, below_dist);
         }
-        // The new node stands between its two neighbours: a link they had
-        // goes, whether or not the new node takes its place. Last, so an
-        // allocation failure above leaves that link standing.
-        if (above) |a| if (below) |b| self.removeEdgeBetween(a, b);
+
+        // After the links are added, so an allocation failure above leaves
+        // the old ones standing.
+        for (self.positions.items, 0..) |other_pos, i| {
+            const other_id: NodeId = @intCast(i);
+            if (other_id == new_id or !self.inColumn(other_id, position.x)) continue;
+            if (other_pos.y > position.y) {
+                // The new node stands between this node and everything
+                // under the new node: a link across it goes.
+                self.removeColumnEdges(other_id, position.x, .below, position.y);
+            } else if (other_pos.y == position.y and is_new_stair and !self.is_stair.items[i]) {
+                // A stair arriving on a plain node's spot takes over the
+                // vertical links that node had.
+                self.removeColumnEdges(other_id, position.x, .off, position.y);
+            }
+        }
+    }
+
+    /// An active node on the X axis `x` (within `axis_tolerance`).
+    fn inColumn(self: *const Graph, node_id: NodeId, x: f32) bool {
+        return !self.removed.items[node_id] and @abs(self.positions.items[node_id].x - x) <= self.config.axis_tolerance;
+    }
+
+    /// Drop `node_id`'s links to the nodes of column `x` that are `.below`
+    /// the height `y`, or `.off` it (above or below).
+    fn removeColumnEdges(self: *Graph, node_id: NodeId, x: f32, which: enum { below, off }, y: f32) void {
+        var i: usize = 0;
+        while (i < self.edges.items[node_id].items.len) {
+            const to = self.edges.items[node_id].items[i].to;
+            const to_y = self.positions.items[to].y;
+            const hit = self.inColumn(to, x) and switch (which) {
+                .below => to_y < y,
+                .off => to_y != y,
+            };
+            if (hit) {
+                // Swap-removes from both lists: look at index `i` again.
+                self.removeEdgeBetween(node_id, to);
+            } else {
+                i += 1;
+            }
+        }
     }
 
     /// Horizontal links (same Y, different X): the nearest node to the

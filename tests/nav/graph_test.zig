@@ -243,6 +243,88 @@ test "a plain node on a stair's own spot leaves the stair linked to its floor" {
     }
 }
 
+/// Every order of `n` items, by Heap's algorithm.
+fn permutations(comptime n: usize) [factorial(n)][n]usize {
+    @setEvalBranchQuota(20000);
+    var out: [factorial(n)][n]usize = undefined;
+    var a: [n]usize = undefined;
+    for (&a, 0..) |*v, i| v.* = i;
+    var c = [_]usize{0} ** n;
+    var count: usize = 0;
+    out[count] = a;
+    count += 1;
+    var i: usize = 0;
+    while (i < n) {
+        if (c[i] < i) {
+            const j = if (i % 2 == 0) 0 else c[i];
+            const t = a[j];
+            a[j] = a[i];
+            a[i] = t;
+            out[count] = a;
+            count += 1;
+            c[i] += 1;
+            i = 0;
+        } else {
+            c[i] = 0;
+            i += 1;
+        }
+    }
+    return out;
+}
+
+fn factorial(comptime n: usize) usize {
+    return if (n <= 1) 1 else n * factorial(n - 1);
+}
+
+test "a plain node and a stair on one spot: the same links in every order" {
+    // A stair and a plain node on one spot, a stair a floor up, and a
+    // plain node between the two heights.
+    const nodes = [4]Column{
+        .{ .y = 93, .stair = true }, // S
+        .{ .y = 93, .stair = false }, // P, on S's spot
+        .{ .y = 186, .stair = true }, // U
+        .{ .y = 140, .stair = false }, // B, between
+    };
+    for (comptime permutations(4)) |order| {
+        var g = Graph.init(std.testing.allocator, test_config);
+        defer g.deinit();
+        var id: [4]u32 = undefined;
+        for (order) |which| id[which] = try g.addNode(.{ .x = 126, .y = nodes[which].y }, nodes[which].stair);
+        const s = id[0];
+        const p = id[1];
+        const u = id[2];
+        const b = id[3];
+
+        // U reaches down to B, the nearest node under it, and no further.
+        try std.testing.expect(linked(&g, u, b));
+        try std.testing.expect(!linked(&g, u, s));
+        try std.testing.expect(!linked(&g, u, p));
+        // Nothing climbs to the plain B.
+        try std.testing.expect(!linked(&g, b, s));
+        try std.testing.expect(!linked(&g, b, p));
+        // The pair on one spot is joined.
+        try std.testing.expect(linked(&g, s, p));
+    }
+}
+
+test "of a plain node and a stair on one spot, the stair takes the link from above" {
+    const nodes = [3]Column{
+        .{ .y = 93, .stair = false }, // P
+        .{ .y = 93, .stair = true }, // S, on P's spot
+        .{ .y = 186, .stair = true }, // U
+    };
+    for (comptime permutations(3)) |order| {
+        var g = Graph.init(std.testing.allocator, test_config);
+        defer g.deinit();
+        var id: [3]u32 = undefined;
+        for (order) |which| id[which] = try g.addNode(.{ .x = 126, .y = nodes[which].y }, nodes[which].stair);
+
+        try std.testing.expect(linked(&g, id[2], id[1]));
+        try std.testing.expect(!linked(&g, id[2], id[0]));
+        try std.testing.expect(linked(&g, id[1], id[0]));
+    }
+}
+
 test "sets dirty flag on addNode" {
     var g = Graph.init(std.testing.allocator, test_config);
     defer g.deinit();
