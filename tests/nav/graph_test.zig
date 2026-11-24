@@ -126,6 +126,99 @@ test "axis_tolerance allows near-matches" {
     try std.testing.expectEqual(b, a_edges[0].to);
 }
 
+// --- Vertical links: the upper node is a stair, in any order (#69) ---
+
+/// Whether `a` and `b` are linked, both ways.
+fn linked(g: *const Graph, a: u32, b: u32) bool {
+    var ab = false;
+    var ba = false;
+    for (g.getEdges(a)) |e| {
+        if (e.to == b) ab = true;
+    }
+    for (g.getEdges(b)) |e| {
+        if (e.to == a) ba = true;
+    }
+    return ab and ba;
+}
+
+const Column = struct { y: f32, stair: bool };
+
+/// A ladder's top two floors up, the floor it stands on, the floor under
+/// that: one X, 93 apart, all within `max_vertical_distance`.
+const ladder = [3]Column{
+    .{ .y = 0, .stair = false },
+    .{ .y = 93, .stair = false },
+    .{ .y = 186, .stair = true },
+};
+
+test "a stair links down to the floor it stands on, never through it, in any order" {
+    const orders = [_][3]usize{
+        .{ 0, 1, 2 }, .{ 0, 2, 1 }, .{ 1, 0, 2 },
+        .{ 1, 2, 0 }, .{ 2, 0, 1 }, .{ 2, 1, 0 },
+    };
+    for (orders) |order| {
+        var g = Graph.init(std.testing.allocator, test_config);
+        defer g.deinit();
+        var id: [3]u32 = undefined;
+        for (order) |which| id[which] = try g.addNode(.{ .x = 126, .y = ladder[which].y }, ladder[which].stair);
+
+        try std.testing.expect(linked(&g, id[2], id[1]));
+        // Not two floors down, through the floor in between.
+        try std.testing.expect(!linked(&g, id[2], id[0]));
+        // Two plain nodes never link vertically.
+        try std.testing.expect(!linked(&g, id[1], id[0]));
+        try std.testing.expectEqual(@as(usize, 1), g.getEdges(id[2]).len);
+    }
+}
+
+test "a plain node above a stair does not link to it, whichever is added first" {
+    for ([_]bool{ true, false }) |stair_first| {
+        var g = Graph.init(std.testing.allocator, test_config);
+        defer g.deinit();
+        var stair: u32 = undefined;
+        var roof: u32 = undefined;
+        if (stair_first) {
+            stair = try g.addNode(.{ .x = 126, .y = 93 }, true);
+            roof = try g.addNode(.{ .x = 126, .y = 186 }, false);
+        } else {
+            roof = try g.addNode(.{ .x = 126, .y = 186 }, false);
+            stair = try g.addNode(.{ .x = 126, .y = 93 }, true);
+        }
+        try std.testing.expect(!linked(&g, stair, roof));
+    }
+}
+
+test "a stair above a stair links to it, whichever is added first" {
+    for ([_]bool{ true, false }) |lower_first| {
+        var g = Graph.init(std.testing.allocator, test_config);
+        defer g.deinit();
+        var lower: u32 = undefined;
+        var upper: u32 = undefined;
+        if (lower_first) {
+            lower = try g.addNode(.{ .x = 73, .y = 93 }, true);
+            upper = try g.addNode(.{ .x = 73, .y = 186 }, true);
+        } else {
+            upper = try g.addNode(.{ .x = 73, .y = 186 }, true);
+            lower = try g.addNode(.{ .x = 73, .y = 93 }, true);
+        }
+        try std.testing.expect(linked(&g, lower, upper));
+    }
+}
+
+test "a plain node added between a stair and the floor it reached takes the link" {
+    var g = Graph.init(std.testing.allocator, test_config);
+    defer g.deinit();
+    const floor = try g.addNode(.{ .x = 126, .y = 0 }, false);
+    const stair = try g.addNode(.{ .x = 126, .y = 186 }, true);
+    // Nothing in between yet: the stair reaches the floor, 186 down.
+    try std.testing.expect(linked(&g, stair, floor));
+
+    const between = try g.addNode(.{ .x = 126, .y = 93 }, false);
+    try std.testing.expect(linked(&g, stair, between));
+    try std.testing.expect(!linked(&g, stair, floor));
+    try std.testing.expect(!linked(&g, between, floor));
+}
+
 test "sets dirty flag on addNode" {
     var g = Graph.init(std.testing.allocator, test_config);
     defer g.deinit();
