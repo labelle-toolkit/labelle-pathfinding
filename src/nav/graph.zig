@@ -118,26 +118,23 @@ pub const Graph = struct {
             const dist = distanceBetween(position, other_pos);
             if (dist > max_dist) continue;
 
+            // A node at the very same height is neither above nor below:
+            // there is no floor between the two, so it blocks nothing and
+            // takes no vertical link. The horizontal pass joins the pair
+            // (it counts a node on the same X as a neighbour).
+            if (other_pos.y == position.y) continue;
             if (other_pos.y < position.y) {
                 if (dist < below_dist) {
                     below = other_id;
                     below_dist = dist;
                 }
-            } else {
-                // A node at the very same height counts as above, and only
-                // when it is a stair: two plain nodes on one spot have no
-                // floor between them to block.
-                if (other_pos.y == position.y and !self.is_stair.items[i]) continue;
-                if (dist < above_dist) {
-                    above = other_id;
-                    above_dist = dist;
-                }
+            } else if (dist < above_dist or (dist == above_dist and self.is_stair.items[i])) {
+                // Of two nodes on one spot, the stair is the neighbour:
+                // it is the one that can take the link.
+                above = other_id;
+                above_dist = dist;
             }
         }
-
-        // The new node stands between its two neighbours: a link they had
-        // goes, whether or not the new node takes its place.
-        if (above) |a| if (below) |b| self.removeEdgeBetween(a, b);
 
         if (above) |a| {
             if (self.is_stair.items[a]) try self.addBidirectionalEdge(new_id, a, above_dist);
@@ -145,6 +142,10 @@ pub const Graph = struct {
         if (below) |b| {
             if (is_new_stair) try self.addBidirectionalEdge(new_id, b, below_dist);
         }
+        // The new node stands between its two neighbours: a link they had
+        // goes, whether or not the new node takes its place. Last, so an
+        // allocation failure above leaves that link standing.
+        if (above) |a| if (below) |b| self.removeEdgeBetween(a, b);
     }
 
     /// Horizontal links (same Y, different X): the nearest node to the

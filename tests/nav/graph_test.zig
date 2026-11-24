@@ -219,6 +219,30 @@ test "a plain node added between a stair and the floor it reached takes the link
     try std.testing.expect(!linked(&g, between, floor));
 }
 
+test "a plain node on a stair's own spot leaves the stair linked to its floor" {
+    // Floor, stair and plain node in every order: the plain node shares
+    // the stair's position, so it is not a floor between it and anything.
+    const orders = [_][3]usize{
+        .{ 0, 1, 2 }, .{ 0, 2, 1 }, .{ 1, 0, 2 },
+        .{ 1, 2, 0 }, .{ 2, 0, 1 }, .{ 2, 1, 0 },
+    };
+    const nodes = [3]Column{
+        .{ .y = 0, .stair = false }, // floor
+        .{ .y = 93, .stair = true }, // stair
+        .{ .y = 93, .stair = false }, // plain, on the stair's spot
+    };
+    for (orders) |order| {
+        var g = Graph.init(std.testing.allocator, test_config);
+        defer g.deinit();
+        var id: [3]u32 = undefined;
+        for (order) |which| id[which] = try g.addNode(.{ .x = 126, .y = nodes[which].y }, nodes[which].stair);
+
+        try std.testing.expect(linked(&g, id[1], id[0]));
+        try std.testing.expect(linked(&g, id[1], id[2]));
+        try std.testing.expect(!linked(&g, id[2], id[0]));
+    }
+}
+
 test "sets dirty flag on addNode" {
     var g = Graph.init(std.testing.allocator, test_config);
     defer g.deinit();
