@@ -325,6 +325,39 @@ test "of a plain node and a stair on one spot, the stair takes the link from abo
     }
 }
 
+test "a stair a pixel to the side does not take a plain node's vertical link" {
+    // P and S are at one height, a pixel apart: one column for the
+    // tolerance, but not one spot. U is in P's column and out of S's.
+    for ([_]bool{ true, false }) |plain_first| {
+        var g = Graph.init(std.testing.allocator, test_config);
+        defer g.deinit();
+        const u = try g.addNode(.{ .x = -1, .y = 100 }, true);
+        var p: u32 = undefined;
+        var s: u32 = undefined;
+        if (plain_first) {
+            p = try g.addNode(.{ .x = 0, .y = 0 }, false);
+            s = try g.addNode(.{ .x = 1, .y = 0 }, true);
+        } else {
+            s = try g.addNode(.{ .x = 1, .y = 0 }, true);
+            p = try g.addNode(.{ .x = 0, .y = 0 }, false);
+        }
+        try std.testing.expect(linked(&g, u, p));
+        try std.testing.expect(linked(&g, p, s));
+    }
+}
+
+test "a node between the ends of an authored diagonal link leaves it" {
+    var g = Graph.init(std.testing.allocator, test_config);
+    defer g.deinit();
+    // 1.5 apart in X: not one column, so the link is a diagonal.
+    const a = try g.addNode(.{ .x = -0.75, .y = 0 }, false);
+    const b = try g.addNode(.{ .x = 0.75, .y = 100 }, false);
+    try g.addLink(a, b);
+    // In both ends' columns, between their heights.
+    _ = try g.addNode(.{ .x = 0, .y = 50 }, false);
+    try std.testing.expect(linked(&g, a, b));
+}
+
 test "sets dirty flag on addNode" {
     var g = Graph.init(std.testing.allocator, test_config);
     defer g.deinit();

@@ -119,7 +119,9 @@ pub const Graph = struct {
             const other_id: NodeId = @intCast(i);
             if (other_id == new_id or !self.inColumn(other_id, position.x)) continue;
             if (other_pos.y == position.y) {
-                if (self.is_stair.items[i]) stair_on_spot = true;
+                // The very same spot, not merely the same column: a stair
+                // a pixel to the side has neighbours of its own.
+                if (self.is_stair.items[i] and other_pos.x == position.x) stair_on_spot = true;
                 continue;
             }
             const dist = distanceBetween(position, other_pos);
@@ -158,7 +160,7 @@ pub const Graph = struct {
                 // The new node stands between this node and everything
                 // under the new node: a link across it goes.
                 self.removeColumnEdges(other_id, position.x, .below, position.y);
-            } else if (other_pos.y == position.y and is_new_stair and !self.is_stair.items[i]) {
+            } else if (other_pos.y == position.y and other_pos.x == position.x and is_new_stair and !self.is_stair.items[i]) {
                 // A stair arriving on a plain node's spot takes over the
                 // vertical links that node had.
                 self.removeColumnEdges(other_id, position.x, .off, position.y);
@@ -171,14 +173,19 @@ pub const Graph = struct {
         return !self.removed.items[node_id] and @abs(self.positions.items[node_id].x - x) <= self.config.axis_tolerance;
     }
 
-    /// Drop `node_id`'s links to the nodes of column `x` that are `.below`
-    /// the height `y`, or `.off` it (above or below).
+    /// Drop `node_id`'s vertical links to the nodes of column `x` that are
+    /// `.below` the height `y`, or `.off` it (above or below). Vertical:
+    /// the two ends share an X themselves. Two nodes on either edge of the
+    /// column's tolerance are a diagonal, an authored link (`addLink`)
+    /// that stays.
     fn removeColumnEdges(self: *Graph, node_id: NodeId, x: f32, which: enum { below, off }, y: f32) void {
+        const from_x = self.positions.items[node_id].x;
         var i: usize = 0;
         while (i < self.edges.items[node_id].items.len) {
             const to = self.edges.items[node_id].items[i].to;
             const to_y = self.positions.items[to].y;
-            const hit = self.inColumn(to, x) and switch (which) {
+            const vertical = @abs(self.positions.items[to].x - from_x) <= self.config.axis_tolerance;
+            const hit = vertical and self.inColumn(to, x) and switch (which) {
                 .below => to_y < y,
                 .off => to_y != y,
             };
