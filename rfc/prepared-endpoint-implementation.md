@@ -148,3 +148,32 @@ mutation and participant audits, generation-qualified graph/query freshness,
 remaining CMN writers/known-node updates, frame-order placement, game query migration
 and normal-retry handling for active jobs/raids. In particular, this phase's graph
 checks do not constitute a query-time guarantee after arbitrary later mutations.
+
+## Prepared queries and graph dependency freshness
+
+`preparedDistance(game, from, to)` reads only current published endpoints and the
+existing FW table. Ordinary entities require a ready CMN with matching world,
+entity, position and graph stamps. MovementNode endpoints use the current live
+entity registration directly, without a self-CMN. A stale/absent/off-graph or
+disconnected endpoint, dirty table, or changed graph dependency returns null.
+There are no allocations, parent walks, nearest-node scans, repairs or Euclidean
+fallbacks in this query.
+
+Graph construction watches MovementNode/MovementStair/MovementLink mutations and
+registered node positions through the engine dependency group. Any subsequent
+watched mutation invalidates all prepared queries immediately. Full graph input
+validation remains in advance/preparation, outside queries. Direct backend writes
+must use the engine invalidation companion; command-level node removal also
+invalidates the table. Component-pointer writes are not magically observable.
+
+`endpointPreparationComplete` is a separate lifecycle gate: pending/stale is
+false, completed off-graph is true. It does not change the matching null contract.
+It lets an active job or raid retry preparation before concluding that no usable
+candidate exists. Destroyed targets still need the consumer's existing lifetime
+policy.
+
+`publishKnownEndpoint` supports explicit docking/placement. It validates actual
+world-space position against the registered node, snap radius and Y filter, then
+publishes the current stamp. It rejects MovementNode recipients and cannot repair
+a stale graph. Opted-in `requestRepath` invalidates for the bounded phase instead
+of scanning synchronously. Legacy navigation commands remain available separately.

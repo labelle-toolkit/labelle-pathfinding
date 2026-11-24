@@ -3,7 +3,7 @@ const testing = std.testing;
 const pathfinder = @import("pathfinder");
 const CMN = pathfinder.ClosestMovementNode;
 
-const initial = CMN.Stamp{ .world_revision = 1, .entity_id = 42, .entity_generation = 0, .position_revision = 1, .graph_revision = 1 };
+const initial = CMN.Stamp{ .world_revision = 1, .entity_id = 42, .entity_generation = 0, .position_revision = 1, .position_slot = 0, .graph_revision = 1 };
 const node_zero = CMN.Resolution{ .node_entity = 7, .node_id = 0, .distance = 0 };
 
 test "CMN defaults and legacy writes stay pending; node zero can be published" {

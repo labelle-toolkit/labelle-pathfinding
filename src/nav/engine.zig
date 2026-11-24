@@ -240,6 +240,10 @@ pub fn PathfinderWith(
                     break;
                 }
 
+                // Publish the walker's route endpoint after all movement for
+                // this entity, before arrival callbacks or gameplay matching.
+                if (comptime @hasDecl(@TypeOf(ctx.*), "onPathStep")) ctx.onPathStep(entity, path);
+
                 // Check if arrived at final destination
                 if (path.current_index >= path.len) {
                     arrived_list.append(self.allocator, entity) catch |err| {

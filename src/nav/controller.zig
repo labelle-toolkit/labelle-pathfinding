@@ -97,6 +97,10 @@ const MAX_HORIZONTAL_DISTANCE: f32 = 78.0;
 /// How far (px) a `MovementLink` target may sit from an actual node and
 /// still resolve to it — authored offsets are hand-measured from art.
 pub const LINK_TOLERANCE: f32 = 4.0;
+/// How close a node must be to a remembered waypoint to resume from it
+/// after a rebuild (#60), px. Waypoints are node positions, so only a
+/// node that moved or went away misses.
+const RESUME_TOLERANCE: f32 = 1.0;
 
 /// Maximum distance (px) between an entity's world position and a
 /// movement node before `findNearestNodeInState` treats the entity
@@ -187,9 +191,12 @@ pub const ControllerState = struct {
 
 pub const PreparationStats = struct {
     discovered: usize = 0,
+    domain_discovered: usize = 0,
     pending: usize = 0,
     selected: usize = 0,
     nearest_searches: usize = 0,
+    reused_endpoints: usize = 0,
+    worker_executed: bool = false,
     published: usize = 0,
     off_graph: usize = 0,
     discarded: usize = 0,
@@ -201,7 +208,9 @@ const GraphInput = struct {
     stair: bool,
     link: ?MovementLink,
 };
+const SearchNode = struct { id: NodeId, entity: u64, position: Position };
 const EndpointSnapshot = struct {
+    search: bool = true,
     entity: u64,
     stamp: ClosestMovementNode.Stamp,
     position: Position,
@@ -226,11 +235,19 @@ pub const State = struct {
     pf: Pf,
     preparation_world: u64,
     preparation_enabled: bool = false,
+    preparation_worker: bool = false,
+    search_nodes: std.ArrayListUnmanaged(SearchNode) = .empty,
+    search_epoch: u64 = 0,
+    domain_revision: ?u64 = null,
+    domain_graph_epoch: u64 = 0,
+    domain_watches_ready: bool = false,
+    graph_dependency_revision: ?u64 = null,
     preparation_in_flight: bool = false,
     preparation_stats: PreparationStats = .{},
     preparation_batch: @import("preparation_batch.zig").PreparationBatch = .{},
     preparation_snapshots: std.ArrayListUnmanaged(EndpointSnapshot) = .empty,
     graph_inputs: std.AutoHashMapUnmanaged(u32, GraphInput) = .empty,
+    registered_entities: std.ArrayListUnmanaged(?u64) = .empty,
     allocator: std.mem.Allocator,
     /// Node-ID → entity lookup. Iteration order is deterministic
     /// (insertion order) so simulation replay is stable.
@@ -281,6 +298,13 @@ pub const State = struct {
     /// `advanceDirectMoves`.
     direct_moves: std.AutoArrayHashMapUnmanaged(u64, DirectMove) = .empty,
 
+    /// Where each graph walker was heading (its current waypoint) when
+    /// a rebuild dropped its route, so the re-issue right after resumes
+    /// that segment (#60). Filled by `snapshotSegments`, consumed and
+    /// cleared by the next `rehydrateNavigating`; NOT cleared by `reset`,
+    /// which runs in between, nor by a second rebuild before it.
+    resume_at: std.AutoHashMapUnmanaged(u64, Position) = .empty,
+
     /// Last graph epoch at which the CMN sweep ran — drives the
     /// epoch-change invalidation of `ClosestMovementNode` components
     /// (moved in from the game-side dispatch in v4).
@@ -316,17 +340,21 @@ pub const State = struct {
     pub fn deinit(self: *State) void {
         self.preparation_batch.deinit(self.allocator);
         self.preparation_snapshots.deinit(self.allocator);
+        self.search_nodes.deinit(self.allocator);
         self.graph_inputs.deinit(self.allocator);
+        self.registered_entities.deinit(self.allocator);
         self.nearest_node_cache.deinit();
         self.node_entities.deinit(self.allocator);
         self.pending_entities.deinit(self.allocator);
         self.cache_prune_scratch.deinit(self.allocator);
         self.direct_moves.deinit(self.allocator);
+        self.resume_at.deinit(self.allocator);
         self.pf.deinit();
     }
 
     fn reset(self: *State, allocator: std.mem.Allocator) void {
         self.graph_inputs.clearRetainingCapacity();
+        self.registered_entities.clearRetainingCapacity();
         self.pf.deinit();
         self.node_entities.deinit(self.allocator);
         self.nearest_node_cache.deinit();
@@ -529,6 +557,64 @@ pub const Controller = struct {
         src: std.builtin.SourceLocation,
     ) Result {
         _ = src;
+        // Route on the world's nodes as they are now, not as of the last
+        // `advance` (`maybeRebuildGraph`), so a walk toward nodes spawned
+        // earlier this frame isn't rejected. Before `navigateWith`'s
+        // registered check, so a scene's first nodes route at once.
+        // Only fresh orders: `advance`'s re-issues run right after its
+        // own check.
+        if (findState(game)) |st| maybeRebuildGraph(game, st);
+        return navigateWith(game, entity, target, .{});
+    }
+
+    /// How a re-issued order differs from a fresh `navigate` (#60).
+    const Reissue = struct {
+        /// Start from the node at this position (the waypoint the walker
+        /// was heading to when a rebuild dropped its route) instead of
+        /// the nearest node, so it carries on along the same segment.
+        resume_at: ?Position = null,
+        /// Walker and target on the same node: walk there instead of
+        /// the #207 snap. A re-issue can find the walker partway down
+        /// its last segment, which a snap would jump in one frame.
+        walk_same_node: bool = false,
+    };
+
+    /// The node a re-issued order starts from (#60): the waypoint the
+    /// walker was heading to, while a node still sits there, else the
+    /// nearest node at or below the walker (a fresh `navigate`'s pick).
+    fn reissueFromNode(st: *State, pos: Position, resume_at: ?Position) ?NodeId {
+        if (resume_at) |at| if (st.pf.graph.nearestNodeWithin(at, RESUME_TOLERANCE)) |node| return node;
+        return findNearestNodeInState(st, pos.x, pos.y);
+    }
+
+    /// Walker and target on the same node: walk there, or snap (#207)?
+    /// Only a re-issue walks, and only from outside the arrival radius.
+    fn walksToSameNode(reissue: Reissue, pos: Position, node_pos: Position) bool {
+        return reissue.walk_same_node and !withinDirectArrival(pos, node_pos);
+    }
+
+    /// Start a graph route from `from_node` to `to_node` (the same node
+    /// walks a one-waypoint route) and track it for arrival.
+    fn startRoute(st: *State, entity_id: u64, from_node: NodeId, to_node: NodeId, speed: f32) Result {
+        const maybe_path = st.pf.navigate(entity_id, from_node, to_node, speed) catch |err| {
+            log.err("navigate failed: entity={d} from={d} to={d}: {}", .{ entity_id, from_node, to_node, err });
+            return .{ .rejected = .navigate_error };
+        };
+        if (maybe_path == null) return .{ .rejected = .no_path };
+
+        if (!st.addPending(entity_id)) {
+            // Allocation failure growing the ring. Cancel the route we
+            // just started so we don't leak the entity in the underlying
+            // pathfinder (it'd keep moving without the Controller
+            // tracking it for arrivals). Caller sees `.deferred` and
+            // retries next frame once memory frees up.
+            st.pf.cancel(entity_id);
+            return .{ .deferred = .pending_alloc_failed };
+        }
+        return .accepted;
+    }
+
+    fn navigateWith(game: anytype, entity: anytype, target: Position, reissue: Reissue) Result {
         const st = findState(game) orelse return .{ .rejected = .controller_not_setup };
         if (!st.nodes_registered) return .{ .deferred = .graph_not_built };
 
@@ -585,7 +671,7 @@ pub const Controller = struct {
         // `.rejected` so the dispatch drops the intent rather than
         // retrying forever. (to_node's null result is already
         // `.rejected` for the symmetric reason.)
-        const from_node = findNearestNodeInState(st, pos.x, pos.y) orelse {
+        const from_node = reissueFromNode(st, .{ .x = pos.x, .y = pos.y }, reissue.resume_at) orelse {
             return .{ .rejected = .no_nearby_node };
         };
 
@@ -593,7 +679,12 @@ pub const Controller = struct {
             return .{ .rejected = .no_nearby_node };
         };
 
-        if (from_node == to_node) {
+        // A re-issued order can find the walker partway down its last
+        // segment, heading to this very node: walk the rest (#60) rather
+        // than snap. It walks a one-waypoint route like any graph walk,
+        // so a later rebuild re-validates it and the arrival settles it.
+        const node_pos = st.pf.graph.getPosition(from_node);
+        if (from_node == to_node and !walksToSameNode(reissue, .{ .x = pos.x, .y = pos.y }, node_pos)) {
             // Worker and target resolve to the same node. The worker
             // isn't necessarily AT that node's world position yet —
             // the CMN-per-Euclidean-closest snap means the starting
@@ -605,7 +696,6 @@ pub const Controller = struct {
             // in a "too far from target, re-navigate, same node,
             // redundant" loop forever — #207. Matches the pathfinder's
             // own waypoint snap at ARRIVAL_THRESHOLD.
-            const node_pos = st.pf.graph.getPosition(from_node);
             game.setPosition(entity, .{ .x = node_pos.x, .y = node_pos.y });
             // A redundant navigate IS an arrival — settle it so the
             // `pathfinder__arrived` event fires uniformly (subscribers
@@ -615,26 +705,8 @@ pub const Controller = struct {
             return .redundant;
         }
 
-        const speed = if (game.active_world.ecs_backend.getComponent(entity, MovementSpeed)) |ms|
-            ms.speed
-        else
-            DEFAULT_SPEED;
-
-        const path = st.pf.navigate(entity_id, from_node, to_node, speed) catch |err| {
-            log.err("navigate failed: entity={d} from={d} to={d}: {}", .{ entity_id, from_node, to_node, err });
-            return .{ .rejected = .navigate_error };
-        };
-        if (path == null) return .{ .rejected = .no_path };
-
-        if (!st.addPending(entity_id)) {
-            // Allocation failure growing the ring. Cancel the route we
-            // just started so we don't leak the entity in the underlying
-            // pathfinder (it'd keep moving without the Controller
-            // tracking it for arrivals). Caller sees `.deferred` and
-            // retries next frame once memory frees up.
-            st.pf.cancel(entity_id);
-            return .{ .deferred = .pending_alloc_failed };
-        }
+        const started = startRoute(st, entity_id, from_node, to_node, speedOf(game, entity));
+        if (started != .accepted) return started;
 
         // Persist the order so a mid-walk save re-issues on load (the
         // live route above is transient state).
@@ -680,22 +752,14 @@ pub const Controller = struct {
             i += 1;
         }
 
-        const pos = game.getPosition(entity);
-        const dx = target.x - pos.x;
-        const dy = target.y - pos.y;
-        if (@sqrt(dx * dx + dy * dy) < DIRECT_ARRIVAL_RADIUS) {
+        if (withinDirectArrival(game.getPosition(entity), target)) {
             settleArrival(game, st, entity_id, null);
             return .redundant;
         }
 
-        const speed = if (game.active_world.ecs_backend.getComponent(entity, MovementSpeed)) |ms|
-            ms.speed
-        else
-            DEFAULT_SPEED;
-
         st.direct_moves.put(st.allocator, entity_id, .{
             .target = target,
-            .speed = speed,
+            .speed = speedOf(game, entity),
         }) catch return .{ .deferred = .pending_alloc_failed };
 
         game.active_world.ecs_backend.addComponent(entity, Navigating{
@@ -771,6 +835,225 @@ pub const Controller = struct {
     pub fn graphEpoch(game: anytype) u64 {
         const st = findState(game) orelse return 0;
         return st.graph_epoch;
+    }
+
+    /// Pure prepared matching: no world-position reads, nearest-node search,
+    /// allocation, table rebuild, or fallback. All nonmatches return null.
+    pub fn preparedDistance(game: anytype, from_entity: anytype, to_entity: anytype) ?f32 {
+        const st = findState(game) orelse return null;
+        if (!preparedGraphCurrent(game, st)) return null;
+        const from = preparedEndpointNode(game, st, from_entity) orelse return null;
+        const to = preparedEndpointNode(game, st, to_entity) orelse return null;
+        return st.pf.preparedNodeDistance(from, to);
+    }
+
+    /// Reuse a validated origin across a destination scan; every lookup still
+    /// rejects changes to the origin, world, graph, or destination.
+    pub fn preparedDistancesFrom(game: anytype, entity: anytype) ?PreparedDistances(@TypeOf(game), @TypeOf(entity)) {
+        const st = findState(game) orelse return null;
+        if (!preparedGraphCurrent(game, st)) return null;
+        const node = preparedEndpointNode(game, st, entity) orelse return null;
+        const stamp = if (game.active_world.ecs_backend.hasComponent(entity, MovementNode)) null else game.active_world.ecs_backend.getComponent(entity, ClosestMovementNode).?.stamp;
+        return .{ .game = game, .entity = entity, .node = node, .world = st.preparation_world, .epoch = st.graph_epoch, .stamp = stamp };
+    }
+
+    pub fn PreparedDistances(comptime GamePtr: type, comptime Entity: type) type {
+        return struct {
+            game: GamePtr,
+            entity: Entity,
+            node: NodeId,
+            world: u64,
+            epoch: u64,
+            stamp: ?ClosestMovementNode.Stamp,
+            pub fn to(self: *const @This(), target: anytype) ?f32 {
+                const st = findState(self.game) orelse return null;
+                if (st.preparation_world != self.world or st.graph_epoch != self.epoch or !preparedGraphCurrent(self.game, st)) return null;
+                if (self.stamp) |stamp| {
+                    const cmn = self.game.active_world.ecs_backend.getComponent(self.entity, ClosestMovementNode) orelse return null;
+                    if (cmn.node_id != self.node or !cmn.ready(stamp) or self.game.positionRevisionAt(self.entity, stamp.position_slot) != stamp.position_revision) return null;
+                    if (!registeredIdentity(st, self.node, cmn.node_entity)) return null;
+                } else if (!registeredIdentity(st, self.node, @intCast(self.entity))) return null;
+                const target_node = preparedEndpointNode(self.game, st, target) orelse return null;
+                return st.pf.preparedNodeDistance(self.node, target_node);
+            }
+        };
+    }
+
+    /// Optional shared worker execution. Serial remains the default. A supported
+    /// host may run one half on its persistent worker and one on the main thread;
+    /// every result is joined before prepare returns and remains unpublished.
+    pub fn setPreparationWorker(game: anytype, enabled: bool) void {
+        if (findState(game)) |st| st.preparation_worker = enabled;
+    }
+
+    /// Publish a known placement (for example a ship's docking node). This
+    /// command validates the actual world-space position; it never scans for
+    /// another node and never attaches a CMN to a MovementNode.
+    pub fn publishKnownEndpoint(game: anytype, entity: anytype, node_entity: anytype) !bool {
+        const st = findState(game) orelse return false;
+        if (!preparedGraphCurrent(game, st)) return false;
+        const ecs = &game.active_world.ecs_backend;
+        if (!ecs.entityExists(entity) or ecs.hasComponent(entity, MovementNode)) return false;
+        const node = registeredNode(game, st, node_entity) orelse return false;
+        const pos = game.getWorldPosition(entity);
+        const anchor = st.pf.graph.getPosition(node);
+        const dx = pos.x - anchor.x;
+        const dy = pos.y - anchor.y;
+        const distance_to_node = @sqrt(dx * dx + dy * dy);
+        if (!std.math.isFinite(distance_to_node) or distance_to_node > MAX_NODE_SNAP_DISTANCE or anchor.y > pos.y + Y_FILTER_EPS) return false;
+        return publishEndpointAt(game, st, entity, node, @intCast(node_entity), distance_to_node);
+    }
+
+    fn ensureSearchNodes(st: *State) !void {
+        if (st.search_epoch != st.graph_epoch) {
+            st.search_nodes.clearRetainingCapacity();
+            try st.search_nodes.ensureTotalCapacity(st.allocator, st.pf.graph.totalSlots());
+            for (0..st.pf.graph.totalSlots()) |i| {
+                const id: NodeId = @intCast(i);
+                if (st.pf.graph.isRemoved(id)) continue;
+                st.search_nodes.appendAssumeCapacity(.{ .id = id, .entity = st.node_entities.get(id) orelse continue, .position = st.pf.graph.getPosition(id) });
+            }
+            st.search_epoch = st.graph_epoch;
+        }
+    }
+
+    // Direct movers have no graph edge to own. Reuse a proven nearest-node
+    // region, or resolve again at the new position before publishing.
+    fn publishDirectEndpoint(game: anytype, st: *State, entity: anytype) !void {
+        if (!preparedGraphCurrent(game, st)) return;
+        const ecs = &game.active_world.ecs_backend;
+        _ = try game.trackPositionRevision(entity);
+        const stamp = endpointStamp(game, st, entity) orelse return;
+        var cmn = if (ecs.getComponent(entity, ClosestMovementNode)) |old| old.* else ClosestMovementNode{};
+        const pos = game.getWorldPosition(entity);
+        var resolution = reusePreparedResolution(st, &cmn, stamp, pos);
+        if (resolution == null) {
+            try ensureSearchNodes(st);
+            resolution = resolvePreparedNearest(st.search_nodes.items, pos);
+        }
+        if (!cmn.publish(stamp, stamp, resolution)) return;
+        ecs.addComponent(entity, cmn);
+        game.active_world.position_revisions.acknowledge(@intCast(entity), stamp.position_revision);
+        if (resolution) |ready| publishAttachedEndpoints(game, entity, @as(@TypeOf(entity), @intCast(ready.node_entity)));
+    }
+
+    fn publishEndpointAt(game: anytype, st: *State, entity: anytype, node: NodeId, node_entity: u64, distance_to_node: f32) !bool {
+        const ecs = &game.active_world.ecs_backend;
+        _ = try game.trackPositionRevision(entity);
+        const stamp = endpointStamp(game, st, entity) orelse return false;
+        var cmn = if (ecs.getComponent(entity, ClosestMovementNode)) |old| old.* else ClosestMovementNode{};
+        if (!cmn.publish(stamp, stamp, .{ .node_entity = node_entity, .node_id = node, .distance = distance_to_node })) return false;
+        ecs.addComponent(entity, cmn);
+        game.active_world.position_revisions.acknowledge(@intCast(entity), stamp.position_revision);
+        return true;
+    }
+
+    /// A graph walker owns its current edge. Resolve only its two endpoints,
+    /// never the whole graph. A point on a long authored edge is on-graph even
+    /// beyond the off-route snap radius. External movement fails this geometric
+    /// check and leaves the entity pending for ordinary preparation.
+    fn publishWalkingEndpoint(game: anytype, st: *State, entity: anytype, path: *const movement_path.MovementPath) void {
+        if (!st.preparation_enabled or !preparedGraphCurrent(game, st) or path.len == 0) return;
+        const idx = @min(path.current_index, path.len - 1);
+        const prev = if (idx > 0) idx - 1 else idx;
+        const a = path.positions[prev];
+        const b = path.positions[idx];
+        const pos = game.getWorldPosition(entity);
+        const dx = b.x - a.x;
+        const dy = b.y - a.y;
+        const length2 = dx * dx + dy * dy;
+        const t = if (length2 > 0) ((pos.x - a.x) * dx + (pos.y - a.y) * dy) / length2 else 0;
+        const px = a.x + std.math.clamp(t, 0, 1) * dx;
+        const py = a.y + std.math.clamp(t, 0, 1) * dy;
+        const on_edge = idx > 0 and @abs(pos.x - px) <= 0.05 and @abs(pos.y - py) <= 0.05;
+        var best: ?NodeId = null;
+        var best_distance: f32 = std.math.inf(f32);
+        for ([_]u32{ prev, idx }) |i| {
+            const nid = path.node_path[i];
+            const node_entity = st.node_entities.get(nid) orelse continue;
+            if (!registeredIdentity(st, nid, node_entity)) continue;
+            const anchor = st.pf.graph.getPosition(nid);
+            if (anchor.y > pos.y + Y_FILTER_EPS) continue;
+            const node_distance = @sqrt((pos.x - anchor.x) * (pos.x - anchor.x) + (pos.y - anchor.y) * (pos.y - anchor.y));
+            if (!on_edge and node_distance > MAX_NODE_SNAP_DISTANCE) continue;
+            if (node_distance < best_distance or (node_distance == best_distance and nid < (best orelse std.math.maxInt(NodeId)))) {
+                best = nid;
+                best_distance = node_distance;
+            }
+        }
+        if (best) |nid| {
+            if (publishEndpointAt(game, st, entity, nid, st.node_entities.get(nid).?, best_distance) catch false)
+                publishAttachedEndpoints(game, entity, @intCast(st.node_entities.get(nid).?));
+        }
+    }
+
+    // Carried items follow the walker's known node while within the normal
+    // placement radius. Only already tracked descendants participate; dropping
+    // or moving them independently still invalidates through the shared API.
+    fn publishAttachedEndpoints(game: anytype, parent: anytype, node_entity: @TypeOf(parent)) void {
+        if (comptime @hasDecl(@TypeOf(game.*), "getChildren")) {
+            for (game.getChildren(parent)) |child| {
+                if (game.positionRevision(child) != null)
+                    _ = publishKnownEndpoint(game, child, node_entity) catch false;
+                publishAttachedEndpoints(game, child, node_entity);
+            }
+        }
+    }
+
+    /// Lifecycle gate, separate from matching: false means retry preparation
+    /// before concluding that an active job/raid has no reachable candidates.
+    /// Off-graph is a completed result, while pending/stale is not.
+    pub fn endpointPreparationComplete(game: anytype, entity: anytype) bool {
+        const st = findState(game) orelse return false;
+        if (!preparedGraphCurrent(game, st)) return false;
+        const ecs = &game.active_world.ecs_backend;
+        if (!ecs.entityExists(entity)) return false;
+        if (ecs.hasComponent(entity, MovementNode)) return preparedEndpointNode(game, st, entity) != null;
+        const cmn = ecs.getComponent(entity, ClosestMovementNode) orelse return false;
+        return preparedStampCurrent(game, st, entity, cmn);
+    }
+
+    fn preparedGraphCurrent(game: anytype, st: *State) bool {
+        const revision = st.graph_dependency_revision orelse return false;
+        return st.preparation_enabled and st.nodes_registered and
+            revision == game.dependencyRevision() and !st.pf.graph.dirty and st.pf.fw != null;
+    }
+
+    fn registeredNode(game: anytype, st: *State, entity: anytype) ?NodeId {
+        const ecs = &game.active_world.ecs_backend;
+        if (!ecs.entityExists(entity)) return null;
+        const node = ecs.getComponent(entity, MovementNode) orelse return null;
+        if (st.node_entities.get(node.node_id) != @as(u64, @intCast(entity)) or st.pf.graph.isRemoved(node.node_id)) return null;
+        return node.node_id;
+    }
+
+    fn preparedStampCurrent(game: anytype, st: *State, entity: anytype, cmn: *const ClosestMovementNode) bool {
+        const stamp = cmn.stamp;
+        return cmn.status != .pending and stamp.world_revision == st.preparation_world and
+            stamp.entity_id == @as(u64, @intCast(entity)) and stamp.graph_revision == st.graph_epoch and
+            stamp.position_revision != 0 and game.positionRevisionAt(entity, stamp.position_slot) == stamp.position_revision;
+    }
+
+    fn registeredIdentity(st: *State, node: NodeId, entity: u64) bool {
+        const registered = if (node < st.registered_entities.items.len)
+            st.registered_entities.items[node] orelse st.node_entities.get(node)
+        else
+            st.node_entities.get(node);
+        return registered == entity and !st.pf.graph.isRemoved(node);
+    }
+
+    fn preparedEndpointNode(game: anytype, st: *State, entity: anytype) ?NodeId {
+        const ecs = &game.active_world.ecs_backend;
+        if (!ecs.entityExists(entity)) return null;
+        if (ecs.getComponent(entity, MovementNode)) |node| {
+            return if (registeredIdentity(st, node.node_id, @intCast(entity))) node.node_id else null;
+        }
+        const cmn = ecs.getComponent(entity, ClosestMovementNode) orelse return null;
+        if (cmn.status != .ready or !preparedStampCurrent(game, st, entity, cmn)) return null;
+        // The graph dependency token rejects node destruction/component changes.
+        // Its immutable, generation-qualified registration needs no ECS reread.
+        if (!registeredIdentity(st, cmn.node_id, cmn.node_entity)) return null;
+        return cmn.node_id;
     }
 
     /// Graph path-length between two game entities, via each entity's
@@ -933,7 +1216,7 @@ pub const Controller = struct {
             const dx = node_pos.x - pos.x;
             const dy = node_pos.y - pos.y;
             const ne = st.node_entities.get(nid) orelse 0;
-            ecs.addComponent(target_entity, components.ClosestMovementNode{
+            if (!st.preparation_enabled) ecs.addComponent(target_entity, components.ClosestMovementNode{
                 .node_entity = ne,
                 .node_id = nid,
                 .distance = @sqrt(dx * dx + dy * dy),
@@ -1031,15 +1314,18 @@ pub const Controller = struct {
         return @sqrt(dx * dx + dy * dy);
     }
 
-    /// Re-resolve the entity's `ClosestMovementNode` immediately (v4:
-    /// replaces the game-side `PendingRepath` marker + next-tick
-    /// resolve round-trip — the plugin owns the CMN component, so
-    /// there's nothing to defer). Removes the CMN when the entity is
-    /// off-graph (no node within `MAX_NODE_SNAP_DISTANCE`).
+    /// In preparation mode, invalidate and queue the endpoint while retaining
+    /// its last published node for debugging. Legacy mode resolves immediately
+    /// and removes the component if no node is in range.
     pub fn requestRepath(game: anytype, entity: anytype) void {
         const st = findState(game) orelse return;
         const entity_id: u64 = @intCast(entity);
         const ecs = &game.active_world.ecs_backend;
+        if (st.preparation_enabled) {
+            if (ecs.getComponent(entity, ClosestMovementNode)) |cmn| cmn.invalidate(.position);
+            game.active_world.position_revisions.markPending(entity_id);
+            return;
+        }
         const pos = game.getWorldPosition(entity);
         if (findNearestNodeForEntity(st, entity_id, pos.x, pos.y)) |nid| {
             const node_pos = st.pf.graph.getPosition(nid);
@@ -1128,7 +1414,67 @@ pub const Controller = struct {
         st.preparation_enabled = true;
     }
 
-    /// Serial snapshot + compute phase. Feed a union of game-owned domain views
+    /// Pending-only preparation for one fixed union of component types per
+    /// world/controller. Shared membership changes trigger discovery; ordinary
+    /// movement only enqueues already registered endpoints. Queries stay pure.
+    pub fn prepareEndpointDomains(game: anytype, comptime domains: anytype, budget: usize) !PreparationStats {
+        const st = findState(game) orelse return .{};
+        if (st.preparation_in_flight) return error.PreparationInProgress;
+        const tracker = &game.active_world.position_revisions;
+        const ecs = &game.active_world.ecs_backend;
+        if (!st.domain_watches_ready) {
+            inline for (domains) |T| try tracker.watchMembership(game.allocator, T);
+            try tracker.watchMembership(game.allocator, MovementNode);
+            try tracker.watchMembership(game.allocator, ClosestMovementNode);
+            st.domain_watches_ready = true;
+        }
+        var discovered: usize = 0;
+        if (st.domain_revision == null or st.domain_revision.? != tracker.membership_revision) {
+            // Commit the revision only after every registration succeeds. OOM
+            // leaves the discovery pass retryable and publishes nothing.
+            inline for (domains) |T| {
+                var view = ecs.view(.{T}, .{});
+                defer view.deinit();
+                while (view.next()) |entity| {
+                    discovered += 1;
+                    if (!ecs.hasComponent(entity, MovementNode)) {
+                        try tracker.watchChanges(game.allocator, @intCast(entity));
+                        const current = if (ecs.getComponent(entity, ClosestMovementNode)) |cmn| preparedStampCurrent(game, st, entity, cmn) else false;
+                        if (!current) tracker.markPending(@intCast(entity));
+                    }
+                }
+            }
+            st.domain_revision = tracker.membership_revision;
+        }
+        if (st.domain_graph_epoch != st.graph_epoch) {
+            tracker.markAllPending();
+            st.domain_graph_epoch = st.graph_epoch;
+        }
+        const Entity = @TypeOf(game.*).EntityType;
+        var participants = struct {
+            game: @TypeOf(game),
+            pending: @TypeOf(tracker.pendingIterator()),
+            pub fn next(self: *@This()) ?Entity {
+                while (self.pending.next()) |id| {
+                    const entity: Entity = @intCast(id);
+                    const backend = &self.game.active_world.ecs_backend;
+                    if (backend.entityExists(entity) and !backend.hasComponent(entity, MovementNode)) {
+                        inline for (domains) |T| {
+                            if (backend.hasComponent(entity, T)) return entity;
+                        }
+                    }
+                    self.game.active_world.position_revisions.unwatchChanges(id);
+                }
+                return null;
+            }
+        }{ .game = game, .pending = tracker.pendingIterator() };
+        var result = try prepareEndpointBatch(game, &participants, budget);
+        result.domain_discovered = discovered;
+        st.preparation_stats.domain_discovered = discovered;
+        return result;
+    }
+
+    /// Joined snapshot + compute phase. Feed a union of game-owned domain views
     /// once per frame after movement. The caller owns/deinitializes the iterator
     /// before calling publishEndpointBatch. No CMN is written here.
     pub fn prepareEndpointBatch(game: anytype, participants: anytype, budget: usize) !PreparationStats {
@@ -1146,14 +1492,16 @@ pub const Controller = struct {
         while (participants.next()) |entity| {
             st.preparation_stats.discovered += 1;
             if (!ecs.entityExists(entity) or ecs.hasComponent(entity, MovementNode)) continue;
-            if (endpointStamp(game, st, entity)) |stamp| {
-                if (ecs.getComponent(entity, ClosestMovementNode)) |cmn| {
-                    if (cmn.current(stamp)) continue;
+            if (ecs.getComponent(entity, ClosestMovementNode)) |cmn| {
+                if (preparedStampCurrent(game, st, entity, cmn)) {
+                    game.active_world.position_revisions.acknowledge(@intCast(entity), cmn.stamp.position_revision);
+                    continue;
                 }
             }
             st.preparation_stats.pending += 1;
             st.preparation_batch.consider(@intCast(entity));
         }
+        try ensureSearchNodes(st);
         const Entity = @TypeOf(game.*).EntityType;
         // Snapshot every selected entity before searching or publishing any.
         // OOM can register revision tokens, but cannot publish a partial batch.
@@ -1168,15 +1516,21 @@ pub const Controller = struct {
             });
         }
         for (st.preparation_snapshots.items) |*snapshot| {
-            st.preparation_stats.nearest_searches += 1;
-            if (findNearestNodeInState(st, snapshot.position.x, snapshot.position.y)) |node| {
-                const node_entity = st.node_entities.get(node) orelse continue;
-                const pos = st.pf.graph.getPosition(node);
-                const dx = pos.x - snapshot.position.x;
-                const dy = pos.y - snapshot.position.y;
-                snapshot.resolution = .{ .node_entity = node_entity, .node_id = node, .distance = @sqrt(dx * dx + dy * dy) };
+            const entity: Entity = @intCast(snapshot.entity);
+            if (ecs.getComponent(entity, ClosestMovementNode)) |cmn| {
+                if (reusePreparedResolution(st, cmn, snapshot.stamp, snapshot.position)) |resolution| {
+                    snapshot.resolution = resolution;
+                    snapshot.search = false;
+                    st.preparation_stats.reused_endpoints += 1;
+                    continue;
+                }
             }
+            st.preparation_stats.nearest_searches += 1;
         }
+        var job = SearchJob{ .nodes = st.search_nodes.items, .endpoints = st.preparation_snapshots.items };
+        if (st.preparation_worker) {
+            st.preparation_stats.worker_executed = game.active_world.snapshot_executor.run(&job, job.endpoints.len, SearchJob.run);
+        } else SearchJob.run(&job, 0, job.endpoints.len);
         st.preparation_stats.selected = st.preparation_batch.selected.items.len;
         st.preparation_stats.discarded = st.preparation_stats.selected - st.preparation_snapshots.items.len;
         st.preparation_in_flight = true;
@@ -1217,6 +1571,7 @@ pub const Controller = struct {
                         var cmn = if (ecs.getComponent(entity, ClosestMovementNode)) |old| old.* else ClosestMovementNode{};
                         if (cmn.publish(snapshot.stamp, stamp, snapshot.resolution)) {
                             ecs.addComponent(entity, cmn);
+                            game.active_world.position_revisions.acknowledge(snapshot.entity, stamp.position_revision);
                             st.preparation_stats.published += 1;
                             if (snapshot.resolution == null) st.preparation_stats.off_graph += 1;
                             continue;
@@ -1237,6 +1592,7 @@ pub const Controller = struct {
             // The complete ECS handle, including generation, is the identity.
             .entity_id = @intCast(entity),
             .position_revision = revision,
+            .position_slot = game.positionRevisionSlot(entity) orelse return null,
             .graph_revision = st.graph_epoch,
         };
     }
@@ -1245,6 +1601,7 @@ pub const Controller = struct {
     /// actual ECS inputs, including ancestor movement and authored edge edits.
     fn graphInputsCurrent(game: anytype, st: *State) bool {
         if (!st.nodes_registered or st.graph_epoch == 0) return false;
+        if (st.graph_dependency_revision == null or st.graph_dependency_revision.? != game.dependencyRevision()) return false;
         if (st.graph_inputs.count() != st.node_entities.count()) return false;
         const ecs = &game.active_world.ecs_backend;
         var view = ecs.view(.{MovementNode}, .{});
@@ -1337,8 +1694,30 @@ pub const Controller = struct {
     /// up to date with the current entity set.
     pub fn rebuildGraph(game: anytype) void {
         const st = findState(game) orelse return;
+        snapshotSegments(st);
         st.reset(st.allocator);
         buildGraphIntoState(game, st);
+    }
+
+    /// Before a rebuild drops every live route, remember the waypoint
+    /// each graph walker was heading to, so `rehydrateNavigating`
+    /// resumes that segment (#60). Without it the re-issue resolves the
+    /// nearest node at or below the walker: on a downward segment
+    /// that's the destination (a snap, a jump), elsewhere it can be a
+    /// node behind it or beside the segment (a walk back, or off it).
+    /// An allocation failure only loses the hint: those walkers fall
+    /// back to the nearest-node re-issue.
+    ///
+    /// Hints from an earlier rebuild are kept, not cleared: two rebuilds
+    /// can land before the next `advance` (an explicit one, then a node
+    /// count change), and the second sees no live routes, since the
+    /// first dropped them. A live route overwrites its walker's hint.
+    fn snapshotSegments(st: *State) void {
+        for (st.pf.active.keys(), st.pf.active.values()) |id, entry| {
+            const path = entry.path;
+            if (path.current_index >= path.len) continue;
+            st.resume_at.put(st.allocator, id, path.positions[path.current_index]) catch return;
+        }
     }
 
     // ------------------------------------------------------------------
@@ -1347,10 +1726,26 @@ pub const Controller = struct {
 
     fn buildGraphIntoState(game: anytype, st: *State) void {
         const ecs = &game.active_world.ecs_backend;
+        st.graph_dependency_revision = null;
+        var watches_ok = st.preparation_enabled;
+        if (st.preparation_enabled) {
+            game.watchComponentDependency(MovementNode) catch {
+                watches_ok = false;
+            };
+            game.watchComponentDependency(MovementStair) catch {
+                watches_ok = false;
+            };
+            game.watchComponentDependency(MovementLink) catch {
+                watches_ok = false;
+            };
+        }
         var view = ecs.view(.{MovementNode}, .{});
         defer view.deinit();
 
         while (view.next()) |entity| {
+            if (st.preparation_enabled) game.watchPositionDependency(entity) catch {
+                watches_ok = false;
+            };
             // World position, not local: movement nodes declared
             // inside a room prefab (`Room.movement_nodes`) end up as
             // children of the room entity, so `getPosition` returns
@@ -1379,6 +1774,14 @@ pub const Controller = struct {
                 log.err("failed to track node {d}: {}", .{ node_id, err });
             };
             if (st.preparation_enabled) {
+                const old_len = st.registered_entities.items.len;
+                if (st.registered_entities.resize(st.allocator, @as(usize, node_id) + 1)) |_| {
+                    @memset(st.registered_entities.items[old_len..], null);
+                    st.registered_entities.items[node_id] = entity_id;
+                } else |_| {
+                    // Optional fast index: the canonical registration map remains
+                    // usable. Allocation failure must not invalidate graph watches.
+                }
                 st.graph_inputs.put(st.allocator, node_id, .{
                     .position = pos,
                     .stair = is_stair,
@@ -1393,6 +1796,7 @@ pub const Controller = struct {
         linkAuthoredEdges(game, st);
 
         st.nodes_registered = st.node_entities.count() > 0;
+        if (watches_ok) st.graph_dependency_revision = game.dependencyRevision();
         if (st.nodes_registered) {
             log.info("graph built: {d} nodes (Floyd-Warshall)", .{st.node_entities.count()});
         }
@@ -1438,32 +1842,48 @@ pub const Controller = struct {
         return n;
     }
 
-    fn isGraphStale(game: anytype, st: *State) bool {
-        if (st.node_entities.count() == 0) return false;
+    /// The graph no longer matches the world's MovementNode set.
+    ///
+    /// The live count catches additions and removals (v4: a newly built
+    /// room or carcase spawning nodes used to need a game-side
+    /// `PathfinderRebuild` marker). With an equal count, every tracked
+    /// node must still be a MovementNode entity: that catches a swapped
+    /// set, nodes removed and others added in the same frame, which the
+    /// count alone, and the old first-node-exists probe, both missed
+    /// (FP Trello 2myCi3yH). Equal count + every tracked node alive
+    /// means the same set, since entity ids are unique.
+    fn nodeSetChanged(game: anytype, st: *State) bool {
         const ecs = &game.active_world.ecs_backend;
-        const first_id = st.node_entities.values()[0];
         const Entity = @TypeOf(game.*).EntityType;
-        const first_entity: Entity = @intCast(first_id);
-        return !ecs.entityExists(first_entity);
+        const Probe = struct {
+            ecs_ptr: @TypeOf(ecs),
+            pub fn isNode(self: @This(), entity_id: u64) bool {
+                const e: Entity = @intCast(entity_id);
+                return self.ecs_ptr.entityExists(e) and self.ecs_ptr.hasComponent(e, MovementNode);
+            }
+        };
+        return trackedNodesDiffer(st.node_entities.values(), countMovementNodes(game), Probe{ .ecs_ptr = ecs });
     }
 
+    /// Rebuild the graph when the node set changed. Runs at the top of
+    /// `advance`, and of every fresh `navigate`: nodes spawned earlier in
+    /// the same frame (a section's catwalk, a new room) would otherwise
+    /// be invisible until the next `advance`, and a `navigate` toward
+    /// them came back `.rejected` / `no_nearby_node` (FP Trello
+    /// 2myCi3yH; #1123 worked around it for the turbine repairer only).
+    /// Bursts still rebuild once: the first caller after a change
+    /// rebuilds, later ones find the set unchanged.
+    ///
+    /// Walkers whose routes the rebuild drops resume on the next
+    /// `advance` (`snapshotSegments` + `rehydrateNavigating`), as after
+    /// a rebuild there. The O(nodes) check per call is noise next to a
+    /// route query.
     fn maybeRebuildGraph(game: anytype, st: *State) void {
-        // Count-based change detection (v4): node ADDITIONS (a newly
-        // built room/carcase spawning MovementNodes) are invisible to
-        // the first-node-exists staleness probe, and previously needed
-        // a game-side `PathfinderRebuild` marker + debounce script.
-        // Comparing the live count against the tracked set catches
-        // additions and removals alike, with natural burst-debounce
-        // (however many nodes spawn in one frame, the next `advance`
-        // rebuilds once). The O(nodes) view walk per tick is noise
-        // next to the navigation tick it rides with.
-        const live = countMovementNodes(game);
-        const tracked: u32 = @intCast(st.node_entities.count());
-        const count_changed = live != tracked;
-        const stale = st.nodes_registered and isGraphStale(game, st);
-        const inputs_changed = st.preparation_enabled and live > 0 and !graphInputsCurrent(game, st);
-        if (!count_changed and !stale and !inputs_changed) return;
-
+        // The rc line's prepared queries also rebuild when the graph's
+        // inputs (node positions, links) moved without the set changing.
+        const inputs_changed = st.preparation_enabled and countMovementNodes(game) > 0 and !graphInputsCurrent(game, st);
+        if (!nodeSetChanged(game, st) and !inputs_changed) return;
+        snapshotSegments(st);
         st.reset(st.allocator);
         buildGraphIntoState(game, st);
     }
@@ -1501,7 +1921,12 @@ pub const Controller = struct {
             const pos = game.getPosition(entity);
             switch (directStep(pos, dm.target, dm.speed, dt)) {
                 .arrived => settled.append(st.allocator, entity_id) catch break,
-                .move => |next| game.setPosition(entity, next),
+                .move => |next| {
+                    game.setPosition(entity, next);
+                    if (st.preparation_enabled) {
+                        publishDirectEndpoint(game, st, entity) catch {};
+                    }
+                },
             }
         }
 
@@ -1521,6 +1946,9 @@ pub const Controller = struct {
     /// A re-issue that no longer resolves (graph changed under the
     /// save) settles as a failure so the order can't dangle forever.
     fn rehydrateNavigating(st: *State, game: anytype) void {
+        // The segment hints are for the re-issue right after a rebuild,
+        // never a later one.
+        defer st.resume_at.clearRetainingCapacity();
         if (!st.nodes_registered) return;
         const Entity = @TypeOf(game.*).EntityType;
         const ecs = &game.active_world.ecs_backend;
@@ -1546,7 +1974,10 @@ pub const Controller = struct {
                 .direct => {
                     _ = moveTo(game, entity, target);
                 },
-                .graph => switch (navigate(game, entity, target, @src())) {
+                .graph => switch (navigateWith(game, entity, target, .{
+                    .resume_at = st.resume_at.get(id),
+                    .walk_same_node = true,
+                })) {
                     .accepted, .redundant => {},
                     // Deferred is transient (graph mid-rebuild) — keep the
                     // order, retry next tick.
@@ -1666,6 +2097,19 @@ pub const Controller = struct {
 // Shared helpers
 // ============================================================================
 
+/// Pure core of `Controller.nodeSetChanged`: `tracked` (the graph's
+/// node entities) differs from the world's set of `live_count` nodes, as
+/// `probe.isNode(entity_id)` sees it. Equal counts with every tracked
+/// node still a node means the same set (entity ids are unique). Public
+/// for the unit tests.
+pub fn trackedNodesDiffer(tracked: []const u64, live_count: u32, probe: anytype) bool {
+    if (tracked.len != live_count) return true;
+    for (tracked) |id| {
+        if (!probe.isNode(id)) return true;
+    }
+    return false;
+}
+
 /// Prune `nearest_node_cache` entries whose entity is no longer alive,
 /// as judged by `probe.alive(entity_id) bool` (#493). Two-pass: collect
 /// the dead keys into the State's persistent `cache_prune_scratch` (an
@@ -1784,6 +2228,88 @@ pub fn cachedNearestStillValid(cached: CachedNearest, x: f32, y: f32) bool {
     return dx * dx + dy * dy < CACHE_POS_THRESHOLD_SQ;
 }
 
+/// Reuse is preparation work, never a distance-query fallback. The original
+/// sample/radius are retained so small moves cannot accumulate unchecked drift.
+fn reusePreparedResolution(st: *State, cmn: *const ClosestMovementNode, stamp: ClosestMovementNode.Stamp, pos: Position) ?ClosestMovementNode.Resolution {
+    if (cmn.status == .off_graph or !cmn.stamp.eql(cmn.last_ready_stamp) or cmn.stamp.world_revision != stamp.world_revision or
+        cmn.stamp.entity_id != stamp.entity_id or cmn.stamp.graph_revision != stamp.graph_revision or
+        cmn.invalidation == .graph or cmn.invalidation == .world) return null;
+    if (!Controller.registeredIdentity(st, cmn.node_id, cmn.node_entity)) return null;
+    const region = cmn.reuse;
+    if (!(region.radius > 0) or !std.math.isFinite(pos.x) or !std.math.isFinite(pos.y)) return null;
+    if (@as(f64, pos.y) < region.min_y or @as(f64, pos.y) >= region.max_y) return null;
+    const dx = @as(f64, pos.x) - region.x;
+    const dy = @as(f64, pos.y) - region.y;
+    if (dx * dx + dy * dy >= region.radius * region.radius) return null;
+    const node_pos = st.pf.graph.getPosition(cmn.node_id);
+    const nx = node_pos.x - pos.x;
+    const ny = node_pos.y - pos.y;
+    const distance = @sqrt(nx * nx + ny * ny);
+    if (!std.math.isFinite(distance) or distance > MAX_NODE_SNAP_DISTANCE or node_pos.y > pos.y + Y_FILTER_EPS) return null;
+    return .{ .node_entity = cmn.node_entity, .node_id = cmn.node_id, .distance = distance, .reuse = region };
+}
+
+const SearchJob = struct {
+    nodes: []const SearchNode,
+    endpoints: []EndpointSnapshot,
+    fn run(raw: *anyopaque, start: usize, end: usize) void {
+        const job: *@This() = @ptrCast(@alignCast(raw));
+        for (job.endpoints[start..end]) |*endpoint| {
+            if (endpoint.search) endpoint.resolution = resolvePreparedNearest(job.nodes, endpoint.position);
+        }
+    }
+};
+
+/// Same selection/tie order as findNearestNodeInState, with a conservative region
+/// where the winner cannot change. Distance differences are 2-Lipschitz: moving
+/// less than one quarter of the runner-up gap stays strictly inside that region.
+/// Separate Y bounds preserve the eligible node set during horizontal movement.
+fn resolvePreparedNearest(nodes: []const SearchNode, pos: Position) ?ClosestMovementNode.Resolution {
+    if (!std.math.isFinite(pos.x) or !std.math.isFinite(pos.y)) return null;
+    var best: ?SearchNode = null;
+    var best_distance: f32 = std.math.inf(f32);
+    var best_exact: f64 = std.math.inf(f64);
+    var second_exact: f64 = std.math.inf(f64);
+    var min_y: f64 = -std.math.inf(f64);
+    var max_y: f64 = std.math.inf(f64);
+    for (nodes) |node| {
+        const point = node.position;
+        const boundary = @as(f64, point.y) - Y_FILTER_EPS;
+        const padding = 0.00001 * @max(1, @max(@abs(@as(f64, point.y)), @abs(@as(f64, pos.y))));
+        if (point.y > pos.y + Y_FILTER_EPS) {
+            max_y = @min(max_y, boundary - padding);
+            continue;
+        }
+        min_y = @max(min_y, boundary + padding);
+        const dx = point.x - pos.x;
+        const dy = point.y - pos.y;
+        const distance = @sqrt(dx * dx + dy * dy);
+        const ex = @as(f64, point.x) - pos.x;
+        const ey = @as(f64, point.y) - pos.y;
+        const exact = @sqrt(ex * ex + ey * ey);
+        if (distance < best_distance) {
+            second_exact = @min(second_exact, best_exact);
+            best_distance = distance;
+            best_exact = exact;
+            best = node;
+        } else {
+            second_exact = @min(second_exact, exact);
+        }
+    }
+    const node = best orelse return null;
+    if (best_distance > MAX_NODE_SNAP_DISTANCE) return null;
+
+    const gap = if (std.math.isFinite(second_exact)) second_exact - best_exact else MAX_NODE_SNAP_DISTANCE;
+    // Leave generous room for the f32 arithmetic used by the reference selector.
+    const rounding_guard = 0.0001 * @max(1, best_exact);
+    return .{
+        .node_entity = node.entity,
+        .node_id = node.id,
+        .distance = best_distance,
+        .reuse = .{ .x = pos.x, .y = pos.y, .radius = @max(0, gap * 0.25 - rounding_guard), .min_y = min_y, .max_y = max_y },
+    };
+}
+
 pub fn findNearestNodeInState(st: *State, x: f32, y: f32) ?NodeId {
     const slots = st.pf.graph.totalSlots();
     if (slots == 0) return null;
@@ -1809,6 +2335,18 @@ pub fn findNearestNodeInState(st: *State, x: f32, y: f32) ?NodeId {
     // can't silently route through a far-away node.
     if (best_dist > MAX_NODE_SNAP_DISTANCE) return null;
     return best;
+}
+
+/// Walk speed for `entity`: its `MovementSpeed`, else `DEFAULT_SPEED`.
+fn speedOf(game: anytype, entity: anytype) f32 {
+    return if (game.active_world.ecs_backend.getComponent(entity, MovementSpeed)) |ms| ms.speed else DEFAULT_SPEED;
+}
+
+/// Whether `pos` is already within `DIRECT_ARRIVAL_RADIUS` of `target`.
+fn withinDirectArrival(pos: Position, target: Position) bool {
+    const dx = target.x - pos.x;
+    const dy = target.y - pos.y;
+    return @sqrt(dx * dx + dy * dy) < DIRECT_ARRIVAL_RADIUS;
 }
 
 /// One straight-line walk step: arrived when within
@@ -1845,6 +2383,17 @@ fn settleArrival(game: anytype, st: *State, entity_id: u64, goal_node: ?NodeId) 
     if (!ecs.entityExists(entity)) return;
 
     ecs.removeComponent(entity, Navigating);
+    if (st.preparation_enabled) {
+        var arrival_node: u64 = 0;
+        if (goal_node) |node| {
+            if (st.node_entities.get(node)) |node_entity| {
+                if (Controller.publishKnownEndpoint(game, entity, @as(Entity, @intCast(node_entity))) catch false) arrival_node = node_entity;
+            }
+        }
+        if (arrival_node == 0) Controller.requestRepath(game, entity);
+        emitGameEvent(game, "pathfinder__arrived", .{ .entity = entity_id, .node_entity = arrival_node });
+        return;
+    }
 
     // CMN refresh replaces the old game-side arrival → NeedsClosestNode
     // marker → next-tick resolve round-trip: the plugin owns the CMN
@@ -1930,6 +2479,11 @@ fn GameCtx(comptime GameType: type) type {
     return struct {
         game: GameType,
         st: *State,
+
+        pub fn onPathStep(self: *@This(), entity_id: u64, path: *const movement_path.MovementPath) void {
+            const Entity = @TypeOf(self.game.*).EntityType;
+            Controller.publishWalkingEndpoint(self.game, self.st, @as(Entity, @intCast(entity_id)), path);
+        }
 
         pub fn onArrived(self: *@This(), entity_id: u64, goal_node: NodeId) void {
             settleArrival(self.game, self.st, entity_id, goal_node);
@@ -2201,4 +2755,101 @@ test "walk origin refreshes between scans after movement and graph rebuild" {
     try st.node_entities.put(st.allocator, replacement, 200);
     const rebuilt = WalkOrigin.resolve(&st, 10, .{ .x = 60, .y = 0 });
     try std.testing.expectEqual(@as(f32, 0), rebuilt.distanceToPosition(20, .{ .x = 60, .y = 0 }));
+}
+
+test "a rebuild resumes a walker's segment, not the node behind it (#60)" {
+    var st = State.init(std.testing.allocator);
+    defer st.deinit();
+    // A stair, bottom to top; the walker climbs from `bottom` to `top`.
+    const bottom = try st.pf.addNode(.{ .x = 0, .y = 0 }, true);
+    _ = try st.pf.addNode(.{ .x = 0, .y = 93 }, true);
+    const top = try st.pf.addNode(.{ .x = 0, .y = 186 }, true);
+    _ = try st.pf.navigate(7, bottom, top, 60);
+    // Partway up the first segment, heading for the middle node.
+    st.pf.active.getPtr(7).?.path.current_index = 1;
+
+    Controller.snapshotSegments(&st);
+    st.reset(std.testing.allocator);
+    // The rebuilt graph: the same stair, plus the node whose arrival
+    // triggered the rebuild.
+    const bottom2 = try st.pf.addNode(.{ .x = 0, .y = 0 }, true);
+    const middle2 = try st.pf.addNode(.{ .x = 0, .y = 93 }, true);
+    _ = try st.pf.addNode(.{ .x = 0, .y = 186 }, true);
+    _ = try st.pf.addNode(.{ .x = 60, .y = 0 }, false);
+
+    const walker: Position = .{ .x = 0, .y = 50 };
+    // The nearest node at or below the climber is the one it left: a
+    // re-issue from there walks it back down.
+    try std.testing.expectEqual(bottom2, Controller.reissueFromNode(&st, walker, null).?);
+    // The remembered waypoint carries it on up.
+    const resume_at = st.resume_at.get(7) orelse return error.TestExpectedSnapshot;
+    try std.testing.expectEqual(middle2, Controller.reissueFromNode(&st, walker, resume_at).?);
+}
+
+test "a re-issue walks the rest of its last segment; a fresh navigate still snaps (#60, #207)" {
+    const node: Position = .{ .x = 0, .y = 0 };
+    // 40 px short of the destination node, as a walker heading down its
+    // last segment is when the rebuild lands.
+    const partway: Position = .{ .x = 0, .y = 40 };
+    try std.testing.expect(Controller.walksToSameNode(.{ .walk_same_node = true }, partway, node));
+    try std.testing.expect(!Controller.walksToSameNode(.{}, partway, node));
+    // Already within the arrival radius: settles in place.
+    try std.testing.expect(!Controller.walksToSameNode(.{ .walk_same_node = true }, .{ .x = 0, .y = 2 }, node));
+}
+
+test "a re-issued last leg stays graph-tracked, so the next rebuild re-validates it (#60)" {
+    var st = State.init(std.testing.allocator);
+    defer st.deinit();
+    const bottom = try st.pf.addNode(.{ .x = 0, .y = 0 }, true);
+    _ = try st.pf.addNode(.{ .x = 0, .y = 93 }, true);
+
+    // A rebuild found the walker partway down to `bottom`, its
+    // destination's node: the re-issue walks a one-waypoint route.
+    try std.testing.expectEqual(Result.accepted, Controller.startRoute(&st, 7, bottom, bottom, 60));
+    try std.testing.expect(st.pf.isNavigating(7));
+    try std.testing.expect(!st.direct_moves.contains(7));
+    try std.testing.expectEqualSlices(u64, &.{7}, st.pending_entities.items);
+
+    // A second rebuild snapshots that leg and drops it with the other
+    // routes, leaving the order for `rehydrateNavigating` to re-issue
+    // against the new graph (re-route, or fail it).
+    Controller.snapshotSegments(&st);
+    st.reset(std.testing.allocator);
+    try std.testing.expect(!st.pf.isNavigating(7));
+    try std.testing.expect(!st.direct_moves.contains(7));
+    try std.testing.expectEqual(@as(usize, 0), st.pending_entities.items.len);
+    const resume_at = st.resume_at.get(7) orelse return error.TestExpectedSnapshot;
+    try std.testing.expectEqual(Position{ .x = 0, .y = 0 }, resume_at);
+
+    // The rebuilt graph lost the destination: the hint no longer
+    // resolves, so the re-issue falls back to the nearest-node pick.
+    const top2 = try st.pf.addNode(.{ .x = 0, .y = 93 }, true);
+    try std.testing.expectEqual(@as(?NodeId, null), st.pf.graph.nearestNodeWithin(resume_at, RESUME_TOLERANCE));
+    try std.testing.expectEqual(top2, Controller.reissueFromNode(&st, .{ .x = 0, .y = 120 }, resume_at).?);
+}
+
+test "a second rebuild before the re-issue keeps the waypoint hints (#60)" {
+    var st = State.init(std.testing.allocator);
+    defer st.deinit();
+    const bottom = try st.pf.addNode(.{ .x = 0, .y = 0 }, true);
+    _ = try st.pf.addNode(.{ .x = 0, .y = 93 }, true);
+    const top = try st.pf.addNode(.{ .x = 0, .y = 186 }, true);
+    _ = try st.pf.navigate(7, bottom, top, 60);
+    st.pf.active.getPtr(7).?.path.current_index = 1;
+
+    Controller.snapshotSegments(&st);
+    st.reset(std.testing.allocator);
+    // The second rebuild: no live routes left to snapshot.
+    Controller.snapshotSegments(&st);
+    st.reset(std.testing.allocator);
+    try std.testing.expectEqual(Position{ .x = 0, .y = 93 }, st.resume_at.get(7).?);
+
+    // A walker with a live route gets its hint refreshed.
+    const bottom2 = try st.pf.addNode(.{ .x = 0, .y = 0 }, true);
+    _ = try st.pf.addNode(.{ .x = 0, .y = 93 }, true);
+    const top2 = try st.pf.addNode(.{ .x = 0, .y = 186 }, true);
+    _ = try st.pf.navigate(7, bottom2, top2, 60);
+    st.pf.active.getPtr(7).?.path.current_index = 2;
+    Controller.snapshotSegments(&st);
+    try std.testing.expectEqual(Position{ .x = 0, .y = 186 }, st.resume_at.get(7).?);
 }

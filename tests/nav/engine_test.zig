@@ -293,9 +293,12 @@ test "stair navigation across floors with max_horizontal_distance=300" {
     // x=400: nodes at y=150 (stair), y=300 (stair)
     _ = try pf.addNode(.{ .x = 400, .y = 150 }, true); // node 2 (stair)
     _ = try pf.addNode(.{ .x = 400, .y = 300 }, true); // node 3 (stair)
-    // x=600: nodes at y=300 (stair), y=450
-    _ = try pf.addNode(.{ .x = 600, .y = 300 }, true); // node 4 (stair)
-    _ = try pf.addNode(.{ .x = 600, .y = 450 }, false); // node 5
+    // x=600: nodes at y=300, y=450 (stair). The stair is the upper one: a
+    // stair reaches down, and nothing climbs to a plain node (#69). Before,
+    // this column had the stair below and passed only because the plain
+    // node was added after it.
+    _ = try pf.addNode(.{ .x = 600, .y = 300 }, false); // node 4
+    _ = try pf.addNode(.{ .x = 600, .y = 450 }, true); // node 5 (stair)
 
     // Navigate from node 0 (x=150,y=150) to node 5 (x=600,y=450)
     // Path should be: 0 → 1 → 3 → 4 → 5 (via stair connections)

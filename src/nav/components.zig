@@ -51,6 +51,7 @@ pub const ClosestMovementNode = struct {
         entity_id: u64 = 0,
         entity_generation: u64 = 0,
         position_revision: u64 = 0,
+        position_slot: u32 = @import("std").math.maxInt(u32),
         graph_revision: u64 = 0,
 
         pub fn valid(self: Stamp) bool {
@@ -59,16 +60,26 @@ pub const ClosestMovementNode = struct {
 
         pub fn eql(a: Stamp, b: Stamp) bool {
             return a.world_revision == b.world_revision and a.entity_id == b.entity_id and a.entity_generation == b.entity_generation and
-                a.position_revision == b.position_revision and a.graph_revision == b.graph_revision;
+                a.position_revision == b.position_revision and a.position_slot == b.position_slot and a.graph_revision == b.graph_revision;
         }
     };
     pub const Status = enum { pending, ready, off_graph };
     pub const Invalidation = enum { none, position, ancestor, parent, graph, world };
-    pub const Resolution = struct { node_entity: u64, node_id: u32, distance: f32 };
+    /// Conservative nearest-node certificate, created only by full preparation.
+    /// It stays centred at the original sample even across repeated reuse.
+    pub const ReuseRegion = struct {
+        x: f32 = 0,
+        y: f32 = 0,
+        radius: f64 = 0,
+        min_y: f64 = 0,
+        max_y: f64 = 0,
+    };
+    pub const Resolution = struct { node_entity: u64, node_id: u32, distance: f32, reuse: ReuseRegion = .{} };
 
     node_entity: u64 = 0,
     node_id: u32 = 0,
     distance: f32 = 0.0,
+    reuse: ReuseRegion = .{},
     status: Status = .pending,
     stamp: Stamp = .{},
     invalidation: Invalidation = .none,
@@ -99,6 +110,7 @@ pub const ClosestMovementNode = struct {
             self.node_entity = r.node_entity;
             self.node_id = r.node_id;
             self.distance = r.distance;
+            self.reuse = r.reuse;
             self.last_ready_stamp = snapshot;
         }
         self.stamp = snapshot;
