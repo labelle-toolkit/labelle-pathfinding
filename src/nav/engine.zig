@@ -41,11 +41,14 @@ pub fn PathfinderWith(
         allocator: Allocator,
         /// Active navigations keyed by entity ID.
         active: std.AutoArrayHashMapUnmanaged(GameId, NavigationEntry),
+        ticking: bool = false,
+        pending_cancellations: bool = false,
 
         const Self = @This();
 
         const NavigationEntry = struct {
             path: MovementPath,
+            cancelled: bool = false,
         };
 
         /// Initialize with config loaded from pathfinder.zon.
@@ -106,6 +109,7 @@ pub fn PathfinderWith(
             to_node: NodeId,
             speed: f32,
         ) !?*const MovementPath {
+            if (self.ticking) return error.NavigationTickInProgress;
             self.ensureBuilt();
 
             const fw = self.fw orelse return null;
@@ -164,6 +168,14 @@ pub fn PathfinderWith(
         /// Cancel navigation for an entity.
         /// Does NOT fire a hook.
         pub fn cancel(self: *Self, entity: GameId) void {
+            // Movement callbacks run while tick borrows the active routes.
+            if (self.ticking) {
+                if (self.active.getPtr(entity)) |entry| {
+                    entry.cancelled = true;
+                    self.pending_cancellations = true;
+                }
+                return;
+            }
             if (self.active.fetchSwapRemove(entity)) |kv| {
                 self.allocator.free(kv.value.path.positions);
                 self.allocator.free(kv.value.path.node_path);
@@ -182,6 +194,22 @@ pub fn PathfinderWith(
         /// and path re-validation on graph changes. Fires hooks for arrivals and
         /// path invalidations.
         pub fn tick(self: *Self, ctx: anytype, dt: f32) void {
+            if (self.ticking) return;
+            self.ticking = true;
+            defer {
+                self.ticking = false;
+                if (self.pending_cancellations) {
+                    self.pending_cancellations = false;
+                    var i: usize = 0;
+                    while (i < self.active.count()) {
+                        if (self.active.values()[i].cancelled) {
+                            self.cancel(self.active.keys()[i]);
+                        } else {
+                            i += 1;
+                        }
+                    }
+                }
+            }
             // Rebuild if dirty and re-validate active paths
             if (self.graph.dirty) {
                 self.rebuildAndValidate(ctx);
@@ -198,6 +226,7 @@ pub fn PathfinderWith(
             defer stale_list.deinit(self.allocator);
 
             for (self.active.keys(), self.active.values()) |entity, *entry| {
+                if (entry.cancelled) continue;
                 const path = &entry.path;
 
                 // Get current position — null means entity was destroyed
@@ -207,7 +236,7 @@ pub fn PathfinderWith(
                 };
 
                 // Skip past any waypoints already within arrival threshold
-                while (path.current_index < path.len) {
+                while (!entry.cancelled and path.current_index < path.len) {
                     const target = path.positions[path.current_index];
                     const dx = target.x - pos.x;
                     const dy = target.y - pos.y;
@@ -241,7 +270,7 @@ pub fn PathfinderWith(
                 }
 
                 // Check if arrived at final destination
-                if (path.current_index >= path.len) {
+                if (!entry.cancelled and path.current_index >= path.len) {
                     arrived_list.append(self.allocator, entity) catch |err| {
                         log.warn("Failed to record arrived entity: {}", .{err});
                     };
@@ -261,6 +290,7 @@ pub fn PathfinderWith(
                 const entry = self.active.fetchSwapRemove(entity) orelse continue;
                 self.allocator.free(entry.value.path.positions);
                 self.allocator.free(entry.value.path.node_path);
+                if (entry.value.cancelled) continue;
 
                 dispatchHook(GameHooks, .{ .arrived = .{
                     .entity = entity,
@@ -301,15 +331,13 @@ pub fn PathfinderWith(
 
         /// Get a pointer to the MovementPath for an entity, or null if not navigating.
         pub fn getPath(self: *Self, entity: GameId) ?*MovementPath {
-            if (self.active.getPtr(entity)) |entry| {
-                return &entry.path;
-            }
-            return null;
+            const entry = self.active.getPtr(entity) orelse return null;
+            return if (entry.cancelled) null else &entry.path;
         }
 
         /// Check if an entity is currently navigating.
         pub fn isNavigating(self: *Self, entity: GameId) bool {
-            return self.active.contains(entity);
+            return self.getPath(entity) != null;
         }
 
         // --- Internal ---
@@ -370,6 +398,7 @@ pub fn PathfinderWith(
             // Process invalidations: try to reroute, only fire hook if reroute fails
             for (invalidated_list.items) |entity| {
                 const entry_ptr = self.active.getPtr(entity) orelse continue;
+                if (entry_ptr.cancelled) continue;
                 const path = &entry_ptr.path;
 
                 // Determine entity's current node

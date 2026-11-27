@@ -16,9 +16,17 @@ const Receiver = struct {
     failures: usize = 0,
     changes: usize = 0,
     last_change: ?nav.Events.grid_changed = null,
+    retarget_on_move: ?u32 = null,
+    retarget_result: ?nav.Result = null,
 
     pub fn component_changed(self: *Receiver, p: engine.ComponentChangeInfo(u32)) void {
-        nav.Controller.componentChanged(self.ctx.gameAs(Game), p);
+        const game = self.ctx.gameAs(Game);
+        Controller.componentChanged(game, p);
+        if (p.change != .set or p.entity_id != self.retarget_on_move or
+            !std.mem.eql(u8, p.component_name, @typeName(engine.Position))) return;
+        self.retarget_on_move = null;
+        _ = addNode(game, 125);
+        self.retarget_result = Controller.navigate(game, p.entity_id, .{ .x = 125, .y = 5 }, @src());
     }
 
     pub fn pathfinder__arrived(self: *Receiver, p: nav.Events.arrived) void {
@@ -39,6 +47,7 @@ const ECS = core.MockEcsBackend(u32);
 const Hook = engine.MergeHookPayloads(.{ engine.HookPayload(u32), Event });
 const Hooks = engine.MergeHooks(Hook, .{*Receiver});
 const Components = engine.ComponentRegistry(.{
+    .MovementNode = nav.MovementNode,
     .NavGrid = nav.NavGrid,
     .NavCost = nav.NavCost,
     .NavObstacle = nav.NavObstacle,
@@ -55,6 +64,124 @@ fn addAt(game: *Game, x: f32, y: f32) u32 {
 
 fn addGrid(game: *Game, cols: u32, rows: u32) void {
     game.addComponent(game.createEntity(), nav.NavGrid{ .cols = cols, .rows = rows, .cell = 10 });
+}
+
+fn addNode(game: *Game, x: f32) u32 {
+    const entity = addAt(game, x, 5);
+    game.addComponent(entity, nav.MovementNode{});
+    return entity;
+}
+
+test "fresh navigate routes to nodes added before advance and rebuilds only once" {
+    var game = Game.init(testing.allocator);
+    defer game.deinit();
+    try Controller.setup(&game);
+    defer Controller.deinit(&game);
+    const walker = addAt(&game, 5, 5);
+    _ = addNode(&game, 5);
+    _ = addNode(&game, 65);
+    try testing.expectEqual(@as(u64, 0), Controller.graphEpoch(&game));
+    try testing.expect(Controller.navigate(&game, walker, .{ .x = 65, .y = 5 }, @src()) == .accepted);
+    try testing.expectEqual(@as(u64, 1), Controller.graphEpoch(&game));
+
+    const other = addAt(&game, 5, 5);
+    _ = addNode(&game, 125);
+    try testing.expect(Controller.navigate(&game, other, .{ .x = 125, .y = 5 }, @src()) == .accepted);
+    const rebuilt = Controller.graphEpoch(&game);
+    try testing.expectEqual(@as(u64, 2), rebuilt);
+    try testing.expectEqual(@as(u32, 3), Controller.nodeCount(&game));
+    try testing.expect(Controller.isNavigating(&game, walker));
+    try testing.expect(Controller.navigate(&game, other, .{ .x = 125, .y = 5 }, @src()) == .accepted);
+    try testing.expectEqual(rebuilt, Controller.graphEpoch(&game));
+    Controller.advance(&game, 0.05);
+    try testing.expectEqual(@as(f32, 15), game.getPosition(walker).x);
+    try testing.expect(Controller.isNavigating(&game, walker));
+}
+
+test "an equal-count node swap rebuilds even when the first node still exists" {
+    var game = Game.init(testing.allocator);
+    defer game.deinit();
+    try Controller.setup(&game);
+    defer Controller.deinit(&game);
+    const walker = addAt(&game, 65, 5);
+    const first = addNode(&game, 65);
+    const replaced = addNode(&game, 125);
+    Controller.advance(&game, 0);
+    const before = Controller.graphEpoch(&game);
+    const count = Controller.nodeCount(&game);
+
+    // Leave the old entity alive to exercise loss of the component as
+    // well as the equal count and the first node still being present.
+    game.removeComponent(replaced, nav.MovementNode);
+    _ = addNode(&game, 5);
+    try testing.expect(game.hasComponent(first, nav.MovementNode));
+    try testing.expect(game.ecs_backend.entityExists(replaced));
+    try testing.expect(Controller.navigate(&game, walker, .{ .x = 5, .y = 5 }, @src()) == .accepted);
+    try testing.expectEqual(before + 1, Controller.graphEpoch(&game));
+    try testing.expectEqual(count, Controller.nodeCount(&game));
+
+    _ = addNode(&game, 125);
+    game.destroyEntity(first);
+    Controller.advance(&game, 0);
+    try testing.expectEqual(before + 2, Controller.graphEpoch(&game));
+    try testing.expectEqual(count, Controller.nodeCount(&game));
+}
+
+test "a fresh retarget with no graph clears previous direct and saved graph orders" {
+    var game = Game.init(testing.allocator);
+    defer game.deinit();
+    try Controller.setup(&game);
+    defer Controller.deinit(&game);
+    const walker = addAt(&game, 5, 5);
+    const direct = addAt(&game, 5, 5);
+    const start = addNode(&game, 5);
+    const goal = addNode(&game, 65);
+    const target = nav.Position{ .x = 65, .y = 5 };
+    try testing.expect(Controller.navigate(&game, walker, target, @src()) == .accepted);
+    try testing.expect(Controller.moveTo(&game, direct, target) == .accepted);
+
+    game.destroyEntity(start);
+    game.destroyEntity(goal);
+    const deferred = nav.Result{ .deferred = .graph_not_built };
+    try testing.expectEqual(deferred, Controller.navigate(&game, walker, .{ .x = 125, .y = 5 }, @src()));
+    try testing.expectEqual(deferred, Controller.navigate(&game, direct, .{ .x = 125, .y = 5 }, @src()));
+    try testing.expect(!game.hasComponent(walker, nav.Navigating));
+    try testing.expect(!game.hasComponent(direct, nav.Navigating));
+    _ = addNode(&game, 5);
+    _ = addNode(&game, 65);
+    Controller.advance(&game, 0.05);
+    try testing.expect(!Controller.isNavigating(&game, walker));
+    try testing.expect(!Controller.isNavigating(&game, direct));
+    try testing.expectEqual(@as(f32, 5), game.getPosition(walker).x);
+    try testing.expectEqual(@as(f32, 5), game.getPosition(direct).x);
+}
+
+test "a graph retarget from a synchronous movement callback cancels the previous route before deferring" {
+    var game = Game.init(testing.allocator);
+    defer game.deinit();
+    var receiver: Receiver = .{};
+    var hooks: Hooks = .{ .receivers = .{&receiver} };
+    game.setHooks(&hooks);
+    try Controller.setup(&game);
+    defer Controller.deinit(&game);
+    const walker = addAt(&game, 5, 5);
+    _ = addNode(&game, 5);
+    _ = addNode(&game, 65);
+    try testing.expect(Controller.navigate(&game, walker, .{ .x = 65, .y = 5 }, @src()) == .accepted);
+    const before = Controller.graphEpoch(&game);
+
+    receiver.retarget_on_move = walker;
+    Controller.advance(&game, 10);
+    try testing.expectEqual(nav.Result{ .deferred = .graph_tick_in_progress }, receiver.retarget_result.?);
+    try testing.expectEqual(before, Controller.graphEpoch(&game));
+    try testing.expectEqual(@as(f32, 65), game.getPosition(walker).x);
+    try testing.expect(!Controller.isNavigating(&game, walker));
+    try testing.expect(!game.hasComponent(walker, nav.Navigating));
+    game.dispatchEvents();
+    try testing.expectEqual(@as(?nav.Events.arrived, null), receiver.last);
+
+    try testing.expect(Controller.navigate(&game, walker, .{ .x = 125, .y = 5 }, @src()) == .accepted);
+    try testing.expectEqual(before + 1, Controller.graphEpoch(&game));
 }
 
 test "hooks update occupancy after writes, removals and destruction without polling" {
