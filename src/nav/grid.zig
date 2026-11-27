@@ -64,10 +64,14 @@ pub const Grid = struct {
             .changed = try a.alloc(bool, count),
         };
         errdefer a.free(grid.changed);
-        const last = grid.all().max;
-        const first: Cell = .{ .col = 0, .row = 0 };
-        if (!std.meta.eql(grid.at(grid.center(first)), @as(?Cell, first)) or
-            !std.meta.eql(grid.at(grid.center(last)), @as(?Cell, last))) return error.InvalidGrid;
+        for (0..config.cols) |col| {
+            const cell: Cell = .{ .col = @intCast(col), .row = 0 };
+            if (!std.meta.eql(grid.at(grid.center(cell)), @as(?Cell, cell))) return error.InvalidGrid;
+        }
+        for (0..config.rows) |row| {
+            const cell: Cell = .{ .col = 0, .row = @intCast(row) };
+            if (!std.meta.eql(grid.at(grid.center(cell)), @as(?Cell, cell))) return error.InvalidGrid;
+        }
         @memset(grid.changed, false);
         return grid;
     }
@@ -360,3 +364,12 @@ pub const Grid = struct {
         return points.toOwnedSlice(a);
     }
 };
+
+test "grid rejects f32 centers that round to a different interior cell" {
+    try std.testing.expectError(error.InvalidGrid, Grid.init(std.testing.allocator, .{
+        .origin_x = 16777216,
+        .cell = 2,
+        .cols = 3,
+        .rows = 1,
+    }));
+}

@@ -15,6 +15,7 @@ const Receiver = struct {
     last: ?nav.Events.arrived = null,
     failures: usize = 0,
     changes: usize = 0,
+    last_change: ?nav.Events.grid_changed = null,
 
     pub fn component_changed(self: *Receiver, p: engine.ComponentChangeInfo(u32)) void {
         nav.Controller.componentChanged(self.ctx.gameAs(Game), p);
@@ -28,8 +29,9 @@ const Receiver = struct {
         if (p.reason == .path_invalidated) self.failures += 1;
     }
 
-    pub fn pathfinder__grid_changed(self: *Receiver, _: nav.Events.grid_changed) void {
+    pub fn pathfinder__grid_changed(self: *Receiver, event: nav.Events.grid_changed) void {
         self.changes += 1;
+        self.last_change = event;
     }
 };
 
@@ -229,4 +231,35 @@ test "invalid configuration rejects commands until a corrected rebuild" {
     try testing.expect(!game.hasComponent(mover, nav.Navigating));
     Controller.advance(&game, 1);
     try testing.expectEqual(@as(f32, 5), game.getPosition(mover).x);
+}
+
+test "a malformed scene grid still allows direct orders and can be repaired" {
+    var game = Game.init(testing.allocator);
+    defer game.deinit();
+    var receiver: Receiver = .{};
+    var hooks: Hooks = .{ .receivers = .{&receiver} };
+    game.setHooks(&hooks);
+    const cfg = game.createEntity();
+    game.addComponent(cfg, nav.NavGrid{ .cols = 5, .rows = 0, .cell = 10 });
+    const mover = addAt(&game, 5, 5);
+    const goal: nav.Position = .{ .x = 45, .y = 5 };
+    try Controller.setup(&game);
+    defer Controller.deinit(&game);
+    try testing.expectEqual(nav.Reason.invalid_grid, Controller.navigateTo(&game, mover, goal).rejected);
+    const near: nav.Position = .{ .x = 8, .y = 5 };
+    try testing.expect(Controller.moveTo(&game, mover, near) == .redundant);
+    game.dispatchEvents();
+    try testing.expectEqual(near.x, receiver.last.?.destination.?.direct.x);
+
+    game.setField(nav.NavGrid, .rows, cfg, 1);
+    Controller.rebuildGrid(&game);
+    try testing.expect(Controller.navigateTo(&game, mover, goal) == .accepted);
+    try testing.expectEqual(nav.Reason.graph_not_built, Controller.navigate(&game, mover, goal, @src()).deferred);
+    try testing.expect(!Controller.isNavigating(&game, mover));
+
+    game.setField(nav.NavGrid, .cols, cfg, 3);
+    Controller.rebuildGrid(&game);
+    game.dispatchEvents();
+    try testing.expectEqual(@as(u32, 4), receiver.last_change.?.max_col);
+    try testing.expect(Controller.isBlocked(&game, goal));
 }

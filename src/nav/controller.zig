@@ -253,6 +253,7 @@ pub const State = struct {
     direct_moves: std.AutoArrayHashMapUnmanaged(u64, DirectMove) = .empty,
     grid: ?grid_mod.Grid = null,
     grid_dirty: std.AutoHashMapUnmanaged(u64, void) = .empty,
+    grid_dirty_batch: std.AutoHashMapUnmanaged(u64, void) = .empty,
     grid_walks: std.AutoArrayHashMapUnmanaged(u64, grid_mod.Walk) = .empty,
     grid_epoch: u64 = 0,
     grid_rebuild_pending: bool = false,
@@ -302,6 +303,7 @@ pub const State = struct {
         for (self.grid_walks.values()) |walk| self.allocator.free(walk.points);
         self.grid_walks.deinit(self.allocator);
         self.grid_dirty.deinit(self.allocator);
+        self.grid_dirty_batch.deinit(self.allocator);
         self.nearest_node_cache.deinit();
         self.node_entities.deinit(self.allocator);
         self.pending_entities.deinit(self.allocator);
@@ -417,7 +419,13 @@ pub const Controller = struct {
             st.deinit();
             allocator.destroy(st);
         }
-        try buildGrid(st, game);
+        buildGrid(st, game) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => {
+                log.warn("Cannot initialize navigation grid: {s}", .{@errorName(err)});
+                st.grid_config_invalid = true;
+            },
+        };
 
         // Idempotent: if a singleton entity already exists (scene
         // reload / re-entry), free its old State and attach the new
@@ -521,6 +529,11 @@ pub const Controller = struct {
         src: std.builtin.SourceLocation,
     ) Result {
         _ = src;
+        // A fresh request supersedes a grid walk even if the graph is not
+        // built. Rehydration calls navigateWith directly and can retry.
+        if (findState(game)) |st| {
+            if (!st.nodes_registered and st.grid_walks.contains(@intCast(entity))) cancel(game, entity);
+        }
         return navigateWith(game, entity, target, .{});
     }
 
@@ -659,7 +672,7 @@ pub const Controller = struct {
             // `pathfinder__arrived` event fires uniformly (subscribers
             // shouldn't care whether any walking was needed) and any
             // persisted `Navigating` from a prior order is cleared.
-            settleArrival(game, st, entity_id, from_node);
+            settleArrival(game, st, entity_id, from_node, null);
             return .redundant;
         }
 
@@ -712,7 +725,7 @@ pub const Controller = struct {
         }
 
         if (withinDirectArrival(game.getPosition(entity), target)) {
-            settleArrival(game, st, entity_id, null);
+            settleArrival(game, st, entity_id, null, target);
             return .redundant;
         }
 
@@ -795,12 +808,19 @@ pub const Controller = struct {
         const Entity = @TypeOf(game.*).EntityType;
         const ecs = &game.active_world.ecs_backend;
         var bounds: ?grid_algo.Bounds = null;
-        if (st.grid_rebuild_pending) {
+        const rebuild = st.grid_rebuild_pending;
+        st.grid_rebuild_pending = false;
+        std.mem.swap(@TypeOf(st.grid_dirty), &st.grid_dirty, &st.grid_dirty_batch);
+        defer st.grid_dirty_batch.clearRetainingCapacity();
+        if (rebuild) {
             // Preserve old routes until replacing their grid succeeds.
             if (st.grid) |grid| bounds = grid.all();
             st.grid_config_invalid = invalid: {
                 buildGrid(st, game) catch |err| switch (err) {
-                    error.OutOfMemory => return false,
+                    error.OutOfMemory => {
+                        st.grid_rebuild_pending = true;
+                        return false;
+                    },
                     else => {
                         log.warn("Cannot rebuild navigation grid: {s}", .{@errorName(err)});
                         if (st.grid) |*old| old.deinit(st.allocator);
@@ -810,10 +830,13 @@ pub const Controller = struct {
                 };
                 break :invalid false;
             };
-            if (st.grid) |grid| bounds = grid.all();
+            if (st.grid) |grid| {
+                const current = grid.all();
+                bounds = if (bounds) |old| old.merge(current) else current;
+            }
             replanGrid(st, game, null, true);
         } else if (st.grid) |*grid| {
-            var dirty = st.grid_dirty.keyIterator();
+            var dirty = st.grid_dirty_batch.keyIterator();
             while (dirty.next()) |id| {
                 const before = grid.footprints.get(id.*) orelse grid_mod.Footprint{};
                 const after = grid.footprint(ecs, @as(Entity, @intCast(id.*)));
@@ -839,8 +862,6 @@ pub const Controller = struct {
             }
             replanGrid(st, game, bounds, false);
         }
-        st.grid_rebuild_pending = false;
-        st.grid_dirty.clearRetainingCapacity();
         if (bounds) |b| {
             st.grid_epoch +%= 1;
             emitGameEvent(game, "pathfinder__grid_changed", .{
@@ -876,7 +897,7 @@ pub const Controller = struct {
             const entry = candidate orelse continue;
             const goals = try goalCells(grid, a, entry, target, snap);
             defer a.free(goals);
-            const route = (try grid.search.search(a, entry, goals)) orelse continue;
+            const route = (try grid.search.searchPrepared(a, entry, goals)) orelse continue;
             const exit_cost = if (trapped) grid.walkSegment(from, grid.center(entry), null, start).cost else 0;
             const score = @as(f64, @floatFromInt(route.cost)) / 10 + exit_cost;
             if (score < best_score) {
@@ -997,7 +1018,7 @@ pub const Controller = struct {
         for (gridStarts(grid, start)) |entry| {
             const cell = entry orelse continue;
             if (grid.goal(cell, goal, false) == null) continue;
-            const route = (grid.search.search(st.allocator, cell, &.{goal}) catch return null) orelse continue;
+            const route = (grid.search.searchPrepared(st.allocator, cell, &.{goal}) catch return null) orelse continue;
             defer st.allocator.free(route.cells);
             const exit = if (grid.search.free(start)) 0 else grid.walkSegment(game.getPosition(entity), grid.center(cell), null, start).cost;
             const cost = route.cost + @as(u64, @intFromFloat(@round(exit * 10)));
@@ -1732,7 +1753,7 @@ pub const Controller = struct {
             _ = st.direct_moves.swapRemove(entity_id);
             const entity: Entity = @intCast(entity_id);
             if (ecs.entityExists(entity)) {
-                settleArrival(game, st, entity_id, null);
+                settleArrival(game, st, entity_id, null, null);
             }
         }
     }
@@ -1821,7 +1842,7 @@ pub const Controller = struct {
                 continue;
             }
             const grid = st.grid.?;
-            var affected = all or (if (walk.adjacent) |target| st.grid_dirty.contains(target) else false);
+            var affected = all or (if (walk.adjacent) |target| st.grid_dirty_batch.contains(target) else false);
             if (!affected and bounds != null) {
                 var from = pos.?.*;
                 for (walk.points[walk.next..]) |to| {
@@ -2209,7 +2230,7 @@ fn emitArrival(game: anytype, id: u64, node_entity: u64, destination: ArrivalDes
     emitGameEvent(game, "pathfinder__arrived", .{ .entity = id, .node_entity = node_entity });
 }
 
-fn settleArrival(game: anytype, st: *State, entity_id: u64, goal_node: ?NodeId) void {
+fn settleArrival(game: anytype, st: *State, entity_id: u64, goal_node: ?NodeId, immediate_target: ?Position) void {
     const Entity = @TypeOf(game.*).EntityType;
     const entity: Entity = @intCast(entity_id);
     const ecs = &game.active_world.ecs_backend;
@@ -2248,10 +2269,13 @@ fn settleArrival(game: anytype, st: *State, entity_id: u64, goal_node: ?NodeId) 
     const destination: ArrivalDestination = if (goal_node) |nid| blk: {
         const goal = st.pf.graph.getPosition(nid);
         break :blk .{ .graph = .{ .node_entity = node_entity, .x = goal.x, .y = goal.y } };
-    } else .{ .direct = .{
-        .x = if (order) |nav| nav.target_x else pos.x,
-        .y = if (order) |nav| nav.target_y else pos.y,
-    } };
+    } else blk: {
+        const target = immediate_target orelse if (order) |nav|
+            Position{ .x = nav.target_x, .y = nav.target_y }
+        else
+            pos;
+        break :blk .{ .direct = .{ .x = target.x, .y = target.y } };
+    };
     emitArrival(game, entity_id, node_entity, destination);
 }
 
@@ -2308,7 +2332,7 @@ fn GameCtx(comptime GameType: type) type {
         st: *State,
 
         pub fn onArrived(self: *@This(), entity_id: u64, goal_node: NodeId) void {
-            settleArrival(self.game, self.st, entity_id, goal_node);
+            settleArrival(self.game, self.st, entity_id, goal_node, null);
         }
 
         pub fn onPathInvalidated(self: *@This(), entity_id: u64, goal_node: NodeId) void {

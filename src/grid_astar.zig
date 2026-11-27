@@ -112,6 +112,20 @@ pub const GridAStar = struct {
     /// Find the cheapest reachable goal. The returned cells include start
     /// and goal. The caller owns the slice.
     pub fn search(self: GridAStar, a: std.mem.Allocator, start: Cell, goals: []const Cell) !?Route {
+        var current = self;
+        current.min_cost = 255;
+        for (self.tiles) |tile| {
+            if (!tile.blocked) current.min_cost = @min(current.min_cost, tile.cost);
+        }
+        return current.searchImpl(a, start, goals, false);
+    }
+
+    /// Fast path for a grid labeled by `labelRegions` since its last edit.
+    pub fn searchPrepared(self: GridAStar, a: std.mem.Allocator, start: Cell, goals: []const Cell) !?Route {
+        return self.searchImpl(a, start, goals, true);
+    }
+
+    fn searchImpl(self: GridAStar, a: std.mem.Allocator, start: Cell, goals: []const Cell, prepared: bool) !?Route {
         if (!self.free(start) or goals.len == 0) return null;
         const visits = try a.alloc(Visit, self.tiles.len);
         defer a.free(visits);
@@ -122,7 +136,7 @@ pub const GridAStar = struct {
         var bounds: ?Bounds = null;
         const region = self.tiles[self.index(start)].region;
         for (goals) |goal| {
-            if (!self.free(goal) or self.tiles[self.index(goal)].region != region) continue;
+            if (!self.free(goal) or (prepared and self.tiles[self.index(goal)].region != region)) continue;
             goal_mask[self.index(goal)] = true;
             const point: Bounds = .{ .min = goal, .max = goal };
             bounds = if (bounds) |previous| previous.merge(point) else point;
@@ -179,4 +193,20 @@ test "weighted route avoids expensive cells and diagonal support controls connec
     tiles[3].blocked = true;
     grid.labelRegions(&scratch);
     try std.testing.expect((try grid.search(a, start, &.{goal})) == null);
+}
+
+test "standalone search sees cost and topology edits without relabeling" {
+    const a = std.testing.allocator;
+    var tiles = [_]Tile{.{ .cost = 100 }} ** 6;
+    var grid: GridAStar = .{ .cols = 3, .rows = 2, .tiles = &tiles };
+    var scratch: [6]u32 = undefined;
+    tiles[2].blocked = true;
+    grid.labelRegions(&scratch);
+    tiles[2].blocked = false;
+    tiles[1].cost = 10;
+    tiles[2].cost = 1;
+    tiles[4].cost = 1;
+    const route = (try grid.search(a, .{ .col = 0, .row = 0 }, &.{.{ .col = 2, .row = 0 }})).?;
+    defer a.free(route.cells);
+    try std.testing.expectEqual(@as(u64, 28), route.cost);
 }
