@@ -289,6 +289,25 @@ pub fn PathfinderWith(
             return fw.getDistance(from, to);
         }
 
+        /// Explicit preparation phase; never called by preparedNodeDistance.
+        /// False means the table could not be built. Legacy APIs retain their
+        /// existing lazy rebuild behavior.
+        pub fn prepareDistanceTable(self: *Self) bool {
+            self.ensureBuilt();
+            return !self.graph.dirty and self.fw != null;
+        }
+
+        /// Read-only table primitive, NOT an entity-readiness query. Controller
+        /// integration must validate generation-qualified endpoint identities
+        /// before passing node IDs. No allocation, repair or lazy table build.
+        pub fn preparedNodeDistance(self: *const Self, from: NodeId, to: NodeId) ?f32 {
+            if (self.graph.dirty or from >= self.graph.totalSlots() or to >= self.graph.totalSlots()) return null;
+            if (self.graph.isRemoved(from) or self.graph.isRemoved(to)) return null;
+            const fw = self.fw orelse return null;
+            const d = fw.getDistance(from, to);
+            return if (std.math.isFinite(d)) d else null;
+        }
+
         /// Check if a path exists between two nodes.
         pub fn isReachable(self: *Self, from: NodeId, to: NodeId) bool {
             return self.distance(from, to) != INF;
