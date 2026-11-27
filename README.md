@@ -81,6 +81,10 @@ route cost in tenths of an axial cell-entry cost. Terrain cost affects route
 selection; movement uses `MovementSpeed`. To inspect the grid, call
 `drawGridGizmos` with the `GridNavigation` category enabled.
 
+An agent whose current cell becomes blocked can step into a free edge
+neighbor and continue its route. If no free edge neighbor leads to the
+destination, the controller reports that there is no route.
+
 Automatic footprint updates require an engine containing [#937](https://github.com/labelle-toolkit/labelle-engine/pull/937).
 Add this receiver as `hooks/grid_navigation.zig` in an assembled game:
 
@@ -102,6 +106,8 @@ The hook queues footprint changes. Grid queries and the existing
 Use Game setters to get automatic notifications. For raw component writes,
 call `refreshFootprint` after the mutation. Call `rebuildGrid` after
 changing the scene's grid configuration at runtime.
+An invalid rebuild logs the error, fails active grid walks, and rejects
+new grid commands until a valid configuration is rebuilt.
 
 Grid arrivals add a `.grid` destination to `pathfinder__arrived`. The
 existing `node_entity` field is zero for grid arrivals. Subscribe to

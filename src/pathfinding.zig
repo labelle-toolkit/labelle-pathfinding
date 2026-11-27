@@ -42,6 +42,7 @@ const std = @import("std");
 
 test {
     _ = @import("grid_astar.zig");
+    _ = @import("nav/grid.zig");
 }
 
 // ── Navigation layer (headline) — re-exported at top level ──────────────────

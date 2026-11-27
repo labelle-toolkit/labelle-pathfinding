@@ -136,8 +136,10 @@ pathfinder.Controller.rebuildGrid(game) void
 
 `cancel`, `isNavigating` and `MovementSpeed` work unchanged. Both new commands
 return the existing `Result`: `accepted`, `redundant` when already there,
-`deferred` before the grid exists, `rejected(.no_path)` when the goal is in
-another region.
+`deferred` under transient allocation pressure, and `rejected(.no_path)`
+when there is no route. A scene with no grid rejects with `.grid_not_built`.
+A permanently invalid runtime rebuild logs the configuration error, fails
+active grid walks, and rejects with `.invalid_grid` until rebuilt.
 
 `navigate` and `moveTo` keep their current meaning (node graph and straight
 line). See "Open questions" for whether `navigate` should dispatch instead.
@@ -147,7 +149,7 @@ line). See "Open questions" for whether `navigate` should dispatch instead.
 ```zig
 pathfinder.Controller.gridReachable(game, entity, pos) bool          // region compare, O(1)
 pathfinder.Controller.gridReachableAdjacent(game, entity, target) bool
-pathfinder.Controller.gridWalkCost(game, entity, pos) ?u32           // runs a search
+pathfinder.Controller.gridWalkCost(game, entity, pos) ?u64           // runs a search
 pathfinder.Controller.isBlocked(game, pos) bool
 pathfinder.Controller.cellCost(game, pos) ?u8                        // null when blocked or off-grid
 pathfinder.Controller.gridEpoch(game) u64                            // bumps on every grid change
@@ -331,7 +333,9 @@ invalidated by the applied grid update.
 
 A raw grid path moves in 45° steps. After the search, waypoints are dropped
 while the straight segment between their neighbours crosses only free cells
-and costs no more than the cells it replaces. The second condition stops
+and costs no more than the path it replaces. Both costs integrate the
+distance traveled inside each cell multiplied by that cell's terrain cost.
+The second condition stops
 smoothing from dragging a path back through expensive terrain the search
 deliberately went around.
 

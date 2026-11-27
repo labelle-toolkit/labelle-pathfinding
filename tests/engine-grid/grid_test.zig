@@ -102,7 +102,7 @@ test "smoothed segment invalidates before movement and a loaded grid order resum
     try Controller.setup(&game);
     defer Controller.deinit(&game);
     const goal: nav.Position = .{ .x = 45, .y = 5 };
-    try testing.expectEqual(@as(?u32, 400), Controller.gridWalkCost(&game, mover, goal));
+    try testing.expectEqual(@as(?u64, 400), Controller.gridWalkCost(&game, mover, goal));
     try testing.expect(Controller.navigateTo(&game, mover, goal) == .accepted);
     const obstacle = addAt(&game, 25, 5);
     game.addComponent(obstacle, nav.NavObstacle{ .width = 8, .height = 8 });
@@ -174,4 +174,54 @@ test "blocked goals snap to a reachable cell and direct retargets replace grid w
     game.dispatchEvents();
     try testing.expectEqual(@as(f32, 100), receiver.last.?.destination.?.direct.x);
     try testing.expect(!Controller.isNavigating(&game, mover));
+}
+
+test "a running walk can escape a newly blocked start through a single free edge" {
+    var game = Game.init(testing.allocator);
+    defer game.deinit();
+    var receiver: Receiver = .{};
+    var hooks: Hooks = .{ .receivers = .{&receiver} };
+    game.setHooks(&hooks);
+    addGrid(&game, 5, 1);
+    const mover = addAt(&game, 15, 5);
+    try Controller.setup(&game);
+    defer Controller.deinit(&game);
+    const goal: nav.Position = .{ .x = 45, .y = 5 };
+    try testing.expect(Controller.navigateTo(&game, mover, goal) == .accepted);
+    const obstacle = addAt(&game, 15, 5);
+    game.addComponent(obstacle, nav.NavObstacle{ .width = 8, .height = 8 });
+    try testing.expect(Controller.gridReachable(&game, mover, goal));
+    Controller.advance(&game, 0.01);
+    try testing.expectEqual(@as(f32, 17), game.getPosition(mover).x);
+    Controller.advance(&game, 1);
+    game.dispatchEvents();
+    try testing.expectEqual(goal.x, game.getPosition(mover).x);
+    try testing.expectEqual(@as(usize, 0), receiver.failures);
+}
+
+test "invalid configuration rejects commands until a corrected rebuild" {
+    var game = Game.init(testing.allocator);
+    defer game.deinit();
+    var receiver: Receiver = .{};
+    var hooks: Hooks = .{ .receivers = .{&receiver} };
+    game.setHooks(&hooks);
+    const cfg = game.createEntity();
+    game.addComponent(cfg, nav.NavGrid{ .cols = 3, .rows = 1, .cell = 10 });
+    const mover = addAt(&game, 5, 5);
+    try Controller.setup(&game);
+    defer Controller.deinit(&game);
+    const goal: nav.Position = .{ .x = 25, .y = 5 };
+    try testing.expect(Controller.navigateTo(&game, mover, goal) == .accepted);
+    game.setField(nav.NavGrid, .cell, cfg, 0);
+    Controller.rebuildGrid(&game);
+    Controller.advance(&game, 1);
+    game.dispatchEvents();
+    try testing.expectEqual(@as(usize, 1), receiver.failures);
+    try testing.expectEqual(nav.Reason.invalid_grid, Controller.navigateTo(&game, mover, goal).rejected);
+    game.setField(nav.NavGrid, .cell, cfg, 10);
+    Controller.rebuildGrid(&game);
+    try testing.expect(Controller.navigateTo(&game, mover, goal) == .accepted);
+    game.removeComponent(cfg, nav.NavGrid);
+    Controller.rebuildGrid(&game);
+    try testing.expectEqual(nav.Reason.grid_not_built, Controller.navigateTo(&game, mover, goal).rejected);
 }

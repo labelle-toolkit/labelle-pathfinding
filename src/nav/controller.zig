@@ -256,6 +256,7 @@ pub const State = struct {
     grid_walks: std.AutoArrayHashMapUnmanaged(u64, grid_mod.Walk) = .empty,
     grid_epoch: u64 = 0,
     grid_rebuild_pending: bool = false,
+    grid_config_invalid: bool = false,
     grid_flushing: bool = false,
 
     /// Where each graph walker was heading (its current waypoint) when
@@ -371,6 +372,7 @@ pub const Reason = enum {
     controller_not_setup,
     graph_not_built,
     grid_not_built,
+    invalid_grid,
     no_position,
     no_nearby_node,
     no_path,
@@ -796,7 +798,18 @@ pub const Controller = struct {
         if (st.grid_rebuild_pending) {
             // Preserve old routes until replacing their grid succeeds.
             if (st.grid) |grid| bounds = grid.all();
-            buildGrid(st, game) catch return false;
+            st.grid_config_invalid = invalid: {
+                buildGrid(st, game) catch |err| switch (err) {
+                    error.OutOfMemory => return false,
+                    else => {
+                        log.warn("Cannot rebuild navigation grid: {s}", .{@errorName(err)});
+                        if (st.grid) |*old| old.deinit(st.allocator);
+                        st.grid = null;
+                        break :invalid true;
+                    },
+                };
+                break :invalid false;
+            };
             if (st.grid) |grid| bounds = grid.all();
             replanGrid(st, game, null, true);
         } else if (st.grid) |*grid| {
@@ -854,21 +867,44 @@ pub const Controller = struct {
 
     fn planGrid(grid: grid_mod.Grid, a: std.mem.Allocator, from: Position, target: GridTarget, snap: bool) !?grid_mod.Walk {
         const start = grid.at(from) orelse return null;
-        if (!grid.segment(from, grid.center(start), null).valid) return null;
-        const goals = try goalCells(grid, a, start, target, snap);
-        defer a.free(goals);
-        const route = (try grid.search.search(a, start, goals)) orelse return null;
-        defer a.free(route.cells);
+        const trapped = !grid.search.free(start);
+        const starts = gridStarts(grid, start);
+        var best: ?grid_algo.GridAStar.Route = null;
+        defer if (best) |r| a.free(r.cells);
+        var best_score: f64 = std.math.inf(f64);
+        for (starts) |candidate| {
+            const entry = candidate orelse continue;
+            const goals = try goalCells(grid, a, entry, target, snap);
+            defer a.free(goals);
+            const route = (try grid.search.search(a, entry, goals)) orelse continue;
+            const exit_cost = if (trapped) grid.walkSegment(from, grid.center(entry), null, start).cost else 0;
+            const score = @as(f64, @floatFromInt(route.cost)) / 10 + exit_cost;
+            if (score < best_score) {
+                if (best) |old| a.free(old.cells);
+                best = route;
+                best_score = score;
+            } else {
+                a.free(route.cells);
+            }
+        }
+        const route = best orelse return null;
+        const origin = if (trapped) grid.center(route.cells[0]) else from;
+        const waypoints = try grid.waypoints(a, route.cells, origin);
+        const points = if (trapped) blk: {
+            defer a.free(waypoints);
+            break :blk try std.mem.concat(a, Position, &.{ &.{origin}, waypoints });
+        } else waypoints;
         return .{
-            .points = try grid.waypoints(a, route.cells, from),
+            .points = points,
             .goal = route.cells[route.cells.len - 1],
             .adjacent = if (target == .adjacent) target.adjacent else null,
+            .escape_from = if (trapped) start else null,
         };
     }
 
     fn navigateGrid(game: anytype, st: *State, entity: anytype, target: GridTarget, snap: bool) Result {
         if (!flushGrid(st, game)) return .{ .deferred = .pending_alloc_failed };
-        const grid = st.grid orelse return .{ .deferred = .grid_not_built };
+        const grid = st.grid orelse return .{ .rejected = if (st.grid_config_invalid) .invalid_grid else .grid_not_built };
         const id: u64 = @intCast(entity);
         const ecs = &game.active_world.ecs_backend;
         if (!ecs.entityExists(entity)) return .{ .rejected = .no_position };
@@ -913,30 +949,48 @@ pub const Controller = struct {
         return grid.at(pos.*);
     }
 
+    fn gridStarts(grid: grid_mod.Grid, cell: grid_algo.Cell) [4]?grid_algo.Cell {
+        return if (grid.search.free(cell)) .{ cell, null, null, null } else grid.escapeNeighbors(cell);
+    }
+
     pub fn gridReachable(game: anytype, entity: anytype, pos: Position) bool {
         const st = queryGrid(game) orelse return false;
         const grid = st.grid.?;
         const start = gridStart(grid, game, entity) orelse return false;
-        return grid.goal(start, grid.at(pos) orelse return false, false) != null;
+        const goal = grid.at(pos) orelse return false;
+        for (gridStarts(grid, start)) |entry| {
+            if (entry) |cell| if (grid.goal(cell, goal, false) != null) return true;
+        }
+        return false;
     }
 
     pub fn gridReachableAdjacent(game: anytype, entity: anytype, target: anytype) bool {
         const st = queryGrid(game) orelse return false;
         const grid = st.grid.?;
         const start = gridStart(grid, game, entity) orelse return false;
-        return grid.reachableAdjacent(start, @intCast(target));
+        for (gridStarts(grid, start)) |entry| {
+            if (entry) |cell| if (grid.reachableAdjacent(cell, @intCast(target))) return true;
+        }
+        return false;
     }
 
     /// Cost is in tenths of one axial cell-entry cost.
-    pub fn gridWalkCost(game: anytype, entity: anytype, pos: Position) ?u32 {
+    pub fn gridWalkCost(game: anytype, entity: anytype, pos: Position) ?u64 {
         const st = queryGrid(game) orelse return null;
         const grid = st.grid.?;
         const start = gridStart(grid, game, entity) orelse return null;
         const goal = grid.at(pos) orelse return null;
-        if (grid.goal(start, goal, false) == null) return null;
-        const route = (grid.search.search(st.allocator, start, &.{goal}) catch return null) orelse return null;
-        defer st.allocator.free(route.cells);
-        return std.math.cast(u32, route.cost);
+        var best: ?u64 = null;
+        for (gridStarts(grid, start)) |entry| {
+            const cell = entry orelse continue;
+            if (grid.goal(cell, goal, false) == null) continue;
+            const route = (grid.search.search(st.allocator, cell, &.{goal}) catch return null) orelse continue;
+            defer st.allocator.free(route.cells);
+            const exit = if (grid.search.free(start)) 0 else grid.walkSegment(game.getPosition(entity), grid.center(cell), null, start).cost;
+            const cost = route.cost + @as(u64, @intFromFloat(@round(exit * 10)));
+            best = if (best) |old| @min(old, cost) else cost;
+        }
+        return best;
     }
 
     pub fn isBlocked(game: anytype, pos: Position) bool {
@@ -1813,7 +1867,7 @@ pub const Controller = struct {
             var invalid = false;
             while (walk.next < walk.points.len and budget > 0) {
                 const to = walk.points[walk.next];
-                if (!grid.segment(from, to, null).valid) {
+                if (!grid.walkSegment(from, to, null, if (walk.next == 0) walk.escape_from else null).valid) {
                     invalid = true;
                     break;
                 }

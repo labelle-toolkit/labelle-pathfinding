@@ -12,11 +12,31 @@ pub const Footprint = struct {
     cost: u8 = 0,
 };
 
+test "smoothing uses distance traveled within each tile and skips recentering" {
+    const a = std.testing.allocator;
+    var grid = try Grid.init(a, .{ .cell = 10, .cols = 4, .rows = 3 });
+    defer grid.deinit(a);
+    const route = [_]Cell{ .{ .col = 0, .row = 0 }, .{ .col = 1, .row = 1 }, .{ .col = 2, .row = 1 } };
+    const from = Position{ .x = 7, .y = 5 };
+    const goal = grid.center(route[2]);
+    const points = try grid.waypoints(a, &route, from);
+    defer a.free(points);
+    try std.testing.expectEqualSlices(Position, &.{goal}, points);
+
+    // The shortcut traverses an expensive cell the original diagonal only
+    // touches at a corner. Cost alone is enough to keep it off the route.
+    grid.search.tiles[1].cost = 100;
+    const detour = try grid.waypoints(a, &route, grid.center(route[0]));
+    defer a.free(detour);
+    try std.testing.expectEqualSlices(Position, &.{ grid.center(route[1]), goal }, detour);
+}
+
 pub const Walk = struct {
     points: []Position,
     next: usize = 0,
     adjacent: ?u64 = null,
     goal: Cell,
+    escape_from: ?Cell = null,
 };
 
 pub const Grid = struct {
@@ -229,11 +249,17 @@ pub const Grid = struct {
         return false;
     }
 
-    const Segment = struct { valid: bool = true, dirty: bool = false, cost: u64 = 0 };
+    const Segment = struct { valid: bool = true, dirty: bool = false, cost: f64 = 0 };
 
     /// Traverse continuous coordinates, including both support cells at a
     /// corner crossing. Used for smoothing and for route invalidation.
     pub fn segment(self: Grid, from: Position, to: Position, dirty: ?Bounds) Segment {
+        return self.walkSegment(from, to, dirty, null);
+    }
+
+    /// Escape may cross the occupied starting cell into one free axial
+    /// neighbor. All later cells and corner supports still have to be free.
+    pub fn walkSegment(self: Grid, from: Position, to: Position, dirty: ?Bounds, escape_from: ?Cell) Segment {
         var current = self.at(from) orelse return .{ .valid = false, .dirty = true };
         const end = self.at(to) orelse return .{ .valid = false, .dirty = true };
         const p = self.local(from);
@@ -242,14 +268,22 @@ pub const Grid = struct {
         const dy = q[1] - p[1];
         const sx: i64 = if (dx < 0) -1 else 1;
         const sy: i64 = if (dy < 0) -1 else 1;
+        const length = @sqrt(dx * dx + dy * dy);
+        var previous_t: f64 = 0;
         var result: Segment = .{};
         self.checkCell(current, dirty, &result);
+        if (escape_from) |cell| {
+            if (std.meta.eql(cell, current)) result.valid = true;
+        }
         while (!std.meta.eql(current, end)) {
             const x: f64 = @floatFromInt(current.col);
             const y: f64 = @floatFromInt(current.row);
             const tx = if (current.col != end.col) (x + @as(f64, if (sx > 0) 1 else 0) - p[0]) / dx else std.math.inf(f64);
             const ty = if (current.row != end.row) (y + @as(f64, if (sy > 0) 1 else 0) - p[1]) / dy else std.math.inf(f64);
             const corner = @abs(tx - ty) <= 1e-12;
+            const t = std.math.clamp(@min(tx, ty), previous_t, 1);
+            result.cost += (t - previous_t) * self.cellWeight(current);
+            previous_t = t;
             const next_col: u32 = if (corner or tx < ty) @intCast(@as(i64, current.col) + sx) else current.col;
             const next_row: u32 = if (corner or ty < tx) @intCast(@as(i64, current.row) + sy) else current.row;
             if (corner) {
@@ -258,9 +292,35 @@ pub const Grid = struct {
             }
             current = .{ .col = next_col, .row = next_row };
             self.checkCell(current, dirty, &result);
-            result.cost += @as(u64, if (corner) 14 else 10) * self.search.tiles[self.search.index(current)].cost;
         }
+        result.cost = (result.cost + (1 - previous_t) * self.cellWeight(end)) * length;
         return result;
+    }
+
+    fn cellWeight(self: Grid, c: Cell) f64 {
+        return @floatFromInt(self.search.tiles[self.search.index(c)].cost);
+    }
+
+    fn edgeCost(self: Grid, a: Cell, b: Cell) f64 {
+        // Center-to-center, half the distance lies inside each cell.
+        const length: f64 = if (a.col != b.col and a.row != b.row) @sqrt(2.0) else 1;
+        return length * (self.cellWeight(a) + self.cellWeight(b)) / 2;
+    }
+
+    pub fn escapeNeighbors(self: Grid, cell: Cell) [4]?Cell {
+        const candidates: [4]?Cell = .{
+            if (cell.col > 0) .{ .col = cell.col - 1, .row = cell.row } else null,
+            if (cell.col + 1 < self.config.cols) .{ .col = cell.col + 1, .row = cell.row } else null,
+            if (cell.row > 0) .{ .col = cell.col, .row = cell.row - 1 } else null,
+            if (cell.row + 1 < self.config.rows) .{ .col = cell.col, .row = cell.row + 1 } else null,
+        };
+        var free = candidates;
+        for (&free) |*candidate| {
+            if (candidate.*) |c| {
+                if (!self.search.free(c)) candidate.* = null;
+            }
+        }
+        return free;
     }
 
     fn checkCell(self: Grid, c: Cell, bounds: ?Bounds, out: *Segment) void {
@@ -272,23 +332,29 @@ pub const Grid = struct {
         var points: std.ArrayList(Position) = .empty;
         errdefer points.deinit(a);
         const first = self.center(route[0]);
-        // Center the agent before taking a diagonal from an arbitrary point.
-        if (!std.meta.eql(from, first)) try points.append(a, first);
+        if (route.len == 1) {
+            if (!std.meta.eql(from, first)) try points.append(a, first);
+            return points.toOwnedSlice(a);
+        }
+        var origin = from;
         var anchor: usize = 0;
         while (anchor + 1 < route.len) {
-            var best = anchor + 1;
-            var original: u64 = 0;
+            var best = anchor;
+            var original = self.segment(origin, self.center(route[anchor]), null).cost;
             for (anchor + 1..route.len) |j| {
                 const previous = route[j - 1];
                 const c = route[j];
-                original += @as(u64, if (previous.col != c.col and previous.row != c.row) 14 else 10) *
-                    self.search.tiles[self.search.index(c)].cost;
-                const candidate = self.segment(self.center(route[anchor]), self.center(c), null);
-                if (candidate.valid and candidate.cost <= original) best = j;
+                original += self.edgeCost(previous, c);
+                const candidate = self.segment(origin, self.center(c), null);
+                if (candidate.valid and candidate.cost <= original + 1e-9 * @max(1, original)) best = j;
                 // Bound smoothing work per anchor on long, winding routes.
                 if (j - anchor >= 64) break;
             }
-            try points.append(a, self.center(route[best]));
+            // If the off-center start cannot safely reach the next waypoint,
+            // go through its own cell center before taking the first edge.
+            if (best == anchor and std.meta.eql(origin, self.center(route[anchor]))) best += 1;
+            origin = self.center(route[best]);
+            try points.append(a, origin);
             anchor = best;
         }
         return points.toOwnedSlice(a);
