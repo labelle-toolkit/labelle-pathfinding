@@ -243,6 +243,7 @@ pub const State = struct {
     /// the initial scene (e.g. `loading`) where no MovementNode
     /// entities exist; `advance` lazily builds once nodes appear.
     nodes_registered: bool = false,
+    graph_rebuild_pending: bool = false,
 
     /// In-flight `moveTo` straight-line walks, keyed by entity. Kept
     /// OUT of the underlying pathfinder (these walks never touch the
@@ -373,6 +374,8 @@ pub const State = struct {
 pub const Reason = enum {
     controller_not_setup,
     graph_not_built,
+    /// A synchronous movement callback can retry once the graph tick returns.
+    graph_tick_in_progress,
     grid_not_built,
     invalid_grid,
     no_position,
@@ -530,6 +533,7 @@ pub const Controller = struct {
     ) Result {
         _ = src;
         if (findState(game)) |st| {
+            if (st.pf.ticking) return .{ .deferred = .graph_tick_in_progress };
             // Fresh orders can see nodes spawned before this frame's advance.
             // Rehydration already runs after advance's graph check.
             maybeRebuildGraph(game, st);
@@ -1511,6 +1515,7 @@ pub const Controller = struct {
     ///     observes via `isNavigating` and reacts accordingly)
     pub fn advance(game: anytype, dt: f32) void {
         const st = findState(game) orelse return;
+        if (st.pf.ticking) return;
 
         maybeRebuildGraph(game, st);
         sweepCmnOnEpochChange(st, game);
@@ -1569,6 +1574,15 @@ pub const Controller = struct {
     /// up to date with the current entity set.
     pub fn rebuildGraph(game: anytype) void {
         const st = findState(game) orelse return;
+        if (st.pf.ticking) {
+            st.graph_rebuild_pending = true;
+            return;
+        }
+        rebuildGraphInState(game, st);
+    }
+
+    fn rebuildGraphInState(game: anytype, st: *State) void {
+        st.graph_rebuild_pending = false;
         snapshotSegments(st);
         st.reset(st.allocator);
         buildGraphIntoState(game, st);
@@ -1721,10 +1735,7 @@ pub const Controller = struct {
     /// `advance` (`snapshotSegments` + `rehydrateNavigating`), as after
     /// a rebuild there. The check visits the nodes on each fresh order.
     fn maybeRebuildGraph(game: anytype, st: *State) void {
-        if (!nodeSetChanged(game, st)) return;
-        snapshotSegments(st);
-        st.reset(st.allocator);
-        buildGraphIntoState(game, st);
+        if (st.graph_rebuild_pending or nodeSetChanged(game, st)) rebuildGraphInState(game, st);
     }
 
     // ------------------------------------------------------------------

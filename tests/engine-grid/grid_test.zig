@@ -16,9 +16,18 @@ const Receiver = struct {
     failures: usize = 0,
     changes: usize = 0,
     last_change: ?nav.Events.grid_changed = null,
+    retarget_on_move: ?u32 = null,
+    retarget_result: ?nav.Result = null,
 
     pub fn component_changed(self: *Receiver, p: engine.ComponentChangeInfo(u32)) void {
-        nav.Controller.componentChanged(self.ctx.gameAs(Game), p);
+        const game = self.ctx.gameAs(Game);
+        Controller.componentChanged(game, p);
+        if (p.change != .set or p.entity_id != self.retarget_on_move or
+            !std.mem.eql(u8, p.component_name, @typeName(engine.Position))) return;
+        self.retarget_on_move = null;
+        _ = addNode(game, 125);
+        self.retarget_result = Controller.navigate(game, p.entity_id, .{ .x = 125, .y = 5 }, @src());
+        Controller.cancel(game, p.entity_id);
     }
 
     pub fn pathfinder__arrived(self: *Receiver, p: nav.Events.arrived) void {
@@ -112,6 +121,33 @@ test "an equal-count node swap rebuilds even when the first node still exists" {
     Controller.advance(&game, 0);
     try testing.expectEqual(before + 2, Controller.graphEpoch(&game));
     try testing.expectEqual(count, Controller.nodeCount(&game));
+}
+
+test "a synchronous movement callback can defer a graph retarget and cancel the current route" {
+    var game = Game.init(testing.allocator);
+    defer game.deinit();
+    var receiver: Receiver = .{};
+    var hooks: Hooks = .{ .receivers = .{&receiver} };
+    game.setHooks(&hooks);
+    try Controller.setup(&game);
+    defer Controller.deinit(&game);
+    const walker = addAt(&game, 5, 5);
+    _ = addNode(&game, 5);
+    _ = addNode(&game, 65);
+    try testing.expect(Controller.navigate(&game, walker, .{ .x = 65, .y = 5 }, @src()) == .accepted);
+    const before = Controller.graphEpoch(&game);
+
+    receiver.retarget_on_move = walker;
+    Controller.advance(&game, 10);
+    try testing.expectEqual(nav.Result{ .deferred = .graph_tick_in_progress }, receiver.retarget_result.?);
+    try testing.expectEqual(before, Controller.graphEpoch(&game));
+    try testing.expect(!Controller.isNavigating(&game, walker));
+    try testing.expect(!game.hasComponent(walker, nav.Navigating));
+    game.dispatchEvents();
+    try testing.expectEqual(@as(?nav.Events.arrived, null), receiver.last);
+
+    try testing.expect(Controller.navigate(&game, walker, .{ .x = 125, .y = 5 }, @src()) == .accepted);
+    try testing.expectEqual(before + 1, Controller.graphEpoch(&game));
 }
 
 test "hooks update occupancy after writes, removals and destruction without polling" {
