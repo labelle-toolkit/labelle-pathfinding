@@ -123,6 +123,35 @@ test "an equal-count node swap rebuilds even when the first node still exists" {
     try testing.expectEqual(count, Controller.nodeCount(&game));
 }
 
+test "a fresh retarget with no graph clears previous direct and saved graph orders" {
+    var game = Game.init(testing.allocator);
+    defer game.deinit();
+    try Controller.setup(&game);
+    defer Controller.deinit(&game);
+    const walker = addAt(&game, 5, 5);
+    const direct = addAt(&game, 5, 5);
+    const start = addNode(&game, 5);
+    const goal = addNode(&game, 65);
+    const target = nav.Position{ .x = 65, .y = 5 };
+    try testing.expect(Controller.navigate(&game, walker, target, @src()) == .accepted);
+    try testing.expect(Controller.moveTo(&game, direct, target) == .accepted);
+
+    game.destroyEntity(start);
+    game.destroyEntity(goal);
+    const deferred = nav.Result{ .deferred = .graph_not_built };
+    try testing.expectEqual(deferred, Controller.navigate(&game, walker, .{ .x = 125, .y = 5 }, @src()));
+    try testing.expectEqual(deferred, Controller.navigate(&game, direct, .{ .x = 125, .y = 5 }, @src()));
+    try testing.expect(!game.hasComponent(walker, nav.Navigating));
+    try testing.expect(!game.hasComponent(direct, nav.Navigating));
+    _ = addNode(&game, 5);
+    _ = addNode(&game, 65);
+    Controller.advance(&game, 0.05);
+    try testing.expect(!Controller.isNavigating(&game, walker));
+    try testing.expect(!Controller.isNavigating(&game, direct));
+    try testing.expectEqual(@as(f32, 5), game.getPosition(walker).x);
+    try testing.expectEqual(@as(f32, 5), game.getPosition(direct).x);
+}
+
 test "a synchronous movement callback can defer a graph retarget and cancel the current route" {
     var game = Game.init(testing.allocator);
     defer game.deinit();

@@ -537,9 +537,12 @@ pub const Controller = struct {
             // Fresh orders can see nodes spawned before this frame's advance.
             // Rehydration already runs after advance's graph check.
             maybeRebuildGraph(game, st);
-            // A fresh graph request supersedes an active grid walk even
-            // when there are still no graph nodes.
-            if (!st.nodes_registered and st.grid_walks.contains(@intCast(entity))) cancel(game, entity);
+            // A fresh request replaces the old order even if there is
+            // no graph. Rehydration keeps its saved order until nodes return.
+            if (!st.nodes_registered) {
+                cancel(game, entity);
+                return .{ .deferred = .graph_not_built };
+            }
         }
         return navigateWith(game, entity, target, .{});
     }
