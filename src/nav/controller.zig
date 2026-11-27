@@ -243,6 +243,7 @@ pub const State = struct {
     /// the initial scene (e.g. `loading`) where no MovementNode
     /// entities exist; `advance` lazily builds once nodes appear.
     nodes_registered: bool = false,
+    graph_rebuild_pending: bool = false,
 
     /// In-flight `moveTo` straight-line walks, keyed by entity. Kept
     /// OUT of the underlying pathfinder (these walks never touch the
@@ -373,6 +374,8 @@ pub const State = struct {
 pub const Reason = enum {
     controller_not_setup,
     graph_not_built,
+    /// A synchronous movement callback can retry once the graph tick returns.
+    graph_tick_in_progress,
     grid_not_built,
     invalid_grid,
     no_position,
@@ -529,10 +532,20 @@ pub const Controller = struct {
         src: std.builtin.SourceLocation,
     ) Result {
         _ = src;
-        // A fresh request supersedes a grid walk even if the graph is not
-        // built. Rehydration calls navigateWith directly and can retry.
         if (findState(game)) |st| {
-            if (!st.nodes_registered and st.grid_walks.contains(@intCast(entity))) cancel(game, entity);
+            if (st.pf.ticking) {
+                cancel(game, entity);
+                return .{ .deferred = .graph_tick_in_progress };
+            }
+            // Fresh orders can see nodes spawned before this frame's advance.
+            // Rehydration already runs after advance's graph check.
+            maybeRebuildGraph(game, st);
+            // A fresh request replaces the old order even if there is
+            // no graph. Rehydration keeps its saved order until nodes return.
+            if (!st.nodes_registered) {
+                cancel(game, entity);
+                return .{ .deferred = .graph_not_built };
+            }
         }
         return navigateWith(game, entity, target, .{});
     }
@@ -1032,11 +1045,12 @@ pub const Controller = struct {
     pub const NearestAdjacent = struct { target: u64, cost: u64 };
 
     /// Of `targets` (entities carrying a NavObstacle), the one whose edge is
-    /// cheapest for `entity` to walk to, and that cost. One search answers
-    /// for the whole list: it spreads out from the walker and stops at the
-    /// first edge cell it reaches, so the work depends on how far the nearest
-    /// target is, not on how many targets there are. Null when none can be
-    /// reached, the list is empty, or memory ran out.
+    /// cheapest for `entity` to walk to, and that cost. The query collects
+    /// edge cells from all targets and searches once from a free starting
+    /// cell, or once per free escape neighbor (up to four) if the walker
+    /// starts in a blocked cell. Each search initializes grid-sized buffers
+    /// and stops at the first goal it reaches. Null when none can be reached,
+    /// the list is empty, or memory ran out.
     ///
     /// Meant for choosing work ("which marked tree do I fell next?"); follow
     /// it with `navigateAdjacent(game, entity, result.target)`. When two
@@ -1390,7 +1404,15 @@ pub const Controller = struct {
     pub fn isNavigating(game: anytype, entity: anytype) bool {
         const st = findState(game) orelse return false;
         const entity_id: u64 = @intCast(entity);
-        return st.isNavigating(entity_id) or st.direct_moves.contains(entity_id) or st.grid_walks.contains(entity_id);
+        if (st.isNavigating(entity_id) or st.direct_moves.contains(entity_id) or st.grid_walks.contains(entity_id)) return true;
+
+        // A rebuild can drop a route before advance rehydrates its saved order.
+        const Entity = @TypeOf(game.*).EntityType;
+        const id: Entity = @intCast(entity_id);
+        const ecs = &game.active_world.ecs_backend;
+        if (!ecs.entityExists(id)) return false;
+        const order = ecs.getComponent(id, Navigating) orelse return false;
+        return order.mode == .graph;
     }
 
     /// Walk-cost between two entities with the game-proven "nearest X"
@@ -1558,6 +1580,7 @@ pub const Controller = struct {
     ///     observes via `isNavigating` and reacts accordingly)
     pub fn advance(game: anytype, dt: f32) void {
         const st = findState(game) orelse return;
+        if (st.pf.ticking) return;
 
         maybeRebuildGraph(game, st);
         sweepCmnOnEpochChange(st, game);
@@ -1616,6 +1639,15 @@ pub const Controller = struct {
     /// up to date with the current entity set.
     pub fn rebuildGraph(game: anytype) void {
         const st = findState(game) orelse return;
+        if (st.pf.ticking) {
+            st.graph_rebuild_pending = true;
+            return;
+        }
+        rebuildGraphInState(game, st);
+    }
+
+    fn rebuildGraphInState(game: anytype, st: *State) void {
+        st.graph_rebuild_pending = false;
         snapshotSegments(st);
         st.reset(st.allocator);
         buildGraphIntoState(game, st);
@@ -1732,34 +1764,43 @@ pub const Controller = struct {
         return n;
     }
 
-    fn isGraphStale(game: anytype, st: *State) bool {
-        if (st.node_entities.count() == 0) return false;
+    /// The graph no longer matches the world's MovementNode set.
+    ///
+    /// The live count catches additions and removals (v4: a newly built
+    /// room or carcase spawning nodes used to need a game-side
+    /// `PathfinderRebuild` marker). With an equal count, every tracked
+    /// node must still be a MovementNode entity: that catches a swapped
+    /// set, nodes removed and others added in the same frame, which the
+    /// count alone, and the old first-node-exists probe, both missed
+    /// (FP Trello 2myCi3yH). Equal count + every tracked node alive
+    /// means the same set, since entity ids are unique.
+    fn nodeSetChanged(game: anytype, st: *State) bool {
         const ecs = &game.active_world.ecs_backend;
-        const first_id = st.node_entities.values()[0];
         const Entity = @TypeOf(game.*).EntityType;
-        const first_entity: Entity = @intCast(first_id);
-        return !ecs.entityExists(first_entity);
+        const Probe = struct {
+            ecs_ptr: @TypeOf(ecs),
+            pub fn isNode(self: @This(), entity_id: u64) bool {
+                const e: Entity = @intCast(entity_id);
+                return self.ecs_ptr.entityExists(e) and self.ecs_ptr.hasComponent(e, MovementNode);
+            }
+        };
+        return trackedNodesDiffer(st.node_entities.values(), countMovementNodes(game), Probe{ .ecs_ptr = ecs });
     }
 
+    /// Rebuild the graph when the node set changed. Runs at the top of
+    /// `advance`, and of every fresh `navigate`: nodes spawned earlier in
+    /// the same frame (a section's catwalk, a new room) would otherwise
+    /// be invisible until the next `advance`, and a `navigate` toward
+    /// them came back `.rejected` / `no_nearby_node` (FP Trello
+    /// 2myCi3yH; #1123 worked around it for the turbine repairer only).
+    /// Bursts still rebuild once: the first caller after a change
+    /// rebuilds, later ones find the set unchanged.
+    ///
+    /// Walkers whose routes the rebuild drops resume on the next
+    /// `advance` (`snapshotSegments` + `rehydrateNavigating`), as after
+    /// a rebuild there. The check visits the nodes on each fresh order.
     fn maybeRebuildGraph(game: anytype, st: *State) void {
-        // Count-based change detection (v4): node ADDITIONS (a newly
-        // built room/carcase spawning MovementNodes) are invisible to
-        // the first-node-exists staleness probe, and previously needed
-        // a game-side `PathfinderRebuild` marker + debounce script.
-        // Comparing the live count against the tracked set catches
-        // additions and removals alike, with natural burst-debounce
-        // (however many nodes spawn in one frame, the next `advance`
-        // rebuilds once). The O(nodes) view walk per tick is noise
-        // next to the navigation tick it rides with.
-        const live = countMovementNodes(game);
-        const tracked: u32 = @intCast(st.node_entities.count());
-        const count_changed = live != tracked;
-        const stale = st.nodes_registered and isGraphStale(game, st);
-        if (!count_changed and !stale) return;
-
-        snapshotSegments(st);
-        st.reset(st.allocator);
-        buildGraphIntoState(game, st);
+        if (st.graph_rebuild_pending or nodeSetChanged(game, st)) rebuildGraphInState(game, st);
     }
 
     // ------------------------------------------------------------------
@@ -2070,6 +2111,19 @@ pub const Controller = struct {
 // ============================================================================
 // Shared helpers
 // ============================================================================
+
+/// Pure core of `Controller.nodeSetChanged`: `tracked` (the graph's
+/// node entities) differs from the world's set of `live_count` nodes, as
+/// `probe.isNode(entity_id)` sees it. Equal counts with every tracked
+/// node still a node means the same set (entity ids are unique). Public
+/// for the unit tests.
+pub fn trackedNodesDiffer(tracked: []const u64, live_count: u32, probe: anytype) bool {
+    if (tracked.len != live_count) return true;
+    for (tracked) |id| {
+        if (!probe.isNode(id)) return true;
+    }
+    return false;
+}
 
 /// Prune `nearest_node_cache` entries whose entity is no longer alive,
 /// as judged by `probe.alive(entity_id) bool` (#493). Two-pass: collect

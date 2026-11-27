@@ -16,9 +16,17 @@ const Receiver = struct {
     failures: usize = 0,
     changes: usize = 0,
     last_change: ?nav.Events.grid_changed = null,
+    retarget_on_move: ?u32 = null,
+    retarget_result: ?nav.Result = null,
 
     pub fn component_changed(self: *Receiver, p: engine.ComponentChangeInfo(u32)) void {
-        nav.Controller.componentChanged(self.ctx.gameAs(Game), p);
+        const game = self.ctx.gameAs(Game);
+        Controller.componentChanged(game, p);
+        if (p.change != .set or p.entity_id != self.retarget_on_move or
+            !std.mem.eql(u8, p.component_name, @typeName(engine.Position))) return;
+        self.retarget_on_move = null;
+        _ = addNode(game, 125);
+        self.retarget_result = Controller.navigate(game, p.entity_id, .{ .x = 125, .y = 5 }, @src());
     }
 
     pub fn pathfinder__arrived(self: *Receiver, p: nav.Events.arrived) void {
@@ -39,6 +47,7 @@ const ECS = core.MockEcsBackend(u32);
 const Hook = engine.MergeHookPayloads(.{ engine.HookPayload(u32), Event });
 const Hooks = engine.MergeHooks(Hook, .{*Receiver});
 const Components = engine.ComponentRegistry(.{
+    .MovementNode = nav.MovementNode,
     .NavGrid = nav.NavGrid,
     .NavCost = nav.NavCost,
     .NavObstacle = nav.NavObstacle,
@@ -55,6 +64,124 @@ fn addAt(game: *Game, x: f32, y: f32) u32 {
 
 fn addGrid(game: *Game, cols: u32, rows: u32) void {
     game.addComponent(game.createEntity(), nav.NavGrid{ .cols = cols, .rows = rows, .cell = 10 });
+}
+
+fn addNode(game: *Game, x: f32) u32 {
+    const entity = addAt(game, x, 5);
+    game.addComponent(entity, nav.MovementNode{});
+    return entity;
+}
+
+test "fresh navigate routes to nodes added before advance and rebuilds only once" {
+    var game = Game.init(testing.allocator);
+    defer game.deinit();
+    try Controller.setup(&game);
+    defer Controller.deinit(&game);
+    const walker = addAt(&game, 5, 5);
+    _ = addNode(&game, 5);
+    _ = addNode(&game, 65);
+    try testing.expectEqual(@as(u64, 0), Controller.graphEpoch(&game));
+    try testing.expect(Controller.navigate(&game, walker, .{ .x = 65, .y = 5 }, @src()) == .accepted);
+    try testing.expectEqual(@as(u64, 1), Controller.graphEpoch(&game));
+
+    const other = addAt(&game, 5, 5);
+    _ = addNode(&game, 125);
+    try testing.expect(Controller.navigate(&game, other, .{ .x = 125, .y = 5 }, @src()) == .accepted);
+    const rebuilt = Controller.graphEpoch(&game);
+    try testing.expectEqual(@as(u64, 2), rebuilt);
+    try testing.expectEqual(@as(u32, 3), Controller.nodeCount(&game));
+    try testing.expect(Controller.isNavigating(&game, walker));
+    try testing.expect(Controller.navigate(&game, other, .{ .x = 125, .y = 5 }, @src()) == .accepted);
+    try testing.expectEqual(rebuilt, Controller.graphEpoch(&game));
+    Controller.advance(&game, 0.05);
+    try testing.expectEqual(@as(f32, 15), game.getPosition(walker).x);
+    try testing.expect(Controller.isNavigating(&game, walker));
+}
+
+test "an equal-count node swap rebuilds even when the first node still exists" {
+    var game = Game.init(testing.allocator);
+    defer game.deinit();
+    try Controller.setup(&game);
+    defer Controller.deinit(&game);
+    const walker = addAt(&game, 65, 5);
+    const first = addNode(&game, 65);
+    const replaced = addNode(&game, 125);
+    Controller.advance(&game, 0);
+    const before = Controller.graphEpoch(&game);
+    const count = Controller.nodeCount(&game);
+
+    // Leave the old entity alive to exercise loss of the component as
+    // well as the equal count and the first node still being present.
+    game.removeComponent(replaced, nav.MovementNode);
+    _ = addNode(&game, 5);
+    try testing.expect(game.hasComponent(first, nav.MovementNode));
+    try testing.expect(game.ecs_backend.entityExists(replaced));
+    try testing.expect(Controller.navigate(&game, walker, .{ .x = 5, .y = 5 }, @src()) == .accepted);
+    try testing.expectEqual(before + 1, Controller.graphEpoch(&game));
+    try testing.expectEqual(count, Controller.nodeCount(&game));
+
+    _ = addNode(&game, 125);
+    game.destroyEntity(first);
+    Controller.advance(&game, 0);
+    try testing.expectEqual(before + 2, Controller.graphEpoch(&game));
+    try testing.expectEqual(count, Controller.nodeCount(&game));
+}
+
+test "a fresh retarget with no graph clears previous direct and saved graph orders" {
+    var game = Game.init(testing.allocator);
+    defer game.deinit();
+    try Controller.setup(&game);
+    defer Controller.deinit(&game);
+    const walker = addAt(&game, 5, 5);
+    const direct = addAt(&game, 5, 5);
+    const start = addNode(&game, 5);
+    const goal = addNode(&game, 65);
+    const target = nav.Position{ .x = 65, .y = 5 };
+    try testing.expect(Controller.navigate(&game, walker, target, @src()) == .accepted);
+    try testing.expect(Controller.moveTo(&game, direct, target) == .accepted);
+
+    game.destroyEntity(start);
+    game.destroyEntity(goal);
+    const deferred = nav.Result{ .deferred = .graph_not_built };
+    try testing.expectEqual(deferred, Controller.navigate(&game, walker, .{ .x = 125, .y = 5 }, @src()));
+    try testing.expectEqual(deferred, Controller.navigate(&game, direct, .{ .x = 125, .y = 5 }, @src()));
+    try testing.expect(!game.hasComponent(walker, nav.Navigating));
+    try testing.expect(!game.hasComponent(direct, nav.Navigating));
+    _ = addNode(&game, 5);
+    _ = addNode(&game, 65);
+    Controller.advance(&game, 0.05);
+    try testing.expect(!Controller.isNavigating(&game, walker));
+    try testing.expect(!Controller.isNavigating(&game, direct));
+    try testing.expectEqual(@as(f32, 5), game.getPosition(walker).x);
+    try testing.expectEqual(@as(f32, 5), game.getPosition(direct).x);
+}
+
+test "a graph retarget from a synchronous movement callback cancels the previous route before deferring" {
+    var game = Game.init(testing.allocator);
+    defer game.deinit();
+    var receiver: Receiver = .{};
+    var hooks: Hooks = .{ .receivers = .{&receiver} };
+    game.setHooks(&hooks);
+    try Controller.setup(&game);
+    defer Controller.deinit(&game);
+    const walker = addAt(&game, 5, 5);
+    _ = addNode(&game, 5);
+    _ = addNode(&game, 65);
+    try testing.expect(Controller.navigate(&game, walker, .{ .x = 65, .y = 5 }, @src()) == .accepted);
+    const before = Controller.graphEpoch(&game);
+
+    receiver.retarget_on_move = walker;
+    Controller.advance(&game, 10);
+    try testing.expectEqual(nav.Result{ .deferred = .graph_tick_in_progress }, receiver.retarget_result.?);
+    try testing.expectEqual(before, Controller.graphEpoch(&game));
+    try testing.expectEqual(@as(f32, 65), game.getPosition(walker).x);
+    try testing.expect(!Controller.isNavigating(&game, walker));
+    try testing.expect(!game.hasComponent(walker, nav.Navigating));
+    game.dispatchEvents();
+    try testing.expectEqual(@as(?nav.Events.arrived, null), receiver.last);
+
+    try testing.expect(Controller.navigate(&game, walker, .{ .x = 125, .y = 5 }, @src()) == .accepted);
+    try testing.expectEqual(before + 1, Controller.graphEpoch(&game));
 }
 
 test "hooks update occupancy after writes, removals and destruction without polling" {
@@ -273,16 +400,16 @@ test "nearestAdjacent picks by walking cost, skips the unreachable and matches g
     // 9 x 5 cells of 10 px. The mover stands at the left; a wall with one gap
     // at the top row stands between it and the right half.
     //
-    //   . . . . . . . . .      m = mover      (cell 1,2)
-    //   . . . # . . . . .      A = `across`   (cell 5,2): 4 cells away in a
-    //   . m . # . A . . .                     straight line, but past the wall
+    //   . . . . . . . . .      m = mover      (cell 2,2)
+    //   . . . # . . . . .      A = `across`   (cell 4,2): nearer, across the wall
+    //   . . m # A . . . .
     //   . . . # . . . . .      B = `beside`   (cell 1,4): on the mover's side
     //   . B . # . . . . S      S = `sealed`   (cell 8,4): walled in, no free edge
     addGrid(&game, 9, 5);
-    const mover = addAt(&game, 15, 25);
+    const mover = addAt(&game, 25, 25);
     const wall = addAt(&game, 35, 30);
     game.addComponent(wall, nav.NavObstacle{ .width = 8, .height = 38 });
-    const across = addAt(&game, 55, 25);
+    const across = addAt(&game, 45, 25);
     game.addComponent(across, nav.NavObstacle{ .width = 8, .height = 8 });
     const beside = addAt(&game, 15, 45);
     game.addComponent(beside, nav.NavObstacle{ .width = 8, .height = 8 });
@@ -294,24 +421,29 @@ test "nearestAdjacent picks by walking cost, skips the unreachable and matches g
     try Controller.setup(&game);
     defer Controller.deinit(&game);
 
-    // `beside` is one step away. `across` is close as the crow flies but
-    // behind the wall. The order of the list does not decide it.
-    const first = Controller.nearestAdjacent(&game, mover, &[_]u32{ across, sealed, beside }).?;
-    try testing.expectEqual(@as(u64, beside), first.target);
-    // One axial step to the cell above it, at the default cell cost of 10.
-    try testing.expectEqual(@as(u64, 100), first.cost);
+    const from = game.getPosition(mover);
+    const across_pos = game.getPosition(across);
+    const beside_pos = game.getPosition(beside);
+    try testing.expect(std.math.hypot(across_pos.x - from.x, across_pos.y - from.y) <
+        std.math.hypot(beside_pos.x - from.x, beside_pos.y - from.y));
+    for ([_][3]u32{ .{ across, sealed, beside }, .{ beside, sealed, across } }) |targets| {
+        const nearest = Controller.nearestAdjacent(&game, mover, &targets).?;
+        try testing.expectEqual(@as(u64, beside), nearest.target);
+        // One diagonal step to the cell above it, at the default cell cost of 10.
+        try testing.expectEqual(@as(u64, 140), nearest.cost);
+    }
 
     // Without `beside`, the walk goes through the gap to `across`. It ends
     // at the cheapest of that target's edge cells, the one above it, which
-    // comes first on the way down from the gap; the cell on the wall's side
-    // is farther. The cost is what gridWalkCost gives for that cell.
+    // comes first on the way down from the gap. The cost matches gridWalkCost
+    // to that cell and is lower than the cost to the cell on the right.
     const second = Controller.nearestAdjacent(&game, mover, &[_]u32{ sealed, across }).?;
     try testing.expectEqual(@as(u64, across), second.target);
-    const above = Controller.gridWalkCost(&game, mover, .{ .x = 55, .y = 15 }).?;
-    const wall_side = Controller.gridWalkCost(&game, mover, .{ .x = 45, .y = 25 }).?;
+    const above = Controller.gridWalkCost(&game, mover, .{ .x = 45, .y = 15 }).?;
+    const right = Controller.gridWalkCost(&game, mover, .{ .x = 55, .y = 25 }).?;
     try testing.expectEqual(above, second.cost);
-    try testing.expect(above < wall_side);
-    try testing.expect(second.cost > 300); // far more than the 3 cells a straight line would be
+    try testing.expect(above < right);
+    try testing.expect(second.cost > 200);
 
     // Nothing reachable, and nothing asked for.
     try testing.expect(Controller.nearestAdjacent(&game, mover, &[_]u32{sealed}) == null);

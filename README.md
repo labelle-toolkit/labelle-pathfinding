@@ -91,10 +91,11 @@ if (pathfinder.Controller.nearestAdjacent(game, worker, marked_trees)) |nearest|
 
 `nearestAdjacent` takes a slice of entities with a `NavObstacle` and returns
 the one whose edge is cheapest to reach, with the cost in `gridWalkCost`'s
-unit, or null when none is reachable. It runs one search for the whole list,
-which stops at the first edge it reaches: the work grows with the distance to
-the nearest target, not with the number of targets. Use it instead of calling
-`gridWalkCost` once per candidate.
+unit, or null when none is reachable. It gathers edge cells from every target
+and searches for a cheapest edge once per possible starting cell. A walker in
+a free cell needs at most one search. A walker in a blocked cell can need up
+to four, one per free escape neighbor. Each search initializes grid-sized
+buffers and stops as soon as it reaches a cheapest edge.
 
 An agent whose current cell becomes blocked can step into a free edge
 neighbor and continue its route. If no free edge neighbor leads to the
