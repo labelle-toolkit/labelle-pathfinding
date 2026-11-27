@@ -26,14 +26,14 @@ depend on it):
 
 ```zig
 .plugins = .{
-    .{ .name = "pathfinder", .repo = "github.com/labelle-toolkit/labelle-pathfinding", .version = "4.0.0" },
+    .{ .name = "pathfinder", .repo = "github.com/labelle-toolkit/labelle-pathfinding", .version = "4.2.2" },
 },
 ```
 
 **Standalone** (algorithm core / pure engine):
 
 ```bash
-zig fetch --save https://github.com/labelle-toolkit/labelle-pathfinding/archive/refs/tags/v4.0.0.tar.gz
+zig fetch --save https://github.com/labelle-toolkit/labelle-pathfinding/archive/refs/tags/v4.2.2.tar.gz
 ```
 
 ## Usage — Navigation Controller (labelle-engine games)
@@ -85,7 +85,8 @@ An agent whose current cell becomes blocked can step into a free edge
 neighbor and continue its route. If no free edge neighbor leads to the
 destination, the controller reports that there is no route.
 
-Automatic footprint updates require an engine containing [#937](https://github.com/labelle-toolkit/labelle-engine/pull/937).
+Automatic footprint updates require [labelle-engine v4.1.4](https://github.com/labelle-toolkit/labelle-engine/releases/tag/v4.1.4)
+or another engine version containing [#937](https://github.com/labelle-toolkit/labelle-engine/pull/937).
 Add this receiver as `hooks/grid_navigation.zig` in an assembled game:
 
 ```zig
