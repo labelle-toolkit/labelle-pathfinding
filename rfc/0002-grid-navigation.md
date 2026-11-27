@@ -124,7 +124,8 @@ pathfinder.Controller.navigateTo(game, entity, target_pos) Result
 /// Picks the one with the cheapest path.
 pathfinder.Controller.navigateAdjacent(game, entity, target_entity) Result
 
-/// Re-stamp one entity's footprint after its Position or footprint changed.
+/// Queue reconciliation of an entity after footprint add/set/remove, movement
+/// or destruction. Uses the cached old footprint even if the entity is gone.
 pathfinder.Controller.refreshFootprint(game, entity) void
 
 /// Throw the grid away and rebuild it from every footprint in the world.
@@ -187,16 +188,12 @@ controller's existing guarded `emitGameEvent` helper, so builds without a
 subscriber still work. The defaulted destination field must also work with
 that helper's payload construction.
 
-Game handlers for construction, demolition or terrain changes can call
-`refreshFootprint` after changing an entity. Coalesce those notifications
-into dirty regions rather than rebuilding once per incoming event. The
-pathfinder must not depend on any particular game's job or building event
-names. Component add/remove/change notifications could eventually replace
-the footprint set scan, but their availability, plugin subscription wiring
-and delivery ordering must first be verified against the target engine.
-Entity creation/destruction hooks alone do not cover component changes or
-position edits. Keep the set scan and explicit refresh contract until that
-coverage is proven; cache old footprints for removal notifications.
+The engine's component lifecycle callbacks, rather than preview telemetry,
+provide part of the input path. The verified behavior and the required
+mutation contract are described below. Game construction, demolition and
+terrain event handlers may also call `refreshFootprint`, but must notify at
+the mutation site if their buffered delivery would occur after navigation
+advances. No game-specific job or building event names are required.
 
 Apply re-stamping, region relabelling and affected-route re-planning inside
 the controller before advancing movement. Publish `grid_changed` after
@@ -209,16 +206,74 @@ events, or replace immediate command acceptance with asynchronous requests.
 
 ### Keeping the grid current
 
-`Controller.advance` already detects node-set changes by counting. The grid
-does the same for footprints:
+Build the grid and the footprint cache once during scene setup or explicit
+`rebuildGrid`. Afterwards, use a deduplicated dirty-entity queue; there is no
+per-frame footprint set comparison. Empty queues do no grid work.
 
-1. Each advance, compare the set of entities carrying `NavObstacle` or
-   `NavCost` with the set stamped last time.
-2. For each added or removed entity, re-stamp only the cells under its
-   rectangle, from the footprints that still overlap those cells.
-3. If anything changed: relabel regions, bump the epoch and re-plan every
-   affected walk using the segment dependency rule below. Then emit
+1. Footprint lifecycle callbacks and explicit mutation notifications enqueue
+   entity ids. They do not inspect or re-stamp a half-mutated world.
+2. At the start of `Controller.advance`, reconcile each dirty id against the
+   completed ECS mutation. Read the current footprint only if the entity
+   exists; dirty the union of its cached old bounds and its current bounds.
+   Missing entities or footprint components remove their cached contribution.
+   Re-stamp from the cached contributors overlapping those cells. Process
+   both `NavObstacle` and `NavCost` independently on entities carrying both.
+3. If cells changed, relabel regions, bump the epoch and re-plan affected
+   walks using the segment dependency rule below. Then emit
    `pathfinder__grid_changed`, before advancing movement.
+
+Grid commands and queries also flush pending dirty entries before reading
+navigation state. This makes a notification followed by a reachability
+query or navigation command in the same script observe the updated grid,
+even if the scheduled advance has not run yet. Guard against reentrant
+flushes; lifecycle callbacks only enqueue ids, and grid commits invoke no
+world mutations. Coalesce pending ids before each flush.
+
+### Verified engine notification coverage
+
+Checked against labelle-engine v4.1.3, commit
+[`7cd4ab8`](https://github.com/labelle-toolkit/labelle-engine/commit/7cd4ab8faac3de4d3f005bdf5efe2c3ef7dd3dc7).
+These are the actual engine seams, not proposed engine events:
+
+| Mutation path | Engine notification | Grid integration |
+|---|---|---|
+| `game.addComponent` | synchronous `T.onAdd(ComponentPayload)` after writing, including replacement | enqueue footprint id; do not assume first insertion |
+| `game.setComponent` | synchronous `T.onAdd` on insertion or `T.onSet` on update, after writing | enqueue footprint id |
+| `game.removeComponent` | synchronous `T.onRemove` before removal, even without a presence check | enqueue only; reconcile after removal; tolerate duplicate or absent removal |
+| `game.destroyEntity` / `destroyEntityOnly` | immediate `entity_destroyed` hook after deletion; buffered `engine__entity_destroyed`; no per-component `onRemove` | native lifecycle adapter enqueues id; cached old bounds survive deletion |
+| `game.createEntity` | immediate `entity_created` hook before caller attaches components | creation alone is insufficient; footprint add notification handles population |
+| `game.setField`, `setPosition`, `setWorldPosition` | no component lifecycle callback | mutation owner must call `refreshFootprint` for footprint-bearing entities |
+| writable component pointers or direct `ecs_backend` / core ECS mutations | bypass the Game callback layer | mutation owner must call `refreshFootprint` |
+
+Sources: [component mutation wrappers](https://github.com/labelle-toolkit/labelle-engine/blob/7cd4ab8faac3de4d3f005bdf5efe2c3ef7dd3dc7/src/game/components_mixin.zig),
+[entity lifecycle](https://github.com/labelle-toolkit/labelle-engine/blob/7cd4ab8faac3de4d3f005bdf5efe2c3ef7dd3dc7/src/game/entity_mixin.zig),
+and [callback payload](https://github.com/labelle-toolkit/labelle-engine/blob/7cd4ab8faac3de4d3f005bdf5efe2c3ef7dd3dc7/src/hooks_types.zig).
+
+The plugin supplies `onAdd`, `onSet` and `onRemove` callbacks on its footprint
+components, with a scene-owned bridge installed during setup to route the
+opaque `ComponentPayload.game_ptr` and entity id into the correct dirty
+queue. The bridge must not cast to a guessed concrete Game type or rely on
+a process-global current scene. Its typed adapter and native lifecycle
+receiver must be wired and checked in the generated consumer. Before setup,
+callbacks may be ignored because the initial build scans the final world.
+Unbind the bridge and discard queues/caches on scene teardown; rebuild on
+load/reset. Validate scene-loader paths that bypass Game wrappers against
+that initial-build boundary.
+
+The immediate destruction hook is required for automatic deletion tracking;
+the buffered engine event alone is too late to guarantee same-tick path
+safety. A consumer without the callback/lifecycle adapters must explicitly
+call `refreshFootprint` after every relevant add, set, remove or destroy.
+Position, footprint field, and raw ECS writes always require explicit
+notification when they bypass callbacks. This is the contract that replaces
+polling: arbitrary unnotified writes are not automatically detected. Changes
+to `NavGrid` configuration require an explicit `rebuildGrid`.
+
+`notifyComponentChanged` / `component_changed` are editor preview socket
+telemetry, gated by preview subscriptions. They are not runtime plugin
+subscriptions and cannot drive navigation correctness. Native lifecycle
+hooks are immediate, while normal game events are buffered; see the engine's
+[delivery contract](https://github.com/labelle-toolkit/labelle-engine/blob/7cd4ab8faac3de4d3f005bdf5efe2c3ef7dd3dc7/HOOK-DELIVERY-CONTRACT.md).
 
 Invalidation checks every remaining segment, starting at the agent's current
 position and continuing through all remaining waypoints. It must not check
@@ -237,10 +292,6 @@ On footprint refresh, dirty both the cached old footprint and the new one;
 on removal, use the cached footprint because ECS data may already be gone.
 Coalesce changes before re-planning and never move an agent along a segment
 invalidated by the applied grid update.
-
-An entity that moves or resizes without being added or removed is not
-detected; the game calls `refreshFootprint`. That keeps the per-frame check to
-a set comparison.
 
 ### Search
 
@@ -305,8 +356,12 @@ path, using the plugin's existing `GizmoCategories`.
 - `pathfinder__grid_changed` and the extended arrival payload are declared
   inline in `src/root.zig`, where the assembler looks for plugin events.
 - The game keeps its single driver script calling `Controller.advance`.
-- No new engine API is required as far as this draft has checked; that needs
-  confirming against the engine version the plugin targets.
+- Setup installs the footprint callback bridge and the native destruction /
+  scene lifecycle receiver. These adapters must be verified in a generated
+  consumer; the engine callbacks are present but the plugin bridge is new.
+- No engine API change is needed for this explicit-notification design.
+  Fully transparent tracking of arbitrary pointer/ECS writes would require
+  a separate engine/ECS change and is not claimed here.
 
 ## Backwards compatibility
 
@@ -328,10 +383,15 @@ and load unchanged.
    save/load rehydration; explicit arrival destinations for all modes and
    compatibility checks for old event producers and consumers.
 5. `navigateAdjacent` and multi-goal search.
-6. Change detection, partial re-stamping, re-planning of affected walks,
+6. Dirty queue, footprint callback bridge, native destruction/scene hooks,
+   partial re-stamping, and re-planning of affected walks,
    `pathfinder__grid_changed`. Verify an obstacle between unchanged waypoints
    invalidates a route, a blocked diagonal support cell invalidates a diagonal,
-   and an unrelated change leaves an unaffected route alone.
+   and an unrelated change leaves an unaffected route alone. Integration
+   checks cover add/replacement/set/remove, destruction without onRemove,
+   explicit field/position/raw-ECS refresh, overlapping footprint kinds,
+   same-tick query flush, scene reload, bridge teardown and an idle advance
+   with no footprint enumeration. Check callback order in a generated game.
 7. Path smoothing, with corner-crossing and post-smoothing invalidation checks.
 8. Long Snow as the reference consumer: keyboard collision from the same
    grid, click to walk, then "fell this tree".
