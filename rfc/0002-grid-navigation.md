@@ -216,9 +216,9 @@ does the same for footprints:
    `NavCost` with the set stamped last time.
 2. For each added or removed entity, re-stamp only the cells under its
    rectangle, from the footprints that still overlap those cells.
-3. If anything changed: relabel regions, bump the epoch and emit
-   `pathfinder__grid_changed`. Before advancing movement, re-plan every
-   affected walk using the segment dependency rule below.
+3. If anything changed: relabel regions, bump the epoch and re-plan every
+   affected walk using the segment dependency rule below. Then emit
+   `pathfinder__grid_changed`, before advancing movement.
 
 Invalidation checks every remaining segment, starting at the agent's current
 position and continuing through all remaining waypoints. It must not check
