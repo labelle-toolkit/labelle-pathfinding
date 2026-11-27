@@ -1,20 +1,20 @@
-# RFC 0002: Grid Navigation Backend
+# RFC 0002: Grid Navigation
 
 **Status:** draft
 **Target:** labelle-toolkit/labelle-pathfinding (written against 4.2.1)
 
 ## Summary
 
-Add a second navigation backend to the `pathfinder` plugin: a cost grid built
+Add a grid navigation mode to the `pathfinder` plugin: a cost grid built
 from footprint components on entities, searched with A\*, and updated
 incrementally as the world changes. It sits beside the existing node-graph
-backend and reuses the same walker, the same `Navigating` order and the same
+mode and reuses the same walker, the same `Navigating` order and the same
 events. A game asks an entity to walk to a point, or to walk up next to
 another entity, and hears `pathfinder__arrived` when it gets there.
 
 ## Motivation
 
-The node-graph backend fits worlds whose walkable space is authored: rooms,
+The node-graph mode fits worlds whose walkable space is authored: rooms,
 corridors, stairs. It does not fit colony and builder games in the style of
 RimWorld, Dwarf Fortress or Oxygen Not Included, where:
 
@@ -62,10 +62,20 @@ navigateTo / navigateAdjacent ──▶ grid A* ──▶ smoothed waypoints
 Entity positions stay in the game's ECS, as today. The plugin owns the grid,
 the regions and the paths.
 
+### Terminology and package boundary
+
+`graph`, `direct` and `grid` are navigation modes. A* and Floyd-Warshall
+are search algorithms. Neither term refers to a runtime provider (such as
+bgfx or raylib) or a graphics API (such as Vulkan or OpenGL).
+
+All navigation modes live in `labelle-pathfinding`, on the same main branch,
+and share the walker, orders, persistence and events. Grid navigation does
+not introduce an implementation branch or a separate plugin package.
+
 ### Components (authored by the game)
 
 ```zig
-/// One per scene. Declares the grid. Without it the grid backend is off and
+/// One per scene. Declares the grid. Without it the grid mode is off and
 /// the plugin behaves exactly as in 4.2.
 pub const NavGrid = struct {
     cell: f32 = 16,          // cell size in px
@@ -147,9 +157,55 @@ list of candidate jobs cheaply before asking for one real path.
 
 | Event | Payload | Fires when |
 |---|---|---|
-| `pathfinder__arrived` | existing | a grid walk reaches its goal cell |
+| `pathfinder__arrived` | existing fields plus optional `destination` (below) | a walk reaches its resolved destination |
 | `pathfinder__navigation_failed` | existing, `reason = .path_invalidated` or `.no_path` | the grid changed under a walk and no route is left |
 | `pathfinder__grid_changed` (new) | `{ epoch, min_col, min_row, max_col, max_row }` | cells were re-stamped; the rectangle bounds the change |
+
+The arrival payload keeps `entity` and `node_entity` unchanged and adds
+`destination`, a nullable tagged union defaulting to `null` for source
+compatibility with existing event producers. Its variants are:
+
+- `graph: { node_entity, x, y }`: the resolved graph destination.
+- `direct: { x, y }`: the resolved direct destination.
+- `grid: { col, row, x, y }`: the resolved goal cell and its world position.
+
+The updated controller always supplies a non-null destination for all three
+modes, including redundant already-there arrivals and rehydrated walks.
+For grid and off-graph direct arrivals, the legacy `node_entity` remains
+zero, matching the existing off-graph convention; graph arrivals preserve
+its existing meaning. New consumers switch on `destination`; old consumers
+can keep reading the original fields. A legacy producer that omits the new
+field yields `null`, which consumers must handle. Do not reinterpret zero
+as a grid cell id. Declare the union inline in `Events.arrived` and verify
+assembler discovery and generated event payloads before implementation ships.
+
+### Event integration
+
+Use Labelle's typed plugin events for sparse state transitions: arrival,
+navigation failure and committed grid changes. Route emissions through the
+controller's existing guarded `emitGameEvent` helper, so builds without a
+subscriber still work. The defaulted destination field must also work with
+that helper's payload construction.
+
+Game handlers for construction, demolition or terrain changes can call
+`refreshFootprint` after changing an entity. Coalesce those notifications
+into dirty regions rather than rebuilding once per incoming event. The
+pathfinder must not depend on any particular game's job or building event
+names. Component add/remove/change notifications could eventually replace
+the footprint set scan, but their availability, plugin subscription wiring
+and delivery ordering must first be verified against the target engine.
+Entity creation/destruction hooks alone do not cover component changes or
+position edits. Keep the set scan and explicit refresh contract until that
+coverage is proven; cache old footprints for removal notifications.
+
+Apply re-stamping, region relabelling and affected-route re-planning inside
+the controller before advancing movement. Publish `grid_changed` after
+that update is committed; consumers must not observe a new grid with stale
+routes. Internal invalidation must work even when no game subscribes to the
+event. Events are notifications, while queries read the current state; a
+buffered event's epoch lets a consumer recognize that later updates have
+already superseded its bounds. Do not emit per-cell or per-frame movement
+events, or replace immediate command acceptance with asynchronous requests.
 
 ### Keeping the grid current
 
@@ -160,9 +216,27 @@ does the same for footprints:
    `NavCost` with the set stamped last time.
 2. For each added or removed entity, re-stamp only the cells under its
    rectangle, from the footprints that still overlap those cells.
-3. If anything changed: relabel regions, bump the epoch, emit
-   `pathfinder__grid_changed`, and re-plan every walk whose remaining
-   waypoints cross the changed rectangle.
+3. If anything changed: relabel regions, bump the epoch and emit
+   `pathfinder__grid_changed`. Before advancing movement, re-plan every
+   affected walk using the segment dependency rule below.
+
+Invalidation checks every remaining segment, starting at the agent's current
+position and continuing through all remaining waypoints. It must not check
+only waypoint positions: a new obstacle can lie between two distant smoothed
+waypoints. Each segment depends on every cell its traversal touches, plus
+both orthogonal support cells at each diagonal transition. A change to any
+of these cells triggers re-planning, even if neither endpoint nor a directly
+traversed cell changed. Cost changes use the same dependency set.
+
+Use the same conservative cell traversal for search validation, smoothing
+and invalidation. A rectangle test may be a broad-phase filter, but it must
+include diagonal support cells; expanding changed bounds by one cell is a
+safe conservative filter. Clamp expanded bounds to the grid. The event's
+rectangle still describes the actual re-stamped area, not this expansion.
+On footprint refresh, dirty both the cached old footprint and the new one;
+on removal, use the cached footprint because ECS data may already be gone.
+Coalesce changes before re-planning and never move an agent along a segment
+invalidated by the applied grid update.
 
 An entity that moves or resizes without being added or removed is not
 detected; the game calls `refreshFootprint`. That keeps the per-frame check to
@@ -190,6 +264,12 @@ while the straight segment between their neighbours crosses only free cells
 and costs no more than the cells it replaces. The second condition stops
 smoothing from dragging a path back through expensive terrain the search
 deliberately went around.
+
+The traversal is conservative (supercover): a segment passing exactly through
+a grid corner checks both side cells as well as the diagonal destination.
+Smoothing must preserve the search's no-corner-cutting rule. Keep or recompute
+the traversed and diagonal support cells for every retained segment so later
+grid changes invalidate the smoothed route correctly.
 
 ### Regions
 
@@ -222,8 +302,8 @@ path, using the plugin's existing `GizmoCategories`.
 ## Integration with labelle-engine
 
 - The three components are discovered like the plugin's current ones.
-- `pathfinder__grid_changed` is declared inline in `src/root.zig`, where the
-  assembler looks for plugin events.
+- `pathfinder__grid_changed` and the extended arrival payload are declared
+  inline in `src/root.zig`, where the assembler looks for plugin events.
 - The game keeps its single driver script calling `Controller.advance`.
 - No new engine API is required as far as this draft has checked; that needs
   confirming against the engine version the plugin targets.
@@ -231,7 +311,9 @@ path, using the plugin's existing `GizmoCategories`.
 ## Backwards compatibility
 
 Additive. A scene without a `NavGrid` entity never builds a grid, and every
-existing command, query, event and component behaves as in 4.2. `Navigating`
+existing command, query and component behaves as in 4.2. The arrival event
+retains its original fields and adds a defaulted optional destination; existing
+producers may omit it and existing consumers may ignore it. `Navigating`
 gains an enum value; saves written by 4.2 contain only `graph` and `direct`
 and load unchanged.
 
@@ -243,11 +325,14 @@ and load unchanged.
 3. `NavGrid`, `NavObstacle`, `NavCost`; building the grid at setup; the gizmo
    layer.
 4. `navigateTo` wired to the existing walker; `Navigating.Mode.grid`;
-   save/load rehydration.
+   save/load rehydration; explicit arrival destinations for all modes and
+   compatibility checks for old event producers and consumers.
 5. `navigateAdjacent` and multi-goal search.
 6. Change detection, partial re-stamping, re-planning of affected walks,
-   `pathfinder__grid_changed`.
-7. Path smoothing.
+   `pathfinder__grid_changed`. Verify an obstacle between unchanged waypoints
+   invalidates a route, a blocked diagonal support cell invalidates a diagonal,
+   and an unrelated change leaves an unaffected route alone.
+7. Path smoothing, with corner-crossing and post-smoothing invalidation checks.
 8. Long Snow as the reference consumer: keyboard collision from the same
    grid, click to walk, then "fell this tree".
 
@@ -255,7 +340,7 @@ Steps 1 to 4 are enough to walk around obstacles on a static map.
 
 ## Alternatives considered
 
-1. **Generate `MovementNode`s on a lattice and keep the graph backend.**
+1. **Generate `MovementNode`s on a lattice and keep the graph mode.**
    No new search code, and it reuses everything. But Floyd-Warshall is cubic
    in the node count and is rebuilt on every change, so it only works for
    coarse lattices on small maps, and coarse lattices give poor paths.
@@ -271,21 +356,19 @@ Steps 1 to 4 are enough to walk around obstacles on a static map.
 
 ## Open questions
 
-1. **One command or two?** Should `navigate` pick the backend itself (grid
+1. **One command or two?** Should `navigate` pick the navigation mode itself (grid
    when the scene has a `NavGrid`, graph otherwise), instead of adding
-   `navigateTo`? A game that mixes both backends needs a rule for which one
+   `navigateTo`? A game that mixes both modes needs a rule for which one
    answers.
-2. **`pathfinder__arrived` carries `node_entity`.** A grid walk has no node.
-   Send zero, or version the payload?
-3. **Agent size.** One `agent_radius` per grid is simple but wrong once agents
+2. **Agent size.** One `agent_radius` per grid is simple but wrong once agents
    differ in size. Per-agent clearance needs a clearance map.
-4. **Footprint shape.** Are rectangles enough, or do circles and multi-cell
+3. **Footprint shape.** Are rectangles enough, or do circles and multi-cell
    masks belong in v1?
-5. **Overlapping `NavCost`.** "Last stamped wins" depends on entity order. A
+4. **Overlapping `NavCost`.** "Last stamped wins" depends on entity order. A
    priority field, or the maximum, would be deterministic.
-6. **Search budget.** v1 searches synchronously inside the command. At what
+5. **Search budget.** v1 searches synchronously inside the command. At what
    grid size does that need a per-frame expansion budget and `deferred`
    results?
-7. **Who owns keyboard collision?** The grid can answer `isBlocked`, but a
+6. **Who owns keyboard collision?** The grid can answer `isBlocked`, but a
    directly controlled character probably wants sliding along walls, which is
    not pathfinding.
