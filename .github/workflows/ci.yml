@@ -28,11 +28,8 @@ jobs:
       - name: Run zspec tests
         run: zig build spec
 
-      - name: Checkout engine with component change hooks
-        run: |
-          git init ../labelle-engine
-          git -C ../labelle-engine fetch --depth 1 https://github.com/labelle-toolkit/labelle-engine.git 4866a50fc74f3c7cd34a1db9b42d1d55443add55
-          git -C ../labelle-engine checkout --detach FETCH_HEAD
+      - name: Checkout labelle-engine
+        run: git clone --depth 1 --branch main https://github.com/labelle-toolkit/labelle-engine.git ../labelle-engine
       - name: Run grid integration tests with the engine
         working-directory: tests/engine-grid
         run: zig build test

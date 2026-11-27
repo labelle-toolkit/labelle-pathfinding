@@ -3,7 +3,7 @@
 **Status:** draft
 **Target:** labelle-toolkit/labelle-pathfinding (written against 4.2.1)
 **Engine prerequisite:** [labelle-engine #937](https://github.com/labelle-toolkit/labelle-engine/pull/937)
-(unmerged; requires a consumer engine version containing that change).
+(merged into the engine's `main`; requires an engine build containing that change).
 
 ## Summary
 
@@ -193,7 +193,7 @@ subscriber still work. The defaulted destination field must also work with
 that helper's payload construction.
 
 The engine's immediate native `component_changed` hook is the input path
-once engine #937 is available. A plugin receiver observes Position and
+introduced by engine #937. A plugin receiver observes Position and
 footprint mutations directly; game construction, demolition and terrain
 handlers using Game setters need no `refreshFootprint` calls. No
 game-specific job or building event names are required.
