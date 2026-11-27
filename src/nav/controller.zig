@@ -1353,7 +1353,15 @@ pub const Controller = struct {
     pub fn isNavigating(game: anytype, entity: anytype) bool {
         const st = findState(game) orelse return false;
         const entity_id: u64 = @intCast(entity);
-        return st.isNavigating(entity_id) or st.direct_moves.contains(entity_id) or st.grid_walks.contains(entity_id);
+        if (st.isNavigating(entity_id) or st.direct_moves.contains(entity_id) or st.grid_walks.contains(entity_id)) return true;
+
+        // A rebuild can drop a route before advance rehydrates its saved order.
+        const Entity = @TypeOf(game.*).EntityType;
+        const id: Entity = @intCast(entity_id);
+        const ecs = &game.active_world.ecs_backend;
+        if (!ecs.entityExists(id)) return false;
+        const order = ecs.getComponent(id, Navigating) orelse return false;
+        return order.mode == .graph;
     }
 
     /// Walk-cost between two entities with the game-proven "nearest X"

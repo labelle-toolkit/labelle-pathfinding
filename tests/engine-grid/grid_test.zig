@@ -84,13 +84,18 @@ test "fresh navigate routes to nodes added before advance and rebuilds only once
     try testing.expect(Controller.navigate(&game, walker, .{ .x = 65, .y = 5 }, @src()) == .accepted);
     try testing.expectEqual(@as(u64, 1), Controller.graphEpoch(&game));
 
+    const other = addAt(&game, 5, 5);
     _ = addNode(&game, 125);
-    try testing.expect(Controller.navigate(&game, walker, .{ .x = 125, .y = 5 }, @src()) == .accepted);
+    try testing.expect(Controller.navigate(&game, other, .{ .x = 125, .y = 5 }, @src()) == .accepted);
     const rebuilt = Controller.graphEpoch(&game);
     try testing.expectEqual(@as(u64, 2), rebuilt);
     try testing.expectEqual(@as(u32, 3), Controller.nodeCount(&game));
-    try testing.expect(Controller.navigate(&game, walker, .{ .x = 125, .y = 5 }, @src()) == .accepted);
+    try testing.expect(Controller.isNavigating(&game, walker));
+    try testing.expect(Controller.navigate(&game, other, .{ .x = 125, .y = 5 }, @src()) == .accepted);
     try testing.expectEqual(rebuilt, Controller.graphEpoch(&game));
+    Controller.advance(&game, 0.05);
+    try testing.expectEqual(@as(f32, 15), game.getPosition(walker).x);
+    try testing.expect(Controller.isNavigating(&game, walker));
 }
 
 test "an equal-count node swap rebuilds even when the first node still exists" {
