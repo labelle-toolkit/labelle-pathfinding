@@ -26,14 +26,14 @@ depend on it):
 
 ```zig
 .plugins = .{
-    .{ .name = "pathfinder", .repo = "github.com/labelle-toolkit/labelle-pathfinding", .version = "4.2.2" },
+    .{ .name = "pathfinder", .repo = "github.com/labelle-toolkit/labelle-pathfinding", .version = "4.2.3" },
 },
 ```
 
 **Standalone** (algorithm core / pure engine):
 
 ```bash
-zig fetch --save https://github.com/labelle-toolkit/labelle-pathfinding/archive/refs/tags/v4.2.2.tar.gz
+zig fetch --save https://github.com/labelle-toolkit/labelle-pathfinding/archive/refs/tags/v4.2.3.tar.gz
 ```
 
 ## Usage — Navigation Controller (labelle-engine games)
