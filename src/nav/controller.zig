@@ -1027,6 +1027,56 @@ pub const Controller = struct {
         return best;
     }
 
+    /// The answer to `nearestAdjacent`: which target, and what the walk to
+    /// its edge costs, in the same unit as `gridWalkCost`.
+    pub const NearestAdjacent = struct { target: u64, cost: u64 };
+
+    /// Of `targets` (entities carrying a NavObstacle), the one whose edge is
+    /// cheapest for `entity` to walk to, and that cost. One search answers
+    /// for the whole list: it spreads out from the walker and stops at the
+    /// first edge cell it reaches, so the work depends on how far the nearest
+    /// target is, not on how many targets there are. Null when none can be
+    /// reached, the list is empty, or memory ran out.
+    ///
+    /// Meant for choosing work ("which marked tree do I fell next?"); follow
+    /// it with `navigateAdjacent(game, entity, result.target)`. When two
+    /// targets share the cheapest edge cell, the earlier one in `targets`
+    /// wins.
+    pub fn nearestAdjacent(game: anytype, entity: anytype, targets: anytype) ?NearestAdjacent {
+        const st = queryGrid(game) orelse return null;
+        const grid = st.grid.?;
+        const start = gridStart(grid, game, entity) orelse return null;
+        const a = st.allocator;
+        var best: ?NearestAdjacent = null;
+        for (gridStarts(grid, start)) |entry| {
+            const cell = entry orelse continue;
+            // Every target's edge cells in one goal list; `owners` says whose
+            // edge each goal is.
+            var goals: std.ArrayList(grid_algo.Cell) = .empty;
+            defer goals.deinit(a);
+            var owners: std.ArrayList(u64) = .empty;
+            defer owners.deinit(a);
+            for (targets) |target| {
+                const id: u64 = @intCast(target);
+                const edge = grid.adjacent(a, cell, id) catch return null;
+                defer a.free(edge);
+                goals.appendSlice(a, edge) catch return null;
+                owners.appendNTimes(a, id, edge.len) catch return null;
+            }
+            if (goals.items.len == 0) continue;
+            const route = (grid.search.searchPrepared(a, cell, goals.items) catch return null) orelse continue;
+            defer a.free(route.cells);
+            const reached = route.cells[route.cells.len - 1];
+            const owner = for (goals.items, owners.items) |goal, id| {
+                if (goal.col == reached.col and goal.row == reached.row) break id;
+            } else continue;
+            const exit = if (grid.search.free(start)) 0 else grid.walkSegment(game.getPosition(entity), grid.center(cell), null, start).cost;
+            const cost = route.cost + @as(u64, @intFromFloat(@round(exit * 10)));
+            if (best == null or cost < best.?.cost) best = .{ .target = owner, .cost = cost };
+        }
+        return best;
+    }
+
     pub fn isBlocked(game: anytype, pos: Position) bool {
         const st = queryGrid(game) orelse return true;
         const grid = st.grid.?;

@@ -81,6 +81,21 @@ route cost in tenths of an axial cell-entry cost. Terrain cost affects route
 selection; movement uses `MovementSpeed`. To inspect the grid, call
 `drawGridGizmos` with the `GridNavigation` category enabled.
 
+To choose among several targets, ask which is nearest by walking cost:
+
+```zig
+if (pathfinder.Controller.nearestAdjacent(game, worker, marked_trees)) |nearest| {
+    _ = pathfinder.Controller.navigateAdjacent(game, worker, nearest.target);
+}
+```
+
+`nearestAdjacent` takes a slice of entities with a `NavObstacle` and returns
+the one whose edge is cheapest to reach, with the cost in `gridWalkCost`'s
+unit, or null when none is reachable. It runs one search for the whole list,
+which stops at the first edge it reaches: the work grows with the distance to
+the nearest target, not with the number of targets. Use it instead of calling
+`gridWalkCost` once per candidate.
+
 An agent whose current cell becomes blocked can step into a free edge
 neighbor and continue its route. If no free edge neighbor leads to the
 destination, the controller reports that there is no route.

@@ -263,3 +263,59 @@ test "a malformed scene grid still allows direct orders and can be repaired" {
     try testing.expectEqual(@as(u32, 4), receiver.last_change.?.max_col);
     try testing.expect(Controller.isBlocked(&game, goal));
 }
+
+test "nearestAdjacent picks by walking cost, skips the unreachable and matches gridWalkCost" {
+    var game = Game.init(testing.allocator);
+    defer game.deinit();
+    var receiver: Receiver = .{};
+    var hooks: Hooks = .{ .receivers = .{&receiver} };
+    game.setHooks(&hooks);
+    // 9 x 5 cells of 10 px. The mover stands at the left; a wall with one gap
+    // at the top row stands between it and the right half.
+    //
+    //   . . . . . . . . .      m = mover      (cell 1,2)
+    //   . . . # . . . . .      A = `across`   (cell 5,2): 4 cells away in a
+    //   . m . # . A . . .                     straight line, but past the wall
+    //   . . . # . . . . .      B = `beside`   (cell 1,4): on the mover's side
+    //   . B . # . . . . S      S = `sealed`   (cell 8,4): walled in, no free edge
+    addGrid(&game, 9, 5);
+    const mover = addAt(&game, 15, 25);
+    const wall = addAt(&game, 35, 30);
+    game.addComponent(wall, nav.NavObstacle{ .width = 8, .height = 38 });
+    const across = addAt(&game, 55, 25);
+    game.addComponent(across, nav.NavObstacle{ .width = 8, .height = 8 });
+    const beside = addAt(&game, 15, 45);
+    game.addComponent(beside, nav.NavObstacle{ .width = 8, .height = 8 });
+    const sealed = addAt(&game, 85, 45);
+    game.addComponent(sealed, nav.NavObstacle{ .width = 8, .height = 8 });
+    for ([_][2]f32{ .{ 75, 45 }, .{ 85, 35 }, .{ 75, 35 } }) |p| {
+        game.addComponent(addAt(&game, p[0], p[1]), nav.NavObstacle{ .width = 8, .height = 8 });
+    }
+    try Controller.setup(&game);
+    defer Controller.deinit(&game);
+
+    // `beside` is one step away. `across` is close as the crow flies but
+    // behind the wall. The order of the list does not decide it.
+    const first = Controller.nearestAdjacent(&game, mover, &[_]u32{ across, sealed, beside }).?;
+    try testing.expectEqual(@as(u64, beside), first.target);
+    // One axial step to the cell above it, at the default cell cost of 10.
+    try testing.expectEqual(@as(u64, 100), first.cost);
+
+    // Without `beside`, the walk goes through the gap to `across`. It ends
+    // at the cheapest of that target's edge cells, the one above it, which
+    // comes first on the way down from the gap; the cell on the wall's side
+    // is farther. The cost is what gridWalkCost gives for that cell.
+    const second = Controller.nearestAdjacent(&game, mover, &[_]u32{ sealed, across }).?;
+    try testing.expectEqual(@as(u64, across), second.target);
+    const above = Controller.gridWalkCost(&game, mover, .{ .x = 55, .y = 15 }).?;
+    const wall_side = Controller.gridWalkCost(&game, mover, .{ .x = 45, .y = 25 }).?;
+    try testing.expectEqual(above, second.cost);
+    try testing.expect(above < wall_side);
+    try testing.expect(second.cost > 300); // far more than the 3 cells a straight line would be
+
+    // Nothing reachable, and nothing asked for.
+    try testing.expect(Controller.nearestAdjacent(&game, mover, &[_]u32{sealed}) == null);
+    try testing.expect(Controller.nearestAdjacent(&game, mover, &[_]u32{}) == null);
+    // The answer is good for navigateAdjacent.
+    try testing.expect(Controller.navigateAdjacent(&game, mover, @as(u32, @intCast(second.target))) == .accepted);
+}
