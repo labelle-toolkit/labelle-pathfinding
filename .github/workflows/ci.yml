@@ -27,3 +27,9 @@ jobs:
 
       - name: Run zspec tests
         run: zig build spec
+
+      - name: Checkout labelle-engine
+        run: git clone --depth 1 --branch main https://github.com/labelle-toolkit/labelle-engine.git ../labelle-engine
+      - name: Run grid integration tests with the engine
+        working-directory: tests/engine-grid
+        run: zig build test

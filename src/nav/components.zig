@@ -86,7 +86,37 @@ pub const Navigating = struct {
         /// Straight-line walk to the target — off-graph moves (ship
         /// boundary hops, wander steps). No routing, just kinematics.
         direct,
+        /// Route through the weighted navigation grid.
+        grid,
     };
+};
+
+pub const NavGrid = struct {
+    pub const save_policy: @import("labelle-core").SavePolicy = .saveable;
+    cell: f32 = 16,
+    origin_x: f32 = 0,
+    origin_y: f32 = 0,
+    cols: u32 = 0,
+    rows: u32 = 0,
+    default_cost: u8 = 10,
+    agent_radius: f32 = 0,
+};
+
+pub const NavObstacle = struct {
+    pub const save_policy: @import("labelle-core").SavePolicy = .saveable;
+    width: f32 = 0,
+    height: f32 = 0,
+    offset_x: f32 = 0,
+    offset_y: f32 = 0,
+};
+
+pub const NavCost = struct {
+    pub const save_policy: @import("labelle-core").SavePolicy = .saveable;
+    width: f32 = 0,
+    height: f32 = 0,
+    offset_x: f32 = 0,
+    offset_y: f32 = 0,
+    cost: u8 = 10,
 };
 
 // (v4.0.0) The `MovementTargetWith` / `NavigationIntentWith` component
