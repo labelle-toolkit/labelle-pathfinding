@@ -223,5 +223,10 @@ test "invalid configuration rejects commands until a corrected rebuild" {
     try testing.expect(Controller.navigateTo(&game, mover, goal) == .accepted);
     game.removeComponent(cfg, nav.NavGrid);
     Controller.rebuildGrid(&game);
+    try testing.expect(Controller.moveTo(&game, mover, .{ .x = 100, .y = 5 }) == .accepted);
     try testing.expectEqual(nav.Reason.grid_not_built, Controller.navigateTo(&game, mover, goal).rejected);
+    try testing.expect(!Controller.isNavigating(&game, mover));
+    try testing.expect(!game.hasComponent(mover, nav.Navigating));
+    Controller.advance(&game, 1);
+    try testing.expectEqual(@as(f32, 5), game.getPosition(mover).x);
 }

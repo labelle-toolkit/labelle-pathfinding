@@ -904,23 +904,36 @@ pub const Controller = struct {
 
     fn navigateGrid(game: anytype, st: *State, entity: anytype, target: GridTarget, snap: bool) Result {
         if (!flushGrid(st, game)) return .{ .deferred = .pending_alloc_failed };
-        const grid = st.grid orelse return .{ .rejected = if (st.grid_config_invalid) .invalid_grid else .grid_not_built };
+        const grid = st.grid orelse {
+            cancel(game, entity);
+            return .{ .rejected = if (st.grid_config_invalid) .invalid_grid else .grid_not_built };
+        };
         const id: u64 = @intCast(entity);
         const ecs = &game.active_world.ecs_backend;
-        if (!ecs.entityExists(entity)) return .{ .rejected = .no_position };
-        const from = (ecs.getComponent(entity, Position) orelse return .{ .rejected = .no_position }).*;
-        const planned = planGrid(grid, st.allocator, from, target, snap) catch return .{ .deferred = .pending_alloc_failed };
+        const position = if (ecs.entityExists(entity)) ecs.getComponent(entity, Position) else null;
+        const from = (position orelse {
+            cancel(game, entity);
+            return .{ .rejected = .no_position };
+        }).*;
+        const walk = (planGrid(grid, st.allocator, from, target, snap) catch return .{ .deferred = .pending_alloc_failed }) orelse {
+            cancel(game, entity);
+            return .{ .rejected = .no_path };
+        };
+        // Reserve before replacing the existing order. Deferred requests
+        // leave it intact; terminal results clear it.
+        if (walk.points.len != 0 and !st.grid_walks.contains(id)) {
+            st.grid_walks.ensureUnusedCapacity(st.allocator, 1) catch {
+                st.allocator.free(walk.points);
+                return .{ .deferred = .pending_alloc_failed };
+            };
+        }
         cancel(game, entity);
-        const walk = planned orelse return .{ .rejected = .no_path };
         if (walk.points.len == 0) {
             st.allocator.free(walk.points);
             settleGridArrival(game, st, id, grid, walk.goal);
             return .redundant;
         }
-        st.grid_walks.put(st.allocator, id, walk) catch {
-            st.allocator.free(walk.points);
-            return .{ .deferred = .pending_alloc_failed };
-        };
+        st.grid_walks.putAssumeCapacity(id, walk);
         const goal = grid.center(walk.goal);
         ecs.addComponent(entity, Navigating{ .mode = .grid, .target_x = goal.x, .target_y = goal.y });
         return .accepted;
