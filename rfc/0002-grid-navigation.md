@@ -2,6 +2,8 @@
 
 **Status:** draft
 **Target:** labelle-toolkit/labelle-pathfinding (written against 4.2.1)
+**Engine prerequisite:** [labelle-engine #937](https://github.com/labelle-toolkit/labelle-engine/pull/937)
+(unmerged; requires a consumer engine version containing that change).
 
 ## Summary
 
@@ -124,8 +126,8 @@ pathfinder.Controller.navigateTo(game, entity, target_pos) Result
 /// Picks the one with the cheapest path.
 pathfinder.Controller.navigateAdjacent(game, entity, target_entity) Result
 
-/// Queue reconciliation of an entity after footprint add/set/remove, movement
-/// or destruction. Uses the cached old footprint even if the entity is gone.
+/// Optional escape hatch for raw pointer/backend writes that bypass Game APIs.
+/// Queues reconciliation using cached old bounds even if the entity is gone.
 pathfinder.Controller.refreshFootprint(game, entity) void
 
 /// Throw the grid away and rebuild it from every footprint in the world.
@@ -188,12 +190,11 @@ controller's existing guarded `emitGameEvent` helper, so builds without a
 subscriber still work. The defaulted destination field must also work with
 that helper's payload construction.
 
-The engine's component lifecycle callbacks, rather than preview telemetry,
-provide part of the input path. The verified behavior and the required
-mutation contract are described below. Game construction, demolition and
-terrain event handlers may also call `refreshFootprint`, but must notify at
-the mutation site if their buffered delivery would occur after navigation
-advances. No game-specific job or building event names are required.
+The engine's immediate native `component_changed` hook is the input path
+once engine #937 is available. A plugin receiver observes Position and
+footprint mutations directly; game construction, demolition and terrain
+handlers using Game setters need no `refreshFootprint` calls. No
+game-specific job or building event names are required.
 
 Apply re-stamping, region relabelling and affected-route re-planning inside
 the controller before advancing movement. Publish `grid_changed` after
@@ -210,8 +211,9 @@ Build the grid and the footprint cache once during scene setup or explicit
 `rebuildGrid`. Afterwards, use a deduplicated dirty-entity queue; there is no
 per-frame footprint set comparison. Empty queues do no grid work.
 
-1. Footprint lifecycle callbacks and explicit mutation notifications enqueue
-   entity ids. They do not inspect or re-stamp a half-mutated world.
+1. The native component-change receiver enqueues affected entity ids. Raw
+   writes can explicitly enqueue through `refreshFootprint`. Handlers do not
+   re-stamp a half-mutated world.
 2. At the start of `Controller.advance`, reconcile each dirty id against the
    completed ECS mutation. Read the current footprint only if the entity
    exists; dirty the union of its cached old bounds and its current bounds.
@@ -229,51 +231,67 @@ even if the scheduled advance has not run yet. Guard against reentrant
 flushes; lifecycle callbacks only enqueue ids, and grid commits invoke no
 world mutations. Coalesce pending ids before each flush.
 
-### Verified engine notification coverage
+### Engine notification coverage and required version
 
-Checked against labelle-engine v4.1.3, commit
-[`7cd4ab8`](https://github.com/labelle-toolkit/labelle-engine/commit/7cd4ab8faac3de4d3f005bdf5efe2c3ef7dd3dc7).
-These are the actual engine seams, not proposed engine events:
+The baseline engine v4.1.3 at
+[`7cd4ab8`](https://github.com/labelle-toolkit/labelle-engine/commit/7cd4ab8faac3de4d3f005bdf5efe2c3ef7dd3dc7)
+has synchronous type callbacks for add/set/remove, but position setters and
+`setField` bypass them, and entity destruction does not invoke per-component
+`onRemove`. Its preview `component_changed` socket frame cannot fill those
+gaps. [Engine #937](https://github.com/labelle-toolkit/labelle-engine/pull/937)
+implements the required native hook and closes the Game-API gaps. This RFC
+depends on that change; it does not claim those features shipped in 4.1.3.
 
-| Mutation path | Engine notification | Grid integration |
-|---|---|---|
-| `game.addComponent` | synchronous `T.onAdd(ComponentPayload)` after writing, including replacement | enqueue footprint id; do not assume first insertion |
-| `game.setComponent` | synchronous `T.onAdd` on insertion or `T.onSet` on update, after writing | enqueue footprint id |
-| `game.removeComponent` | synchronous `T.onRemove` before removal, even without a presence check | enqueue only; reconcile after removal; tolerate duplicate or absent removal |
-| `game.destroyEntity` / `destroyEntityOnly` | immediate `entity_destroyed` hook after deletion; buffered `engine__entity_destroyed`; no per-component `onRemove` | native lifecycle adapter enqueues id; cached old bounds survive deletion |
-| `game.createEntity` | immediate `entity_created` hook before caller attaches components | creation alone is insufficient; footprint add notification handles population |
-| `game.setField`, `setPosition`, `setWorldPosition` | no component lifecycle callback | mutation owner must call `refreshFootprint` for footprint-bearing entities |
-| writable component pointers or direct `ecs_backend` / core ECS mutations | bypass the Game callback layer | mutation owner must call `refreshFootprint` |
+The new native `HookPayload.component_changed` payload is
+`{ entity_id, component_name, change }`, with a fully qualified
+`component_name = @typeName(T)` and `change = added | set | removing`.
+It is immediate and independent of preview mode or buffered GameEvents.
 
-Sources: [component mutation wrappers](https://github.com/labelle-toolkit/labelle-engine/blob/7cd4ab8faac3de4d3f005bdf5efe2c3ef7dd3dc7/src/game/components_mixin.zig),
-[entity lifecycle](https://github.com/labelle-toolkit/labelle-engine/blob/7cd4ab8faac3de4d3f005bdf5efe2c3ef7dd3dc7/src/game/entity_mixin.zig),
-and [callback payload](https://github.com/labelle-toolkit/labelle-engine/blob/7cd4ab8faac3de4d3f005bdf5efe2c3ef7dd3dc7/src/hooks_types.zig).
+| Mutation path with engine #937 | Notification and callback behavior |
+|---|---|
+| `game.addComponent` | native `added` after writing; existing `T.onAdd` behavior, including replacement |
+| `game.setComponent` | native `added` or `set` after writing; `T.onAdd` on insertion or `T.onSet` on update |
+| `game.setField` | native `set` and `T.onSet` after writing; absent component is a no-op |
+| `game.setPosition` / `setWorldPosition` | native Position `added` or `set` after writing |
+| `game.removeComponent` | native `removing` and `T.onRemove` while data is readable; absent removal is a no-op |
+| `game.destroyEntity` / `destroyEntityOnly` | native `removing` and `T.onRemove` for present registered/known engine components before deletion; `entity_destroyed` remains after deletion |
+| writable component pointers or direct `ecs_backend` / core ECS mutations | bypass Game notifications; use Game setters or explicitly call `refreshFootprint` |
 
-The plugin supplies `onAdd`, `onSet` and `onRemove` callbacks on its footprint
-components, with a scene-owned bridge installed during setup to route the
-opaque `ComponentPayload.game_ptr` and entity id into the correct dirty
-queue. The bridge must not cast to a guessed concrete Game type or rely on
-a process-global current scene. Its typed adapter and native lifecycle
-receiver must be wired and checked in the generated consumer. Before setup,
-callbacks may be ignored because the initial build scans the final world.
-Unbind the bridge and discard queues/caches on scene teardown; rebuild on
-load/reset. Validate scene-loader paths that bypass Game wrappers against
-that initial-build boundary.
+Implement a native receiver using the existing typed hook context, matching
+`component_name` against `@typeName(Position)`, `@typeName(NavObstacle)` and
+`@typeName(NavCost)`. Enqueue only entities carrying a footprint or already
+present in the footprint cache. For removal, use the cached old bounds:
+reconciliation runs after the API call, when the component/entity may be
+gone. A footprint without Position contributes no cells. Notifications on
+an entity carrying both footprint kinds reconcile both independently.
 
-The immediate destruction hook is required for automatic deletion tracking;
-the buffered engine event alone is too late to guarantee same-tick path
-safety. A consumer without the callback/lifecycle adapters must explicitly
-call `refreshFootprint` after every relevant add, set, remove or destroy.
-Position, footprint field, and raw ECS writes always require explicit
-notification when they bypass callbacks. This is the contract that replaces
-polling: arbitrary unnotified writes are not automatically detected. Changes
-to `NavGrid` configuration require an explicit `rebuildGrid`.
+Register the footprint types in the project's component registry so entity
+destruction enumerates them. The native handler only enqueues ids; it must
+not flush or mutate components from a pre-removal callback. The engine
+handles registry aliases and recursive removal/destruction. Navigation does
+not need separate per-component opaque callback bridges or a destruction
+receiver to recover missing `onRemove` notifications.
 
-`notifyComponentChanged` / `component_changed` are editor preview socket
-telemetry, gated by preview subscriptions. They are not runtime plugin
-subscriptions and cannot drive navigation correctness. Native lifecycle
-hooks are immediate, while normal game events are buffered; see the engine's
-[delivery contract](https://github.com/labelle-toolkit/labelle-engine/blob/7cd4ab8faac3de4d3f005bdf5efe2c3ef7dd3dc7/HOOK-DELIVERY-CONTRACT.md).
+Wire and validate the native receiver in the generated consumer before
+claiming automatic updates. Notifications before setup may be ignored:
+the initial build scans the completed world once. Discard dirty ids and
+cached footprints at scene teardown and rebuild on load/reset. Scene-loader
+paths that bypass Game wrappers are covered by this initial build, not by
+pretending they emit notifications. Changes to `NavGrid` configuration still
+require an explicit `rebuildGrid`.
+
+The supported contract needs no explicit footprint refresh for ordinary
+Game-API position/field changes or entity destruction. Unnotified pointer
+and backend writes remain unsupported for automatic tracking. This grid
+uses the entity's own Position; indexing inherited world transforms would
+also require hierarchy/ancestor invalidation, because moving a parent does
+not rewrite each child's local Position.
+
+Do not confuse the new native hook with preview `notifyComponentChanged`
+telemetry: the latter remains editor-only. There is no buffered
+`engine__component_changed` twin. See the engine PR's
+[delivery contract](https://github.com/labelle-toolkit/labelle-engine/blob/810b9a071dfb84724fdb424961cf064f0929d490/HOOK-DELIVERY-CONTRACT.md)
+and [component setters](https://github.com/labelle-toolkit/labelle-engine/blob/810b9a071dfb84724fdb424961cf064f0929d490/src/game/components_mixin.zig).
 
 Invalidation checks every remaining segment, starting at the agent's current
 position and continuing through all remaining waypoints. It must not check
@@ -356,12 +374,10 @@ path, using the plugin's existing `GizmoCategories`.
 - `pathfinder__grid_changed` and the extended arrival payload are declared
   inline in `src/root.zig`, where the assembler looks for plugin events.
 - The game keeps its single driver script calling `Controller.advance`.
-- Setup installs the footprint callback bridge and the native destruction /
-  scene lifecycle receiver. These adapters must be verified in a generated
-  consumer; the engine callbacks are present but the plugin bridge is new.
-- No engine API change is needed for this explicit-notification design.
-  Fully transparent tracking of arbitrary pointer/ECS writes would require
-  a separate engine/ECS change and is not claimed here.
+- Setup wires the native `component_changed` receiver and scene lifecycle
+  handling. Verify these adapters in a generated consumer.
+- Require an engine version containing #937 for automatic Game-API updates.
+  Raw pointer/backend writes still bypass the engine mutation layer.
 
 ## Backwards compatibility
 
@@ -383,15 +399,16 @@ and load unchanged.
    save/load rehydration; explicit arrival destinations for all modes and
    compatibility checks for old event producers and consumers.
 5. `navigateAdjacent` and multi-goal search.
-6. Dirty queue, footprint callback bridge, native destruction/scene hooks,
+6. Dirty queue, native component-change/scene hooks (requires engine #937),
    partial re-stamping, and re-planning of affected walks,
    `pathfinder__grid_changed`. Verify an obstacle between unchanged waypoints
    invalidates a route, a blocked diagonal support cell invalidates a diagonal,
    and an unrelated change leaves an unaffected route alone. Integration
-   checks cover add/replacement/set/remove, destruction without onRemove,
-   explicit field/position/raw-ECS refresh, overlapping footprint kinds,
-   same-tick query flush, scene reload, bridge teardown and an idle advance
-   with no footprint enumeration. Check callback order in a generated game.
+   checks cover add/replacement/set/remove, automatic field/position updates
+   and destruction without explicit refresh, raw-ECS refresh as an escape
+   hatch, overlapping footprint kinds, same-tick query flush, scene reload,
+   handler teardown and an idle advance with no footprint enumeration.
+   Check notification order in a generated game.
 7. Path smoothing, with corner-crossing and post-smoothing invalidation checks.
 8. Long Snow as the reference consumer: keyboard collision from the same
    grid, click to walk, then "fell this tree".
