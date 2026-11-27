@@ -27,7 +27,6 @@ const Receiver = struct {
         self.retarget_on_move = null;
         _ = addNode(game, 125);
         self.retarget_result = Controller.navigate(game, p.entity_id, .{ .x = 125, .y = 5 }, @src());
-        Controller.cancel(game, p.entity_id);
     }
 
     pub fn pathfinder__arrived(self: *Receiver, p: nav.Events.arrived) void {
@@ -152,7 +151,7 @@ test "a fresh retarget with no graph clears previous direct and saved graph orde
     try testing.expectEqual(@as(f32, 5), game.getPosition(direct).x);
 }
 
-test "a synchronous movement callback can defer a graph retarget and cancel the current route" {
+test "a graph retarget from a synchronous movement callback cancels the previous route before deferring" {
     var game = Game.init(testing.allocator);
     defer game.deinit();
     var receiver: Receiver = .{};
@@ -170,6 +169,7 @@ test "a synchronous movement callback can defer a graph retarget and cancel the 
     Controller.advance(&game, 10);
     try testing.expectEqual(nav.Result{ .deferred = .graph_tick_in_progress }, receiver.retarget_result.?);
     try testing.expectEqual(before, Controller.graphEpoch(&game));
+    try testing.expectEqual(@as(f32, 65), game.getPosition(walker).x);
     try testing.expect(!Controller.isNavigating(&game, walker));
     try testing.expect(!game.hasComponent(walker, nav.Navigating));
     game.dispatchEvents();

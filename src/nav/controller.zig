@@ -533,7 +533,10 @@ pub const Controller = struct {
     ) Result {
         _ = src;
         if (findState(game)) |st| {
-            if (st.pf.ticking) return .{ .deferred = .graph_tick_in_progress };
+            if (st.pf.ticking) {
+                cancel(game, entity);
+                return .{ .deferred = .graph_tick_in_progress };
+            }
             // Fresh orders can see nodes spawned before this frame's advance.
             // Rehydration already runs after advance's graph check.
             maybeRebuildGraph(game, st);
