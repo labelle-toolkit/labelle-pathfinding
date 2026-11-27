@@ -35,6 +35,7 @@ pub const GizmoCategories = struct {
     pub const Navigation: u8 = 2;
     pub const Production: u8 = 3;
     pub const HUD: u8 = 4;
+    pub const GridNavigation: u8 = 5;
 };
 
 // ECS components
@@ -45,6 +46,9 @@ pub const MovementLink = components.MovementLink;
 pub const ClosestMovementNode = components.ClosestMovementNode;
 pub const Navigating = components.Navigating;
 pub const MovementSpeed = components.MovementSpeed;
+pub const NavGrid = components.NavGrid;
+pub const NavObstacle = components.NavObstacle;
+pub const NavCost = components.NavCost;
 
 // (The legacy `PathfinderContext` ECS adapter was dropped during the move into
 // labelle-pathfinding — use `Controller` exclusively.)
@@ -82,6 +86,9 @@ pub const Components = struct {
     pub const Navigating = components.Navigating;
     /// Per-entity walk speed (v4) — attach from game prefabs.
     pub const MovementSpeed = components.MovementSpeed;
+    pub const NavGrid = components.NavGrid;
+    pub const NavObstacle = components.NavObstacle;
+    pub const NavCost = components.NavCost;
     /// Singleton component holding the Controller's runtime state
     /// (RFC-plugin-controllers §6, primary pattern). Transient — never
     /// persisted.

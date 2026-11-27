@@ -1,0 +1,11 @@
+.{
+    .name = .pathfinding_engine_grid,
+    .version = "0.0.0",
+    .fingerprint = 0xfe3f2ac5ccda66a7,
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{
+        .engine = .{ .path = "../../../labelle-engine" },
+        .pathfinding = .{ .path = "../.." },
+    },
+    .paths = .{ "build.zig", "build.zig.zon", "grid_test.zig" },
+}

@@ -56,8 +56,66 @@ pathfinder.Controller.removeNode(game, node_id);   // tombstone a node (deconstr
 pathfinder.Controller.rebuildGraph(game);          // explicit full rebuild
 ```
 
-Retargets are **idempotent**: `navigate`/`moveTo` clear any prior walk (either mode), the
+Retargets are **idempotent**: `navigate`/`moveTo` clear any prior walk, the
 pending ring, and the persisted order before starting the new one.
+
+### Grid navigation
+
+Add one `NavGrid` component to the scene with positive `cols`, `rows`, and
+`cell`. Use `NavObstacle` for blocked rectangles and `NavCost` for terrain
+rectangles. Both are centered on the entity's local `Position` plus their
+offsets. Obstacles expand by the grid's `agent_radius`; overlapping terrain
+uses the highest authored cost. Use root entities for footprints and grid
+walkers so their local positions are also their world positions.
+
+```zig
+_ = pathfinder.Controller.navigateTo(game, worker, point);
+_ = pathfinder.Controller.navigateAdjacent(game, worker, tree);
+const reachable = pathfinder.Controller.gridReachableAdjacent(game, worker, tree);
+```
+
+`navigateTo` snaps a blocked target to the nearest cell in the walker's
+region. `navigateAdjacent` chooses the cheapest reachable edge neighbor.
+`gridReachable` checks the supplied cell itself. `gridWalkCost` returns the
+route cost in tenths of an axial cell-entry cost. Terrain cost affects route
+selection; movement uses `MovementSpeed`. To inspect the grid, call
+`drawGridGizmos` with the `GridNavigation` category enabled.
+
+An agent whose current cell becomes blocked can step into a free edge
+neighbor and continue its route. If no free edge neighbor leads to the
+destination, the controller reports that there is no route.
+
+Automatic footprint updates require an engine containing [#937](https://github.com/labelle-toolkit/labelle-engine/pull/937).
+Add this receiver as `hooks/grid_navigation.zig` in an assembled game:
+
+```zig
+const engine = @import("engine");
+const pathfinder = @import("pathfinder");
+
+pub const GridNavigation = struct {
+    ctx: engine.HookContext = .{},
+
+    pub fn component_changed(self: *GridNavigation, payload: anytype) void {
+        pathfinder.Controller.componentChanged(self.ctx.game(), payload);
+    }
+};
+```
+
+The hook queues footprint changes. Grid queries and the existing
+`Controller.advance` driver apply those changes and replan affected routes.
+Use Game setters to get automatic notifications. For raw component writes,
+call `refreshFootprint` after the mutation. Call `rebuildGrid` after
+changing the scene's grid configuration at runtime.
+An invalid rebuild logs the error, fails active grid walks, and rejects
+new grid commands until a valid configuration is rebuilt.
+
+Grid arrivals add a `.grid` destination to `pathfinder__arrived`. The
+existing `node_entity` field is zero for grid arrivals. Subscribe to
+`pathfinder__grid_changed` for committed occupancy or cost updates.
+
+To run the real-engine integration fixture, check out `labelle-engine` with
+#937 and a compatible `labelle-core` as siblings of this repo, then run
+`zig build test` from `tests/engine-grid`.
 
 ### Queries (reads; never mutate)
 
@@ -69,7 +127,7 @@ pathfinder.Controller.walkDistance(game, a, b);       // f32 — path cost; inf 
                                                       //       Euclidean before the graph exists.
                                                       //       THE "nearest X" selector metric.
 pathfinder.Controller.distance(game, a, b);           // ?f32 — lower-level primitive behind the above
-pathfinder.Controller.isNavigating(game, e);          // walking? (graph OR direct)
+pathfinder.Controller.isNavigating(game, e);          // walking in any navigation mode
 pathfinder.Controller.nodeCount(game);
 pathfinder.Controller.graphEpoch(game);               // bumps every rebuild (poll twin of graph_rebuilt)
 pathfinder.Controller.findClosestNode(game, pos);

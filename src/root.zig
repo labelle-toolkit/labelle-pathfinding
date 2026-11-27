@@ -32,6 +32,15 @@ pub const Events = struct {
     pub const arrived = struct {
         entity: u64,
         node_entity: u64,
+        destination: ?pathfinding.controller.ArrivalDestination = null,
+    };
+
+    pub const grid_changed = struct {
+        epoch: u64,
+        min_col: u32,
+        min_row: u32,
+        max_col: u32,
+        max_row: u32,
     };
 
     /// A walk ended WITHOUT arriving: the graph changed mid-walk and no
@@ -89,6 +98,9 @@ pub const MovementLink = pathfinding.MovementLink;
 pub const ClosestMovementNode = pathfinding.ClosestMovementNode;
 pub const Navigating = pathfinding.Navigating;
 pub const MovementSpeed = pathfinding.MovementSpeed;
+pub const NavGrid = pathfinding.NavGrid;
+pub const NavObstacle = pathfinding.NavObstacle;
+pub const NavCost = pathfinding.NavCost;
 pub const Components = pathfinding.Components;
 
 // Paths, hooks, gizmos, scalar types.
