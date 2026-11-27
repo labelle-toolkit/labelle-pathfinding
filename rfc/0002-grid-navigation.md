@@ -101,7 +101,7 @@ pub const NavObstacle = struct {
 
 /// This entity changes the cost of the cells under a rectangle, without
 /// blocking them. Same rectangle convention as NavObstacle. Where several
-/// overlap, the last one stamped wins.
+/// overlap, the highest authored cost wins.
 pub const NavCost = struct {
     width: f32 = 0,
     height: f32 = 0,
@@ -179,8 +179,8 @@ zero, matching the existing off-graph convention; graph arrivals preserve
 its existing meaning. New consumers switch on `destination`; old consumers
 can keep reading the original fields. A legacy producer that omits the new
 field yields `null`, which consumers must handle. Do not reinterpret zero
-as a grid cell id. Declare the union inline in `Events.arrived` and verify
-assembler discovery and generated event payloads before implementation ships.
+as a grid cell id. Declare `Events.arrived` inline and reference the
+destination union from its optional field.
 
 ### Event integration
 
@@ -315,7 +315,8 @@ invalidated by the applied grid update.
 
 - 8-connected grid. A diagonal step is allowed only when both cells it passes
   between are free, so paths never cut a corner.
-- Step cost is the entered cell's cost, times 14/10 for diagonals.
+- Step cost is the entered cell's cost, times 14/10 for diagonals. The
+  implementation stores it in tenths to preserve exact integer comparisons.
 - Heuristic: octile distance times the lowest cost on the grid, which keeps it
   admissible with weighted cells.
 - The goal is a set of cells. For `navigateAdjacent` it is every free cell
@@ -441,11 +442,9 @@ Steps 1 to 4 are enough to walk around obstacles on a static map.
    differ in size. Per-agent clearance needs a clearance map.
 3. **Footprint shape.** Are rectangles enough, or do circles and multi-cell
    masks belong in v1?
-4. **Overlapping `NavCost`.** "Last stamped wins" depends on entity order. A
-   priority field, or the maximum, would be deterministic.
-5. **Search budget.** v1 searches synchronously inside the command. At what
+4. **Search budget.** v1 searches synchronously inside the command. At what
    grid size does that need a per-frame expansion budget and `deferred`
    results?
-6. **Who owns keyboard collision?** The grid can answer `isBlocked`, but a
+5. **Who owns keyboard collision?** The grid can answer `isBlocked`, but a
    directly controlled character probably wants sliding along walls, which is
    not pathfinding.

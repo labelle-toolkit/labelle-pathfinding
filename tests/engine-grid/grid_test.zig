@@ -1,0 +1,177 @@
+const std = @import("std");
+const engine = @import("engine");
+const nav = @import("pathfinder");
+const core = engine.core;
+const testing = std.testing;
+
+const Event = union(enum) {
+    pathfinder__arrived: nav.Events.arrived,
+    pathfinder__navigation_failed: nav.Events.navigation_failed,
+    pathfinder__grid_changed: nav.Events.grid_changed,
+};
+
+const Receiver = struct {
+    ctx: engine.HookContext = .{},
+    last: ?nav.Events.arrived = null,
+    failures: usize = 0,
+    changes: usize = 0,
+
+    pub fn component_changed(self: *Receiver, p: engine.ComponentChangeInfo(u32)) void {
+        nav.Controller.componentChanged(self.ctx.gameAs(Game), p);
+    }
+
+    pub fn pathfinder__arrived(self: *Receiver, p: nav.Events.arrived) void {
+        self.last = p;
+    }
+
+    pub fn pathfinder__navigation_failed(self: *Receiver, p: nav.Events.navigation_failed) void {
+        if (p.reason == .path_invalidated) self.failures += 1;
+    }
+
+    pub fn pathfinder__grid_changed(self: *Receiver, _: nav.Events.grid_changed) void {
+        self.changes += 1;
+    }
+};
+
+const ECS = core.MockEcsBackend(u32);
+const Hook = engine.MergeHookPayloads(.{ engine.HookPayload(u32), Event });
+const Hooks = engine.MergeHooks(Hook, .{*Receiver});
+const Components = engine.ComponentRegistry(.{
+    .NavGrid = nav.NavGrid,
+    .NavCost = nav.NavCost,
+    .NavObstacle = nav.NavObstacle,
+    .Navigating = nav.Navigating,
+});
+const Game = engine.GameConfig(core.StubRender(u32), ECS, engine.StubInput, engine.StubAudio, engine.StubVideo, engine.StubGui, *Hooks, core.StubLogSink, Components, &.{}, Event);
+const Controller = nav.Controller;
+
+fn addAt(game: *Game, x: f32, y: f32) u32 {
+    const id = game.createEntity();
+    game.setPosition(id, .{ .x = x, .y = y });
+    return id;
+}
+
+fn addGrid(game: *Game, cols: u32, rows: u32) void {
+    game.addComponent(game.createEntity(), nav.NavGrid{ .cols = cols, .rows = rows, .cell = 10 });
+}
+
+test "hooks update occupancy after writes, removals and destruction without polling" {
+    var game = Game.init(testing.allocator);
+    defer game.deinit();
+    var receiver: Receiver = .{};
+    var hooks: Hooks = .{ .receivers = .{&receiver} };
+    game.setHooks(&hooks);
+    addGrid(&game, 5, 3);
+    const mover = addAt(&game, 5, 15);
+    try Controller.setup(&game);
+    defer Controller.deinit(&game);
+
+    const obstacle = addAt(&game, 25, 15);
+    game.addComponent(obstacle, nav.NavObstacle{ .width = 8, .height = 8 });
+    game.addComponent(obstacle, nav.NavCost{ .width = 8, .height = 8, .cost = 33 });
+    try testing.expect(Controller.isBlocked(&game, .{ .x = 25, .y = 15 }));
+    try testing.expect(Controller.gridReachableAdjacent(&game, mover, obstacle));
+    try testing.expect(Controller.navigateAdjacent(&game, mover, obstacle) == .accepted);
+    Controller.drawGridGizmos(&game);
+    Controller.advance(&game, 1);
+    game.dispatchEvents();
+    try testing.expectEqual(@as(u32, 1), receiver.last.?.destination.?.grid.col);
+
+    game.setField(core.Position, .x, obstacle, 35);
+    try testing.expect(!Controller.isBlocked(&game, .{ .x = 25, .y = 15 }));
+    try testing.expect(Controller.isBlocked(&game, .{ .x = 35, .y = 15 }));
+    game.removeComponent(obstacle, nav.NavObstacle);
+    try testing.expectEqual(@as(?u8, 33), Controller.cellCost(&game, .{ .x = 35, .y = 15 }));
+    game.destroyEntity(obstacle);
+    try testing.expectEqual(@as(?u8, 10), Controller.cellCost(&game, .{ .x = 35, .y = 15 }));
+    const epoch = Controller.gridEpoch(&game);
+    Controller.advance(&game, 1);
+    try testing.expectEqual(epoch, Controller.gridEpoch(&game));
+    game.dispatchEvents();
+    try testing.expectEqual(@as(usize, 4), receiver.changes);
+}
+
+test "smoothed segment invalidates before movement and a loaded grid order resumes" {
+    var game = Game.init(testing.allocator);
+    defer game.deinit();
+    var receiver: Receiver = .{};
+    var hooks: Hooks = .{ .receivers = .{&receiver} };
+    game.setHooks(&hooks);
+    addGrid(&game, 5, 1);
+    const mover = addAt(&game, 5, 5);
+    try Controller.setup(&game);
+    defer Controller.deinit(&game);
+    const goal: nav.Position = .{ .x = 45, .y = 5 };
+    try testing.expectEqual(@as(?u32, 400), Controller.gridWalkCost(&game, mover, goal));
+    try testing.expect(Controller.navigateTo(&game, mover, goal) == .accepted);
+    const obstacle = addAt(&game, 25, 5);
+    game.addComponent(obstacle, nav.NavObstacle{ .width = 8, .height = 8 });
+    Controller.advance(&game, 1);
+    game.dispatchEvents();
+    try testing.expectEqual(@as(f32, 5), game.getPosition(mover).x);
+    try testing.expectEqual(@as(usize, 1), receiver.failures);
+    try testing.expect(!game.hasComponent(mover, nav.Navigating));
+
+    game.destroyEntityOnly(obstacle);
+    game.addComponent(mover, nav.Navigating{ .mode = .grid, .target_x = goal.x, .target_y = goal.y });
+    Controller.advance(&game, 1);
+    game.dispatchEvents();
+    try testing.expectEqual(goal.x, game.getPosition(mover).x);
+    try testing.expectEqual(@as(u64, 0), receiver.last.?.node_entity);
+    try testing.expectEqual(@as(u32, 4), receiver.last.?.destination.?.grid.col);
+}
+
+test "diagonal support blockage reroutes a grid walk and cancel clears persisted order" {
+    var game = Game.init(testing.allocator);
+    defer game.deinit();
+    var receiver: Receiver = .{};
+    var hooks: Hooks = .{ .receivers = .{&receiver} };
+    game.setHooks(&hooks);
+    addGrid(&game, 3, 3);
+    const mover = addAt(&game, 5, 5);
+    try Controller.setup(&game);
+    defer Controller.deinit(&game);
+    const goal: nav.Position = .{ .x = 25, .y = 25 };
+    try testing.expect(Controller.gridReachable(&game, mover, goal));
+    try testing.expect(Controller.navigateTo(&game, mover, goal) == .accepted);
+    const obstacle = addAt(&game, 15, 5);
+    game.addComponent(obstacle, nav.NavObstacle{ .width = 8, .height = 8 });
+    const epoch = Controller.gridEpoch(&game);
+    Controller.advance(&game, 0.04);
+    try testing.expectEqual(@as(f32, 5), game.getPosition(mover).x);
+    try testing.expect(game.getPosition(mover).y > 5);
+    try testing.expectEqual(epoch, Controller.gridEpoch(&game));
+    Controller.cancel(&game, mover);
+    try testing.expect(!Controller.isNavigating(&game, mover));
+    Controller.advance(&game, 1);
+    try testing.expect(!game.hasComponent(mover, nav.Navigating));
+    game.dispatchEvents();
+    try testing.expectEqual(@as(usize, 0), receiver.failures);
+}
+
+test "blocked goals snap to a reachable cell and direct retargets replace grid walks" {
+    var game = Game.init(testing.allocator);
+    defer game.deinit();
+    var receiver: Receiver = .{};
+    var hooks: Hooks = .{ .receivers = .{&receiver} };
+    game.setHooks(&hooks);
+    addGrid(&game, 5, 1);
+    const mover = addAt(&game, 5, 5);
+    const obstacle = addAt(&game, 35, 5);
+    game.addComponent(obstacle, nav.NavObstacle{ .width = 8, .height = 8 });
+    try Controller.setup(&game);
+    defer Controller.deinit(&game);
+    const blocked: nav.Position = .{ .x = 35, .y = 5 };
+    try testing.expect(!Controller.gridReachable(&game, mover, blocked));
+    try testing.expect(Controller.navigateTo(&game, mover, blocked) == .accepted);
+    Controller.advance(&game, 1);
+    game.dispatchEvents();
+    try testing.expectEqual(@as(u32, 2), receiver.last.?.destination.?.grid.col);
+    try testing.expect(Controller.navigateTo(&game, mover, .{ .x = 5, .y = 5 }) == .accepted);
+    try testing.expect(Controller.moveTo(&game, mover, .{ .x = 100, .y = 5 }) == .accepted);
+    Controller.advance(&game, 1);
+    Controller.advance(&game, 1);
+    game.dispatchEvents();
+    try testing.expectEqual(@as(f32, 100), receiver.last.?.destination.?.direct.x);
+    try testing.expect(!Controller.isNavigating(&game, mover));
+}

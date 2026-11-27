@@ -40,6 +40,10 @@
 
 const std = @import("std");
 
+test {
+    _ = @import("grid_astar.zig");
+}
+
 // ── Navigation layer (headline) — re-exported at top level ──────────────────
 // `src/nav/root.zig` is the navigation module (Controller + pure PathfinderWith
 // engine + graph + components). Its public surface is promoted to the package
@@ -71,6 +75,9 @@ pub const MovementLink = nav.MovementLink;
 pub const ClosestMovementNode = nav.ClosestMovementNode;
 pub const Navigating = nav.Navigating;
 pub const MovementSpeed = nav.MovementSpeed;
+pub const NavGrid = nav.NavGrid;
+pub const NavObstacle = nav.NavObstacle;
+pub const NavCost = nav.NavCost;
 // The `Components` aggregator the assembler scans to register the plugin's
 // components (MovementNode / MovementStair / MovementLink / ClosestMovementNode /
 // Navigating / MovementSpeed / ControllerState) into the ComponentRegistry.
@@ -92,6 +99,9 @@ pub const FloydWarshall = nav.FloydWarshall; // the nav core's FW (zig_utils-bac
 // their generic names (types, FloydWarshall, …) don't collide with the nav
 // layer's top-level surface.
 pub const algo = struct {
+    pub const GridAStar = @import("grid_astar.zig").GridAStar;
+    pub const GridCell = @import("grid_astar.zig").Cell;
+    pub const GridTile = @import("grid_astar.zig").Tile;
     pub const types = @import("types.zig");
     pub const ConnectionMode = types.ConnectionMode;
     pub const NodeData = types.NodeData;

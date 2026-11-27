@@ -37,6 +37,8 @@ const engine_mod = @import("engine.zig");
 const components = @import("components.zig");
 const types = @import("types.zig");
 const movement_path = @import("movement_path.zig");
+const grid_mod = @import("grid.zig");
+const grid_algo = @import("../grid_astar.zig");
 
 const MovementNode = components.MovementNode;
 const MovementStair = components.MovementStair;
@@ -176,6 +178,12 @@ pub const FailReason = enum {
     navigate_error,
 };
 
+pub const ArrivalDestination = union(enum) {
+    graph: struct { node_entity: u64, x: f32, y: f32 },
+    direct: struct { x: f32, y: f32 },
+    grid: struct { col: u32, row: u32, x: f32, y: f32 },
+};
+
 /// Singleton ECS component attaching the Controller's runtime state to
 /// a world entity. `state_ptr` is a `usize` holding a type-erased
 /// pointer so the component doesn't pull game types into its shape;
@@ -243,6 +251,12 @@ pub const State = struct {
     /// are pruned by the per-tick existence check in
     /// `advanceDirectMoves`.
     direct_moves: std.AutoArrayHashMapUnmanaged(u64, DirectMove) = .empty,
+    grid: ?grid_mod.Grid = null,
+    grid_dirty: std.AutoHashMapUnmanaged(u64, void) = .empty,
+    grid_walks: std.AutoArrayHashMapUnmanaged(u64, grid_mod.Walk) = .empty,
+    grid_epoch: u64 = 0,
+    grid_rebuild_pending: bool = false,
+    grid_flushing: bool = false,
 
     /// Where each graph walker was heading (its current waypoint) when
     /// a rebuild dropped its route, so the re-issue right after resumes
@@ -283,6 +297,10 @@ pub const State = struct {
     }
 
     pub fn deinit(self: *State) void {
+        if (self.grid) |*grid| grid.deinit(self.allocator);
+        for (self.grid_walks.values()) |walk| self.allocator.free(walk.points);
+        self.grid_walks.deinit(self.allocator);
+        self.grid_dirty.deinit(self.allocator);
         self.nearest_node_cache.deinit();
         self.node_entities.deinit(self.allocator);
         self.pending_entities.deinit(self.allocator);
@@ -290,6 +308,10 @@ pub const State = struct {
         self.direct_moves.deinit(self.allocator);
         self.resume_at.deinit(self.allocator);
         self.pf.deinit();
+    }
+
+    fn cancelGrid(self: *State, id: u64) void {
+        if (self.grid_walks.fetchSwapRemove(id)) |entry| self.allocator.free(entry.value.points);
     }
 
     fn reset(self: *State, allocator: std.mem.Allocator) void {
@@ -348,6 +370,7 @@ pub const State = struct {
 pub const Reason = enum {
     controller_not_setup,
     graph_not_built,
+    grid_not_built,
     no_position,
     no_nearby_node,
     no_path,
@@ -392,6 +415,7 @@ pub const Controller = struct {
             st.deinit();
             allocator.destroy(st);
         }
+        try buildGrid(st, game);
 
         // Idempotent: if a singleton entity already exists (scene
         // reload / re-entry), free its old State and attach the new
@@ -571,6 +595,7 @@ pub const Controller = struct {
         // dropped rejected intents for the same reason.
         st.pf.cancel(entity_id);
         _ = st.direct_moves.swapRemove(entity_id);
+        st.cancelGrid(entity_id);
         {
             const Entity = @TypeOf(game.*).EntityType;
             const e: Entity = @intCast(entity_id);
@@ -668,6 +693,7 @@ pub const Controller = struct {
         // target (codex/CodeRabbit review on #50).
         st.pf.cancel(entity_id);
         _ = st.direct_moves.swapRemove(entity_id);
+        st.cancelGrid(entity_id);
         {
             const Entity = @TypeOf(game.*).EntityType;
             const e: Entity = @intCast(entity_id);
@@ -701,6 +727,266 @@ pub const Controller = struct {
         return .accepted;
     }
 
+    const GridTarget = union(enum) { point: Position, adjacent: u64 };
+
+    /// Native component hook receivers forward the payload here. The hook
+    /// may run before removal, so reads and routing wait until the flush.
+    pub fn componentChanged(game: anytype, payload: anytype) void {
+        const name = payload.component_name;
+        const is_position = std.mem.eql(u8, name, @typeName(Position));
+        if (!is_position and !std.mem.eql(u8, name, @typeName(components.NavObstacle)) and
+            !std.mem.eql(u8, name, @typeName(components.NavCost))) return;
+        if (is_position) {
+            const ecs = &game.active_world.ecs_backend;
+            const entity = payload.entity_id;
+            if (!ecs.entityExists(entity) or
+                (!ecs.hasComponent(entity, components.NavObstacle) and !ecs.hasComponent(entity, components.NavCost))) return;
+        }
+        refreshFootprint(game, payload.entity_id);
+    }
+
+    /// For mutations through raw ECS storage that bypass native hooks.
+    pub fn refreshFootprint(game: anytype, entity: anytype) void {
+        const st = findState(game) orelse return;
+        if (st.grid == null or st.grid_rebuild_pending) return;
+        st.grid_dirty.put(st.allocator, @intCast(entity), {}) catch {
+            st.grid_rebuild_pending = true;
+        };
+    }
+
+    pub fn rebuildGrid(game: anytype) void {
+        const st = findState(game) orelse return;
+        st.grid_rebuild_pending = true;
+        _ = flushGrid(st, game);
+    }
+
+    fn buildGrid(st: *State, game: anytype) !void {
+        const ecs = &game.active_world.ecs_backend;
+        var configs = ecs.view(.{components.NavGrid}, .{});
+        defer configs.deinit();
+        const config = if (configs.next()) |entity| ecs.getComponent(entity, components.NavGrid).?.* else {
+            if (st.grid) |*old| old.deinit(st.allocator);
+            st.grid = null;
+            return;
+        };
+        if (configs.next() != null) return error.MultipleNavigationGrids;
+        var next = try grid_mod.Grid.init(st.allocator, config);
+        errdefer next.deinit(st.allocator);
+        inline for (.{ components.NavObstacle, components.NavCost }) |T| {
+            var view = ecs.view(.{ T, Position }, .{});
+            defer view.deinit();
+            while (view.next()) |entity| {
+                try next.footprints.put(st.allocator, @intCast(entity), next.footprint(ecs, entity));
+            }
+        }
+        _ = next.stamp(next.all());
+        next.search.labelRegions(next.scratch);
+        if (st.grid) |*old| old.deinit(st.allocator);
+        st.grid = next;
+    }
+
+    fn flushGrid(st: *State, game: anytype) bool {
+        if (st.grid_flushing) return false;
+        if (!st.grid_rebuild_pending and st.grid_dirty.count() == 0) return true;
+        st.grid_flushing = true;
+        defer st.grid_flushing = false;
+        const Entity = @TypeOf(game.*).EntityType;
+        const ecs = &game.active_world.ecs_backend;
+        var bounds: ?grid_algo.Bounds = null;
+        if (st.grid_rebuild_pending) {
+            // Preserve old routes until replacing their grid succeeds.
+            if (st.grid) |grid| bounds = grid.all();
+            buildGrid(st, game) catch return false;
+            if (st.grid) |grid| bounds = grid.all();
+            replanGrid(st, game, null, true);
+        } else if (st.grid) |*grid| {
+            var dirty = st.grid_dirty.keyIterator();
+            while (dirty.next()) |id| {
+                const before = grid.footprints.get(id.*) orelse grid_mod.Footprint{};
+                const after = grid.footprint(ecs, @as(Entity, @intCast(id.*)));
+                if (std.meta.eql(before, after)) continue;
+                if (after.obstacle != null or after.terrain != null) {
+                    grid.footprints.put(st.allocator, id.*, after) catch {
+                        st.grid_rebuild_pending = true;
+                        return false;
+                    };
+                } else {
+                    _ = grid.footprints.remove(id.*);
+                }
+                for ([_]?grid_algo.Bounds{ before.obstacle, before.terrain, after.obstacle, after.terrain }) |maybe| {
+                    if (maybe) |b| bounds = if (bounds) |old| old.merge(b) else b;
+                }
+            }
+            if (bounds) |b| {
+                if (grid.stamp(b)) {
+                    grid.search.labelRegions(grid.scratch);
+                } else {
+                    bounds = null;
+                }
+            }
+            replanGrid(st, game, bounds, false);
+        }
+        st.grid_rebuild_pending = false;
+        st.grid_dirty.clearRetainingCapacity();
+        if (bounds) |b| {
+            st.grid_epoch +%= 1;
+            emitGameEvent(game, "pathfinder__grid_changed", .{
+                .epoch = st.grid_epoch,
+                .min_col = b.min.col,
+                .min_row = b.min.row,
+                .max_col = b.max.col,
+                .max_row = b.max.row,
+            });
+        }
+        return true;
+    }
+
+    fn goalCells(grid: grid_mod.Grid, a: std.mem.Allocator, from: grid_algo.Cell, target: GridTarget, snap: bool) ![]grid_algo.Cell {
+        switch (target) {
+            .point => |point| {
+                const requested = grid.at(point) orelse return a.alloc(grid_algo.Cell, 0);
+                const goal = grid.goal(from, requested, snap) orelse return a.alloc(grid_algo.Cell, 0);
+                return a.dupe(grid_algo.Cell, &.{goal});
+            },
+            .adjacent => |id| return grid.adjacent(a, from, id),
+        }
+    }
+
+    fn planGrid(grid: grid_mod.Grid, a: std.mem.Allocator, from: Position, target: GridTarget, snap: bool) !?grid_mod.Walk {
+        const start = grid.at(from) orelse return null;
+        if (!grid.segment(from, grid.center(start), null).valid) return null;
+        const goals = try goalCells(grid, a, start, target, snap);
+        defer a.free(goals);
+        const route = (try grid.search.search(a, start, goals)) orelse return null;
+        defer a.free(route.cells);
+        return .{
+            .points = try grid.waypoints(a, route.cells, from),
+            .goal = route.cells[route.cells.len - 1],
+            .adjacent = if (target == .adjacent) target.adjacent else null,
+        };
+    }
+
+    fn navigateGrid(game: anytype, st: *State, entity: anytype, target: GridTarget, snap: bool) Result {
+        if (!flushGrid(st, game)) return .{ .deferred = .pending_alloc_failed };
+        const grid = st.grid orelse return .{ .deferred = .grid_not_built };
+        const id: u64 = @intCast(entity);
+        const ecs = &game.active_world.ecs_backend;
+        if (!ecs.entityExists(entity)) return .{ .rejected = .no_position };
+        const from = (ecs.getComponent(entity, Position) orelse return .{ .rejected = .no_position }).*;
+        const planned = planGrid(grid, st.allocator, from, target, snap) catch return .{ .deferred = .pending_alloc_failed };
+        cancel(game, entity);
+        const walk = planned orelse return .{ .rejected = .no_path };
+        if (walk.points.len == 0) {
+            st.allocator.free(walk.points);
+            settleGridArrival(game, st, id, grid, walk.goal);
+            return .redundant;
+        }
+        st.grid_walks.put(st.allocator, id, walk) catch {
+            st.allocator.free(walk.points);
+            return .{ .deferred = .pending_alloc_failed };
+        };
+        const goal = grid.center(walk.goal);
+        ecs.addComponent(entity, Navigating{ .mode = .grid, .target_x = goal.x, .target_y = goal.y });
+        return .accepted;
+    }
+
+    pub fn navigateTo(game: anytype, entity: anytype, target: Position) Result {
+        const st = findState(game) orelse return .{ .rejected = .controller_not_setup };
+        return navigateGrid(game, st, entity, .{ .point = target }, true);
+    }
+
+    pub fn navigateAdjacent(game: anytype, entity: anytype, target: anytype) Result {
+        const st = findState(game) orelse return .{ .rejected = .controller_not_setup };
+        return navigateGrid(game, st, entity, .{ .adjacent = @intCast(target) }, true);
+    }
+
+    fn queryGrid(game: anytype) ?*State {
+        const st = findState(game) orelse return null;
+        if (!flushGrid(st, game) or st.grid == null) return null;
+        return st;
+    }
+
+    fn gridStart(grid: grid_mod.Grid, game: anytype, entity: anytype) ?grid_algo.Cell {
+        const ecs = &game.active_world.ecs_backend;
+        if (!ecs.entityExists(entity)) return null;
+        const pos = ecs.getComponent(entity, Position) orelse return null;
+        return grid.at(pos.*);
+    }
+
+    pub fn gridReachable(game: anytype, entity: anytype, pos: Position) bool {
+        const st = queryGrid(game) orelse return false;
+        const grid = st.grid.?;
+        const start = gridStart(grid, game, entity) orelse return false;
+        return grid.goal(start, grid.at(pos) orelse return false, false) != null;
+    }
+
+    pub fn gridReachableAdjacent(game: anytype, entity: anytype, target: anytype) bool {
+        const st = queryGrid(game) orelse return false;
+        const grid = st.grid.?;
+        const start = gridStart(grid, game, entity) orelse return false;
+        return grid.reachableAdjacent(start, @intCast(target));
+    }
+
+    /// Cost is in tenths of one axial cell-entry cost.
+    pub fn gridWalkCost(game: anytype, entity: anytype, pos: Position) ?u32 {
+        const st = queryGrid(game) orelse return null;
+        const grid = st.grid.?;
+        const start = gridStart(grid, game, entity) orelse return null;
+        const goal = grid.at(pos) orelse return null;
+        if (grid.goal(start, goal, false) == null) return null;
+        const route = (grid.search.search(st.allocator, start, &.{goal}) catch return null) orelse return null;
+        defer st.allocator.free(route.cells);
+        return std.math.cast(u32, route.cost);
+    }
+
+    pub fn isBlocked(game: anytype, pos: Position) bool {
+        const st = queryGrid(game) orelse return true;
+        const grid = st.grid.?;
+        return !grid.search.free(grid.at(pos) orelse return true);
+    }
+
+    pub fn cellCost(game: anytype, pos: Position) ?u8 {
+        const st = queryGrid(game) orelse return null;
+        const grid = st.grid.?;
+        const cell = grid.at(pos) orelse return null;
+        if (!grid.search.free(cell)) return null;
+        return grid.search.tiles[grid.search.index(cell)].cost;
+    }
+
+    pub fn gridEpoch(game: anytype) u64 {
+        const st = findState(game) orelse return 0;
+        _ = flushGrid(st, game);
+        return st.grid_epoch;
+    }
+
+    /// Opt-in debug view. The caller chooses when to draw it.
+    pub fn drawGridGizmos(game: anytype) void {
+        const st = queryGrid(game) orelse return;
+        const grid = st.grid.?;
+        const category = @import("root.zig").GizmoCategories.GridNavigation;
+        const size = grid.config.cell;
+        for (grid.search.tiles, 0..) |tile, i| {
+            const p = grid.center(grid.search.cell(@intCast(i)));
+            const color: u32 = if (tile.blocked) 0xff5555ff else 0x99bbffff;
+            game.drawGizmoRectCategory(category, p.x - size / 2, p.y - size / 2, size, size, color);
+            if (!tile.blocked) {
+                var buf: [40]u8 = undefined;
+                const label = std.fmt.bufPrint(&buf, "{d}:{d}", .{ tile.region, tile.cost }) catch unreachable;
+                game.drawGizmoTextCategory(category, p.x, p.y, label, color);
+            }
+        }
+        const Entity = @TypeOf(game.*).EntityType;
+        for (st.grid_walks.keys(), st.grid_walks.values()) |id, walk| {
+            const entity: Entity = @intCast(id);
+            if (!game.ecs_backend.entityExists(entity)) continue;
+            var from = game.getPosition(entity);
+            for (walk.points[walk.next..]) |to| {
+                game.drawGizmoLineCategory(category, from.x, from.y, to.x, to.y, 0x55ff55ff);
+                from = to;
+            }
+        }
+    }
+
     /// Cancel any active navigation for `entity`. Safe no-op if the
     /// entity wasn't navigating.
     ///
@@ -716,6 +1002,7 @@ pub const Controller = struct {
         const entity_id: u64 = @intCast(entity);
         st.pf.cancel(entity_id);
         _ = st.direct_moves.swapRemove(entity_id);
+        st.cancelGrid(entity_id);
         // Drop the persisted order too — a cancelled walk must not
         // resurrect through the rehydration sweep next tick. No event:
         // the canceller knows what it did (cancel is a command, not a
@@ -965,7 +1252,7 @@ pub const Controller = struct {
     pub fn isNavigating(game: anytype, entity: anytype) bool {
         const st = findState(game) orelse return false;
         const entity_id: u64 = @intCast(entity);
-        return st.isNavigating(entity_id) or st.direct_moves.contains(entity_id);
+        return st.isNavigating(entity_id) or st.direct_moves.contains(entity_id) or st.grid_walks.contains(entity_id);
     }
 
     /// Walk-cost between two entities with the game-proven "nearest X"
@@ -1139,6 +1426,7 @@ pub const Controller = struct {
         rehydrateNavigating(st, game);
         advanceNavigation(st, game, dt);
         advanceDirectMoves(st, game, dt);
+        if (flushGrid(st, game)) advanceGrid(st, game, dt);
         processArrivals(game, st);
         pruneNearestNodeCache(game, st);
     }
@@ -1392,7 +1680,6 @@ pub const Controller = struct {
         // The segment hints are for the re-issue right after a rebuild,
         // never a later one.
         defer st.resume_at.clearRetainingCapacity();
-        if (!st.nodes_registered) return;
         const Entity = @TypeOf(game.*).EntityType;
         const ecs = &game.active_world.ecs_backend;
 
@@ -1405,6 +1692,7 @@ pub const Controller = struct {
                 const id: u64 = @intCast(entity);
                 if (st.pf.isNavigating(id)) continue;
                 if (st.direct_moves.contains(id)) continue;
+                if (st.grid_walks.contains(id)) continue;
                 orphans.append(st.allocator, id) catch break;
             }
         }
@@ -1414,7 +1702,18 @@ pub const Controller = struct {
             const nav = ecs.getComponent(entity, Navigating) orelse continue;
             const target = Position{ .x = nav.target_x, .y = nav.target_y };
             switch (nav.mode) {
+                .grid => {
+                    if (st.grid == null and !st.grid_rebuild_pending) {
+                        settleFailed(game, id, .no_path);
+                        continue;
+                    }
+                    switch (navigateGrid(game, st, entity, .{ .point = target }, false)) {
+                        .accepted, .redundant, .deferred => {},
+                        .rejected => settleFailed(game, id, .no_path),
+                    }
+                },
                 .direct => {
+                    if (!st.nodes_registered and st.grid == null) continue;
                     _ = moveTo(game, entity, target);
                 },
                 .graph => switch (navigateWith(game, entity, target, .{
@@ -1433,6 +1732,118 @@ pub const Controller = struct {
                 },
             }
         }
+    }
+
+    fn replanGrid(st: *State, game: anytype, bounds: ?grid_algo.Bounds, all: bool) void {
+        const Entity = @TypeOf(game.*).EntityType;
+        const ecs = &game.active_world.ecs_backend;
+        var i: usize = 0;
+        while (i < st.grid_walks.count()) {
+            const id = st.grid_walks.keys()[i];
+            const entity: Entity = @intCast(id);
+            if (!ecs.entityExists(entity)) {
+                st.cancelGrid(id);
+                continue;
+            }
+            const walk = st.grid_walks.values()[i];
+            const order = ecs.getComponent(entity, Navigating);
+            const pos = ecs.getComponent(entity, Position);
+            if (st.grid == null or order == null or pos == null) {
+                st.cancelGrid(id);
+                settleFailed(game, id, .path_invalidated);
+                continue;
+            }
+            const grid = st.grid.?;
+            var affected = all or (if (walk.adjacent) |target| st.grid_dirty.contains(target) else false);
+            if (!affected and bounds != null) {
+                var from = pos.?.*;
+                for (walk.points[walk.next..]) |to| {
+                    if (grid.segment(from, to, bounds).dirty) {
+                        affected = true;
+                        break;
+                    }
+                    from = to;
+                }
+            }
+            if (!affected) {
+                i += 1;
+                continue;
+            }
+            const target: GridTarget = if (walk.adjacent) |adjacent| .{ .adjacent = adjacent } else .{ .point = .{ .x = order.?.target_x, .y = order.?.target_y } };
+            const next = planGrid(grid, st.allocator, pos.?.*, target, false) catch null;
+            const replacement = next orelse {
+                st.cancelGrid(id);
+                settleFailed(game, id, .path_invalidated);
+                continue;
+            };
+            st.allocator.free(walk.points);
+            st.grid_walks.values()[i] = replacement;
+            const goal = grid.center(replacement.goal);
+            order.?.target_x = goal.x;
+            order.?.target_y = goal.y;
+            i += 1;
+        }
+    }
+
+    fn advanceGrid(st: *State, game: anytype, dt: f32) void {
+        if (!(dt > 0 and std.math.isFinite(dt))) return;
+        const Entity = @TypeOf(game.*).EntityType;
+        const ecs = &game.active_world.ecs_backend;
+        var i: usize = 0;
+        while (i < st.grid_walks.count()) {
+            // A previous walk's position hook may have queued new footprints.
+            if (!flushGrid(st, game)) return;
+            if (i >= st.grid_walks.count()) return;
+            const grid = st.grid orelse return;
+            const id = st.grid_walks.keys()[i];
+            const walk = &st.grid_walks.values()[i];
+            const entity: Entity = @intCast(id);
+            if (!ecs.entityExists(entity)) {
+                st.cancelGrid(id);
+                continue;
+            }
+            const pos = ecs.getComponent(entity, Position) orelse {
+                st.cancelGrid(id);
+                settleFailed(game, id, .path_invalidated);
+                continue;
+            };
+            var from = pos.*;
+            const speed = speedOf(game, entity);
+            var budget = if (std.math.isFinite(speed)) @max(0, dt * speed) else 0;
+            var invalid = false;
+            while (walk.next < walk.points.len and budget > 0) {
+                const to = walk.points[walk.next];
+                if (!grid.segment(from, to, null).valid) {
+                    invalid = true;
+                    break;
+                }
+                const length = types.distanceBetween(from, to);
+                if (length <= budget) {
+                    from = to;
+                    budget -= length;
+                    walk.next += 1;
+                } else {
+                    const t = budget / length;
+                    from = .{ .x = from.x + (to.x - from.x) * t, .y = from.y + (to.y - from.y) * t };
+                    break;
+                }
+            }
+            if (invalid) {
+                st.cancelGrid(id);
+                settleFailed(game, id, .path_invalidated);
+                continue;
+            }
+            const arrived = walk.next == walk.points.len;
+            const goal = walk.goal;
+            if (arrived) st.cancelGrid(id);
+            if (!std.meta.eql(pos.*, from)) game.setPosition(entity, from);
+            if (arrived) {
+                // A synchronous position hook may have issued a new order.
+                if (!isNavigating(game, entity)) settleGridArrival(game, st, id, grid, goal);
+            }
+            if (i < st.grid_walks.count() and st.grid_walks.keys()[i] == id) i += 1;
+        }
+        _ = flushGrid(st, game);
     }
 
     /// Epoch-change CMN invalidation (moved in from the game-side
@@ -1706,12 +2117,38 @@ pub fn directStep(pos: Position, target: Position, speed: f32, dt: f32) DirectSt
 /// `pathfinder__arrived` game event (buffered; subscribers see it at
 /// end-of-frame dispatch). `goal_node` is null for direct (off-graph)
 /// arrivals — the CMN then re-resolves from the arrival position.
+fn settleGridArrival(game: anytype, st: *State, id: u64, grid: grid_mod.Grid, cell: grid_algo.Cell) void {
+    const entity: @TypeOf(game.*).EntityType = @intCast(id);
+    const ecs = &game.active_world.ecs_backend;
+    if (!ecs.entityExists(entity)) return;
+    ecs.removeComponent(entity, Navigating);
+    ecs.removeComponent(entity, ClosestMovementNode);
+    _ = st.nearest_node_cache.remove(id);
+    const pos = grid.center(cell);
+    emitArrival(game, id, 0, .{ .grid = .{ .col = cell.col, .row = cell.row, .x = pos.x, .y = pos.y } });
+}
+
+fn emitArrival(game: anytype, id: u64, node_entity: u64, destination: ArrivalDestination) void {
+    const Game = @TypeOf(game.*);
+    if (comptime @hasDecl(Game, "GameEvents") and @typeInfo(Game.GameEvents) == .@"union" and
+        @hasField(Game.GameEvents, "pathfinder__arrived"))
+    {
+        const Payload = @FieldType(Game.GameEvents, "pathfinder__arrived");
+        if (comptime @hasField(Payload, "destination")) {
+            emitGameEvent(game, "pathfinder__arrived", .{ .entity = id, .node_entity = node_entity, .destination = destination });
+            return;
+        }
+    }
+    emitGameEvent(game, "pathfinder__arrived", .{ .entity = id, .node_entity = node_entity });
+}
+
 fn settleArrival(game: anytype, st: *State, entity_id: u64, goal_node: ?NodeId) void {
     const Entity = @TypeOf(game.*).EntityType;
     const entity: Entity = @intCast(entity_id);
     const ecs = &game.active_world.ecs_backend;
     if (!ecs.entityExists(entity)) return;
 
+    const order = if (ecs.getComponent(entity, Navigating)) |nav| nav.* else null;
     ecs.removeComponent(entity, Navigating);
 
     // CMN refresh replaces the old game-side arrival → NeedsClosestNode
@@ -1741,10 +2178,14 @@ fn settleArrival(game: anytype, st: *State, entity_id: u64, goal_node: ?NodeId) 
         ecs.removeComponent(entity, ClosestMovementNode);
     }
 
-    emitGameEvent(game, "pathfinder__arrived", .{
-        .entity = entity_id,
-        .node_entity = node_entity,
-    });
+    const destination: ArrivalDestination = if (goal_node) |nid| blk: {
+        const goal = st.pf.graph.getPosition(nid);
+        break :blk .{ .graph = .{ .node_entity = node_entity, .x = goal.x, .y = goal.y } };
+    } else .{ .direct = .{
+        .x = if (order) |nav| nav.target_x else pos.x,
+        .y = if (order) |nav| nav.target_y else pos.y,
+    } };
+    emitArrival(game, entity_id, node_entity, destination);
 }
 
 /// Settle a failed walk: drop the persisted order and announce. The
